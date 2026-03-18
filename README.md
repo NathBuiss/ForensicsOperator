@@ -24,33 +24,33 @@ A Kubernetes-native forensics analysis platform. Upload Windows forensics artefa
 
 ```
                         ┌─────────────────────────────────────────┐
-                        │              Kubernetes Cluster          │
-                        │                                          │
+                        │              Kubernetes Cluster         │
+                        │                                         │
   Browser               │  ┌──────────┐     ┌──────────────────┐  │
      │                  │  │ Frontend │     │   Kibana (UI)    │  │
      │  HTTPS           │  │  React   │     │  (power users)   │  │
      ▼                  │  └────┬─────┘     └────────┬─────────┘  │
-  ┌──────────┐          │       │                    │             │
+  ┌──────────┐          │       │                    │            │
   │  NGINX   │◄─────────┤  ┌────▼─────────────────────────────┐   │
-  │ Ingress  │          │  │         FastAPI (api-service)     │   │
-  └──────────┘          │  │  /cases  /ingest  /search  /jobs  │   │
-                        │  └────┬────────────────────┬─────────┘   │
-                        │       │                    │             │
+  │ Ingress  │          │  │         FastAPI (api-service)    │   │
+  └──────────┘          │  │  /cases  /ingest  /search  /jobs │   │
+                        │  └────┬───────────────────┬─────────┘   │
+                        │       │                   │             │
                         │  ┌────▼──────┐    ┌───────▼──────────┐  │
                         │  │   Redis   │    │  Elasticsearch   │  │
                         │  │ (job state│    │  (event index)   │  │
                         │  │  & queue) │    └──────────────────┘  │
                         │  └────┬──────┘                          │
-                        │       │ Celery tasks                     │
+                        │       │ Celery tasks                    │
                         │  ┌────▼──────────────────────────────┐  │
-                        │  │     Celery Processor Workers       │  │
-                        │  │  ┌──────────────────────────────┐  │  │
-                        │  │  │       Plugin Loader          │  │  │
-                        │  │  │  evtx / prefetch / plaso /   │  │  │
-                        │  │  │  mft / registry / lnk / ...  │  │  │
-                        │  │  └──────────────────────────────┘  │  │
+                        │  │     Celery Processor Workers      │  │
+                        │  │  ┌──────────────────────────────┐ │  │
+                        │  │  │       Plugin Loader          │ │  │
+                        │  │  │  evtx / prefetch / plaso /   │ │  │
+                        │  │  │  mft / registry / lnk / ...  │ │  │
+                        │  │  └──────────────────────────────┘ │  │
                         │  └──────────┬────────────────────────┘  │
-                        │             │                            │
+                        │             │                           │
                         │  ┌──────────▼───┐   ┌────────────────┐  │
                         │  │    MinIO     │   │  Plugins PVC   │  │
                         │  │ (raw files)  │   │ (shared volume)│  │
