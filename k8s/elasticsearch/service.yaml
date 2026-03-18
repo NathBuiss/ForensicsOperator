@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch-service
+  namespace: forensics-operator
+spec:
+  selector:
+    app: elasticsearch
+  ports:
+    - name: http
+      port: 9200
+      targetPort: 9200
+    - name: transport
+      port: 9300
+      targetPort: 9300
+  clusterIP: None  # Headless for StatefulSet DNS
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: forensics-operator
+spec:
+  selector:
+    app: elasticsearch
+  ports:
+    - port: 9200
+      targetPort: 9200

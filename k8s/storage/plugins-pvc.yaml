@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: plugins-pvc
+  namespace: forensics-operator
+spec:
+  accessModes:
+    - ReadWriteMany   # Shared between api and processor pods
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName: "" # Set to your ReadWriteMany StorageClass (e.g. nfs-client, longhorn)
+  # For single-node dev: use hostPath PV instead

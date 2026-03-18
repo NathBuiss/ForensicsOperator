@@ -1,0 +1,125 @@
+"""
+PluginLoader — discovers and loads BasePlugin subclasses from the plugins volume.
+
+The loader scans the plugins directory for Python modules, imports them, and
+collects all classes that inherit from BasePlugin. No manifest file needed.
+
+Usage:
+    loader = PluginLoader("/app/plugins")
+    plugin_class = loader.get_plugin(Path("Security.evtx"), "application/x-winevt")
+    plugin = plugin_class(context)
+"""
+from __future__ import annotations
+
+import importlib.util
+import inspect
+import logging
+import sys
+from pathlib import Path
+from typing import Optional, Type
+
+logger = logging.getLogger(__name__)
+
+# Import from the shared plugins volume (mounted at /app/plugins)
+PLUGINS_DIR = Path("/app/plugins")
+
+
+class PluginLoader:
+    def __init__(self, plugins_dir: Path = PLUGINS_DIR) -> None:
+        self.plugins_dir = plugins_dir
+        self._plugin_classes: list[type] = []
+        self._loaded = False
+
+    def load(self) -> None:
+        """Scan the plugins directory and import all plugin modules."""
+        from plugins.base_plugin import BasePlugin  # noqa: F401 - needed for isinstance checks
+
+        self._plugin_classes = []
+
+        if not self.plugins_dir.exists():
+            logger.warning("Plugins directory %s does not exist", self.plugins_dir)
+            return
+
+        # Add plugins dir to sys.path so relative imports work
+        plugins_str = str(self.plugins_dir)
+        if plugins_str not in sys.path:
+            sys.path.insert(0, plugins_str)
+
+        # Also add the parent of plugins_dir so "from plugins.base_plugin import ..."
+        # works inside plugin modules
+        parent_str = str(self.plugins_dir.parent)
+        if parent_str not in sys.path:
+            sys.path.insert(0, parent_str)
+
+        # Find all *_plugin.py files recursively
+        for plugin_file in sorted(self.plugins_dir.rglob("*_plugin.py")):
+            if plugin_file.name.startswith("_"):
+                continue
+            self._load_module(plugin_file)
+
+        self._loaded = True
+        logger.info(
+            "Loaded %d plugin class(es): %s",
+            len(self._plugin_classes),
+            [p.PLUGIN_NAME for p in self._plugin_classes],
+        )
+
+    def reload(self) -> None:
+        """Force a fresh scan of the plugins directory."""
+        self._loaded = False
+        self._plugin_classes = []
+        self.load()
+
+    def _load_module(self, path: Path) -> None:
+        module_name = f"_fo_plugin_{path.stem}_{abs(hash(str(path)))}"
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, path)
+            if spec is None or spec.loader is None:
+                logger.warning("Cannot create spec for %s", path)
+                return
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+
+            # Collect BasePlugin subclasses
+            from plugins.base_plugin import BasePlugin
+            for name, obj in inspect.getmembers(module, inspect.isclass):
+                if (
+                    issubclass(obj, BasePlugin)
+                    and obj is not BasePlugin
+                    and obj.PLUGIN_NAME != "base"
+                    and obj not in self._plugin_classes
+                ):
+                    self._plugin_classes.append(obj)
+                    logger.debug("Registered plugin: %s (from %s)", obj.PLUGIN_NAME, path)
+
+        except Exception as exc:
+            logger.error("Failed to load plugin from %s: %s", path, exc, exc_info=True)
+
+    def get_plugin(self, file_path: Path, mime_type: str) -> Optional[type]:
+        """
+        Return the first plugin class that claims the file, or None if none match.
+        """
+        if not self._loaded:
+            self.load()
+
+        for plugin_class in self._plugin_classes:
+            try:
+                if plugin_class.can_handle(file_path, mime_type):
+                    logger.info(
+                        "Plugin %s will handle %s", plugin_class.PLUGIN_NAME, file_path.name
+                    )
+                    return plugin_class
+            except Exception as exc:
+                logger.warning(
+                    "Plugin %s raised in can_handle: %s", plugin_class.PLUGIN_NAME, exc
+                )
+
+        logger.warning("No plugin found for %s (mime: %s)", file_path.name, mime_type)
+        return None
+
+    def list_plugins(self) -> list[dict]:
+        """Return metadata for all loaded plugins."""
+        if not self._loaded:
+            self.load()
+        return [cls.get_info() for cls in self._plugin_classes]

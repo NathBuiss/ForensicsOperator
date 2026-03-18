@@ -1,0 +1,44 @@
+{
+  "index_patterns": ["fo-case-*"],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "refresh_interval": "5s",
+      "index.mapping.total_fields.limit": 2000
+    },
+    "mappings": {
+      "dynamic": "true",
+      "properties": {
+        "fo_id":          { "type": "keyword" },
+        "case_id":        { "type": "keyword" },
+        "artifact_type":  { "type": "keyword" },
+        "source_file":    { "type": "keyword", "index": false },
+        "ingest_job_id":  { "type": "keyword" },
+        "ingested_at":    { "type": "date" },
+        "timestamp":      { "type": "date" },
+        "timestamp_desc": { "type": "keyword" },
+        "message": {
+          "type": "text",
+          "fields": { "keyword": { "type": "keyword", "ignore_above": 512 } }
+        },
+        "tags":           { "type": "keyword" },
+        "analyst_note":   { "type": "text" },
+        "is_flagged":     { "type": "boolean" },
+        "host":           { "type": "object", "dynamic": true },
+        "user":           { "type": "object", "dynamic": true },
+        "process":        { "type": "object", "dynamic": true },
+        "network":        { "type": "object", "dynamic": true },
+        "mitre":          { "type": "object", "dynamic": true },
+        "evtx":           { "type": "object", "dynamic": true },
+        "prefetch":       { "type": "object", "dynamic": true },
+        "mft":            { "type": "object", "dynamic": true },
+        "registry":       { "type": "object", "dynamic": true },
+        "lnk":            { "type": "object", "dynamic": true },
+        "plaso":          { "type": "object", "dynamic": true },
+        "raw":            { "type": "object", "enabled": false }
+      }
+    }
+  },
+  "priority": 100
+}
