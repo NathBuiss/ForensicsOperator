@@ -1,29 +1,47 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
+import { useLocation } from 'react-router-dom'
+import { Search as SearchIcon, Bookmark, BookmarkCheck, Download, X, Trash2, Loader2 } from 'lucide-react'
 import { api } from '../api/client'
 import EventDetail from '../components/shared/EventDetail'
 
 const ARTIFACT_COLORS = {
-  evtx: 'bg-blue-900/40 text-blue-400',
-  prefetch: 'bg-yellow-900/40 text-yellow-400',
-  mft: 'bg-purple-900/40 text-purple-400',
-  registry: 'bg-orange-900/40 text-orange-400',
-  lnk: 'bg-pink-900/40 text-pink-400',
-  generic: 'bg-gray-700 text-gray-400',
+  evtx:'bg-blue-900/40 text-blue-400', prefetch:'bg-yellow-900/40 text-yellow-400',
+  mft:'bg-purple-900/40 text-purple-400', registry:'bg-orange-900/40 text-orange-400',
+  lnk:'bg-pink-900/40 text-pink-400', generic:'bg-gray-700 text-gray-400',
 }
+const PAGE_SIZE = 50
 
 export default function Search({ caseId }) {
-  const [query, setQuery] = useState('')
-  const [results, setResults] = useState([])
-  const [total, setTotal] = useState(0)
-  const [facets, setFacets] = useState({})
-  const [loading, setLoading] = useState(false)
-  const [page, setPage] = useState(0)
-  const [filters, setFilters] = useState({})
+  const location = useLocation()
+  const [query, setQuery]         = useState('')
+  const [inputVal, setInputVal]   = useState('')
+  const [results, setResults]     = useState([])
+  const [total, setTotal]         = useState(0)
+  const [facets, setFacets]       = useState({})
+  const [loading, setLoading]     = useState(false)
+  const [page, setPage]           = useState(0)
+  const [filters, setFilters]     = useState({})
   const [selectedEvent, setSelectedEvent] = useState(null)
+  const [savedSearches, setSavedSearches] = useState([])
+  const [saveName, setSaveName]   = useState('')
+  const [showSave, setShowSave]   = useState(false)
 
-  const PAGE_SIZE = 50
+  // Load saved searches
+  useEffect(() => {
+    api.savedSearches.list(caseId).then(r => setSavedSearches(r.searches || [])).catch(() => {})
+  }, [caseId])
+
+  // Handle entity pivot from EventDetail
+  useEffect(() => {
+    const pq = location.state?.pivotQuery
+    if (pq) {
+      setInputVal(pq)
+      setQuery(pq)
+    }
+  }, [location.state?.pivotQuery])
 
   const doSearch = useCallback(async (q = query, f = filters, pg = 0) => {
+    if (!q && !Object.keys(f).length) return
     setLoading(true)
     try {
       const params = { q, page: pg, size: PAGE_SIZE, ...f }
@@ -35,147 +53,204 @@ export default function Search({ caseId }) {
       setTotal(r.total || 0)
       setFacets(facsR.facets || {})
       setPage(pg)
-    } catch (e) {
-      console.error(e)
-    } finally {
-      setLoading(false)
-    }
+    } catch (e) { console.error(e) }
+    finally { setLoading(false) }
   }, [caseId, query, filters])
+
+  // Auto-run if pivot query came in
+  useEffect(() => {
+    if (query) doSearch(query, filters, 0)
+  }, [query])
 
   function handleSearch(e) {
     e.preventDefault()
-    doSearch(query, filters, 0)
+    setQuery(inputVal)
+    doSearch(inputVal, filters, 0)
   }
 
   function toggleFilter(field, value) {
     setFilters(prev => {
-      const cur = prev[field]
-      if (cur === value) {
-        const next = { ...prev }
-        delete next[field]
-        return next
-      }
-      return { ...prev, [field]: value }
+      const next = { ...prev }
+      if (next[field] === value) delete next[field]
+      else next[field] = value
+      return next
     })
+  }
+
+  async function saveSearch() {
+    if (!saveName.trim()) return
+    const s = await api.savedSearches.create(caseId, { name: saveName.trim(), query, filters })
+    setSavedSearches(p => [...p, s])
+    setSaveName(''); setShowSave(false)
+  }
+
+  async function deleteSavedSearch(id) {
+    await api.savedSearches.delete(caseId, id)
+    setSavedSearches(p => p.filter(s => s.id !== id))
+  }
+
+  function loadSavedSearch(s) {
+    setInputVal(s.query)
+    setQuery(s.query)
+    setFilters(s.filters || {})
+  }
+
+  function downloadCsv() {
+    window.open(api.export.csv(caseId, { q: query, ...filters }))
   }
 
   return (
     <div className="flex h-full">
-      {/* Facet sidebar */}
-      <div className="w-52 flex-shrink-0 bg-gray-900 border-r border-gray-700 p-3 overflow-y-auto">
-        <p className="text-xs text-gray-500 uppercase tracking-wider mb-3">Facets</p>
-
-        {Object.entries({
-          by_artifact_type: 'Artifact Type',
-          by_hostname: 'Hostname',
-          by_username: 'Username',
-          by_event_id: 'Event ID',
-          by_channel: 'Channel',
-        }).map(([key, label]) => {
-          const buckets = facets[key]?.buckets || []
-          if (!buckets.length) return null
-          return (
-            <div key={key} className="mb-4">
-              <p className="text-xs text-gray-400 mb-1 font-medium">{label}</p>
-              {buckets.slice(0, 10).map(b => (
-                <button key={b.key}
-                  onClick={() => toggleFilter(
-                    key === 'by_artifact_type' ? 'artifact_type' :
-                    key === 'by_hostname' ? 'hostname' :
-                    key === 'by_username' ? 'username' :
-                    key === 'by_event_id' ? 'event_id' : 'channel',
-                    b.key
-                  )}
-                  className="flex items-center justify-between w-full px-2 py-0.5 rounded text-xs hover:bg-gray-700 text-gray-400 hover:text-gray-200 mb-0.5">
-                  <span className="truncate">{b.key}</span>
-                  <span className="text-gray-600 ml-1">{b.doc_count}</span>
-                </button>
-              ))}
+      {/* Left sidebar: facets + saved searches */}
+      <div className="w-52 flex-shrink-0 bg-gray-900/50 border-r border-gray-700/60 flex flex-col overflow-y-auto">
+        {/* Saved searches */}
+        <div className="p-3 border-b border-gray-700/60">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest flex items-center gap-1">
+              <Bookmark size={9} /> Saved
+            </p>
+            {query && (
+              <button onClick={() => setShowSave(v => !v)}
+                className="text-[10px] text-indigo-400 hover:text-indigo-300">+ Save</button>
+            )}
+          </div>
+          {showSave && (
+            <div className="mb-2 flex gap-1">
+              <input value={saveName} onChange={e => setSaveName(e.target.value)}
+                placeholder="Name…" className="input flex-1 text-xs py-1" />
+              <button onClick={saveSearch} className="btn-primary text-xs px-2">
+                <BookmarkCheck size={11} />
+              </button>
             </div>
-          )
-        })}
+          )}
+          {savedSearches.length === 0 && (
+            <p className="text-[10px] text-gray-600 italic">No saved searches yet</p>
+          )}
+          {savedSearches.map(s => (
+            <div key={s.id} className="flex items-center gap-1 mb-0.5 group">
+              <button onClick={() => loadSavedSearch(s)}
+                className="flex-1 text-left text-xs text-gray-400 hover:text-gray-200 truncate px-1 py-0.5 rounded hover:bg-gray-700/50 transition-colors">
+                {s.name}
+              </button>
+              <button onClick={() => deleteSavedSearch(s.id)}
+                className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-gray-700/50 text-gray-600 hover:text-red-400 transition-all">
+                <Trash2 size={10} />
+              </button>
+            </div>
+          ))}
+        </div>
+
+        {/* Facets */}
+        <div className="p-3 flex-1">
+          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest mb-2">Facets</p>
+          {Object.entries({
+            by_artifact_type: 'Artifact Type',
+            by_hostname: 'Hostname',
+            by_username: 'Username',
+            by_event_id: 'Event ID',
+            by_channel: 'Channel',
+          }).map(([key, label]) => {
+            const buckets = facets[key]?.buckets || []
+            if (!buckets.length) return null
+            const filterKey = key === 'by_artifact_type' ? 'artifact_type' : key === 'by_hostname' ? 'hostname'
+              : key === 'by_username' ? 'username' : key === 'by_event_id' ? 'event_id' : 'channel'
+            return (
+              <div key={key} className="mb-3">
+                <p className="text-[10px] font-medium text-gray-500 mb-1">{label}</p>
+                {buckets.slice(0, 10).map(b => (
+                  <button key={b.key}
+                    onClick={() => toggleFilter(filterKey, b.key)}
+                    className={`flex items-center justify-between w-full px-2 py-0.5 rounded text-xs mb-0.5 transition-colors
+                      ${filters[filterKey] === b.key
+                        ? 'bg-indigo-900/40 text-indigo-300'
+                        : 'text-gray-400 hover:bg-gray-700/50 hover:text-gray-200'}`}>
+                    <span className="truncate">{b.key}</span>
+                    <span className="text-gray-600 ml-1 flex-shrink-0">{b.doc_count}</span>
+                  </button>
+                ))}
+              </div>
+            )
+          })}
+        </div>
       </div>
 
-      {/* Main search area */}
+      {/* Main */}
       <div className="flex-1 flex flex-col overflow-hidden">
-        {/* Search bar */}
-        <form onSubmit={handleSearch} className="p-3 border-b border-gray-700 flex gap-2">
-          <input
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-            placeholder="Search events... (e.g. mimikatz, EventID:4624, hostname:DESKTOP-*)"
-            className="input flex-1"
-          />
-          <button type="submit" className="btn-primary">Search</button>
+        <form onSubmit={handleSearch} className="p-3 border-b border-gray-700/60 flex gap-2">
+          <div className="relative flex-1">
+            <SearchIcon size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+            <input value={inputVal} onChange={e => setInputVal(e.target.value)}
+              placeholder='Search… "mimikatz", "EventID:4624", "hostname:DC*"'
+              className="input-lg pl-9 text-xs" />
+          </div>
+          <button type="submit" className="btn-primary text-xs">Search</button>
           {Object.keys(filters).length > 0 && (
-            <button type="button" onClick={() => { setFilters({}); doSearch(query, {}, 0) }}
-              className="btn-ghost text-xs">Clear filters</button>
+            <button type="button" onClick={() => setFilters({})} className="btn-ghost text-xs"><X size={13} /></button>
+          )}
+          {results.length > 0 && (
+            <button type="button" onClick={downloadCsv} className="btn-ghost text-xs" title="Export CSV">
+              <Download size={13} />
+            </button>
           )}
         </form>
 
-        {/* Active filters */}
         {Object.entries(filters).length > 0 && (
-          <div className="px-3 py-1.5 border-b border-gray-700 flex flex-wrap gap-1">
+          <div className="px-3 py-1.5 border-b border-gray-700/60 flex flex-wrap gap-1">
             {Object.entries(filters).map(([k, v]) => (
-              <span key={k} className="badge bg-indigo-900/40 text-indigo-400 cursor-pointer"
-                onClick={() => toggleFilter(k, v)}>
-                {k}: {v} ×
-              </span>
+              <span key={k} className="badge bg-indigo-900/40 text-indigo-400 border border-indigo-800/40 cursor-pointer hover:bg-indigo-900/60"
+                onClick={() => toggleFilter(k, v)}>{k}: {v} ×</span>
             ))}
           </div>
         )}
 
-        {/* Results */}
         <div className="flex-1 overflow-y-auto">
-          {loading && <div className="p-4 text-gray-500 text-xs">Searching...</div>}
-          {!loading && results.length === 0 && (
-            <div className="p-8 text-center text-gray-500 text-sm">
-              {query || Object.keys(filters).length ? 'No results.' : 'Enter a search query above.'}
+          {loading && (
+            <div className="flex items-center justify-center h-24 text-gray-500 text-xs gap-2">
+              <Loader2 size={14} className="animate-spin" /> Searching…
             </div>
           )}
-
+          {!loading && results.length === 0 && (
+            <div className="flex flex-col items-center justify-center h-48 text-center">
+              <SearchIcon size={28} className="text-gray-700 mb-3" />
+              <p className="text-gray-500 text-sm">{query || Object.keys(filters).length ? 'No results.' : 'Enter a search query above.'}</p>
+            </div>
+          )}
           {results.length > 0 && (
             <>
-              <div className="px-3 py-1.5 text-xs text-gray-500 border-b border-gray-700">
+              <div className="px-3 py-1.5 text-[10px] text-gray-500 border-b border-gray-700/60">
                 {total.toLocaleString()} results
               </div>
               <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-gray-900 border-b border-gray-700">
+                <thead className="sticky top-0 bg-gray-900 border-b border-gray-700/60">
                   <tr>
-                    <th className="text-left px-3 py-2 text-gray-500 font-medium w-40">Timestamp</th>
-                    <th className="text-left px-3 py-2 text-gray-500 font-medium w-24">Type</th>
-                    <th className="text-left px-3 py-2 text-gray-500 font-medium w-28">Host</th>
-                    <th className="text-left px-3 py-2 text-gray-500 font-medium">Message</th>
+                    <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-40">Timestamp</th>
+                    <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-24">Type</th>
+                    <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-28">Host</th>
+                    <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Message</th>
                   </tr>
                 </thead>
                 <tbody>
                   {results.map((ev, i) => {
-                    const ts = ev.timestamp
-                      ? new Date(ev.timestamp).toISOString().replace('T', ' ').slice(0, 19)
-                      : '—'
+                    const ts = ev.timestamp ? new Date(ev.timestamp).toISOString().replace('T',' ').slice(0,19) : '—'
                     const type = ev.artifact_type || 'generic'
                     return (
                       <tr key={ev.fo_id || i}
-                        className="border-b border-gray-800/50 hover:bg-gray-800/40 cursor-pointer"
+                        className="border-b border-gray-800/40 hover:bg-gray-800/40 cursor-pointer transition-colors"
                         onClick={() => setSelectedEvent(ev)}>
-                        <td className="px-3 py-1.5 text-gray-500 font-mono whitespace-nowrap">{ts}</td>
-                        <td className="px-3 py-1.5">
-                          <span className={`badge ${ARTIFACT_COLORS[type] || ARTIFACT_COLORS.generic}`}>
-                            {type}
-                          </span>
-                        </td>
-                        <td className="px-3 py-1.5 text-gray-400">{ev.host?.hostname || ''}</td>
-                        <td className="px-3 py-1.5 text-gray-300 truncate max-w-md">{ev.message}</td>
+                        <td className="px-3 py-2 text-gray-500 font-mono whitespace-nowrap tabular-nums">{ts}</td>
+                        <td className="px-3 py-2"><span className={`badge ${ARTIFACT_COLORS[type] || ARTIFACT_COLORS.generic}`}>{type}</span></td>
+                        <td className="px-3 py-2 text-gray-400 truncate">{ev.host?.hostname || ''}</td>
+                        <td className="px-3 py-2 text-gray-300 max-w-md"><span className="line-clamp-1">{ev.message}</span></td>
                       </tr>
                     )
                   })}
                 </tbody>
               </table>
-
               {results.length < total && (
                 <div className="p-3 text-center">
-                  <button onClick={() => doSearch(query, filters, page + 1)}
-                    className="btn-ghost text-xs">Load more</button>
+                  <button onClick={() => doSearch(query, filters, page + 1)} className="btn-ghost text-xs">
+                    Load more
+                  </button>
                 </div>
               )}
             </>
@@ -183,9 +258,7 @@ export default function Search({ caseId }) {
         </div>
       </div>
 
-      {selectedEvent && (
-        <EventDetail event={selectedEvent} caseId={caseId} onClose={() => setSelectedEvent(null)} />
-      )}
+      {selectedEvent && <EventDetail event={selectedEvent} caseId={caseId} onClose={() => setSelectedEvent(null)} />}
     </div>
   )
 }

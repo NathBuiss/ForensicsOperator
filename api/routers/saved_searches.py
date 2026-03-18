@@ -1,0 +1,40 @@
+"""Saved search bookmarks per case — stored in Redis."""
+import json, uuid
+from datetime import datetime
+from fastapi import APIRouter
+from pydantic import BaseModel
+import redis as redis_lib
+from config import settings
+
+router = APIRouter(tags=["saved-searches"])
+
+def _r():
+    return redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
+
+class SavedSearchIn(BaseModel):
+    name: str
+    query: str = ""
+    filters: dict = {}
+
+@router.get("/cases/{case_id}/saved-searches")
+def list_saved_searches(case_id: str):
+    data = _r().get(f"fo:saved_searches:{case_id}")
+    return {"searches": json.loads(data) if data else []}
+
+@router.post("/cases/{case_id}/saved-searches")
+def create_saved_search(case_id: str, body: SavedSearchIn):
+    r = _r()
+    key = f"fo:saved_searches:{case_id}"
+    searches = json.loads(r.get(key) or "[]")
+    new = {"id": str(uuid.uuid4())[:8], "name": body.name, "query": body.query,
+           "filters": body.filters, "created_at": datetime.utcnow().isoformat()}
+    searches.append(new)
+    r.set(key, json.dumps(searches))
+    return new
+
+@router.delete("/cases/{case_id}/saved-searches/{search_id}", status_code=204)
+def delete_saved_search(case_id: str, search_id: str):
+    r = _r()
+    key = f"fo:saved_searches:{case_id}"
+    searches = json.loads(r.get(key) or "[]")
+    r.set(key, json.dumps([s for s in searches if s["id"] != search_id]))

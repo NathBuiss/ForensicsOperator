@@ -3,6 +3,7 @@ import Layout from './components/layout/Layout'
 import Dashboard from './pages/Dashboard'
 import CaseDetail from './pages/CaseDetail'
 import Plugins from './pages/Plugins'
+import Compare from './pages/Compare'
 
 export default function App() {
   return (
@@ -12,6 +13,7 @@ export default function App() {
           <Route index element={<Dashboard />} />
           <Route path="cases/:caseId/*" element={<CaseDetail />} />
           <Route path="plugins" element={<Plugins />} />
+          <Route path="compare" element={<Compare />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

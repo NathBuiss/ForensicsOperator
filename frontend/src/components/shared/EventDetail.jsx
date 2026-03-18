@@ -1,15 +1,23 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { X, Flag, Tag, Plus, Save, Search, Shield, AlertTriangle } from 'lucide-react'
 import { api } from '../../api/client'
+import { extractIocs, iocSearchQuery } from '../../utils/ioc'
+import { getMitre, TACTIC_COLORS } from '../../utils/mitre'
 
 export default function EventDetail({ event: initialEvent, caseId, onClose }) {
   const [event, setEvent] = useState(initialEvent)
-  const [note, setNote] = useState(event.analyst_note || '')
+  const [note, setNote]   = useState(event.analyst_note || '')
   const [tagInput, setTagInput] = useState('')
-  const [saving, setSaving] = useState(false)
+  const [saving, setSaving]     = useState(false)
+  const navigate = useNavigate()
+
+  const mitre = getMitre(event)
+  const iocs  = extractIocs(event.message)
 
   async function toggleFlag() {
     const r = await api.search.flagEvent(caseId, event.fo_id)
-    setEvent(prev => ({ ...prev, is_flagged: r.is_flagged }))
+    setEvent(p => ({ ...p, is_flagged: r.is_flagged }))
   }
 
   async function saveNote() {
@@ -23,68 +31,136 @@ export default function EventDetail({ event: initialEvent, caseId, onClose }) {
     if (!tagInput.trim()) return
     const tags = [...(event.tags || []), tagInput.trim()]
     await api.search.tagEvent(caseId, event.fo_id, tags)
-    setEvent(prev => ({ ...prev, tags }))
+    setEvent(p => ({ ...p, tags }))
     setTagInput('')
   }
 
   async function removeTag(tag) {
     const tags = (event.tags || []).filter(t => t !== tag)
     await api.search.tagEvent(caseId, event.fo_id, tags)
-    setEvent(prev => ({ ...prev, tags }))
+    setEvent(p => ({ ...p, tags }))
+  }
+
+  function pivot(query) {
+    navigate('../search', { state: { pivotQuery: query } })
   }
 
   const ts = event.timestamp
     ? new Date(event.timestamp).toISOString().replace('T', ' ').slice(0, 23)
     : '—'
 
-  // Collect artifact-specific fields
   const artifactData = event[event.artifact_type] || {}
 
+  const ARTIFACT_COLOR = {
+    evtx: 'bg-blue-900/40 text-blue-400', prefetch: 'bg-yellow-900/40 text-yellow-400',
+    mft: 'bg-purple-900/40 text-purple-400', registry: 'bg-orange-900/40 text-orange-400',
+    lnk: 'bg-pink-900/40 text-pink-400', timeline: 'bg-teal-900/40 text-teal-400',
+  }
+
   return (
-    <div className="w-96 flex-shrink-0 bg-gray-900 border-l border-gray-700 flex flex-col overflow-hidden">
+    <div className="w-96 flex-shrink-0 bg-gray-900/95 border-l border-gray-700/60 flex flex-col overflow-hidden">
       {/* Header */}
-      <div className="p-3 border-b border-gray-700 flex items-start justify-between">
-        <div>
-          <span className="badge bg-blue-900/40 text-blue-400 mb-1">{event.artifact_type}</span>
-          <p className="text-xs text-gray-300 break-words">{event.message}</p>
+      <div className="p-3 border-b border-gray-700/60 flex items-start justify-between gap-2">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1 flex-wrap">
+            <span className={`badge ${ARTIFACT_COLOR[event.artifact_type] || 'bg-gray-700 text-gray-400'}`}>
+              {event.artifact_type}
+            </span>
+            {mitre && (
+              <span className={`badge border text-[10px] ${TACTIC_COLORS[mitre.tactic] || 'bg-gray-700 text-gray-400'}`}
+                title={mitre.tactic}>
+                <Shield size={9} className="mr-1" />
+                {mitre.technique_id}
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-gray-300 break-words line-clamp-3">{event.message}</p>
         </div>
-        <button onClick={onClose} className="text-gray-500 hover:text-gray-300 ml-2 flex-shrink-0">✕</button>
+        <button onClick={onClose} className="btn-ghost p-1 flex-shrink-0">
+          <X size={14} />
+        </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-3 space-y-3 text-xs">
+      <div className="flex-1 overflow-y-auto p-3 space-y-4 text-xs">
         {/* Actions */}
         <div className="flex gap-2">
           <button onClick={toggleFlag}
-            className={`btn text-xs ${event.is_flagged ? 'bg-red-900/50 text-red-300' : 'btn-ghost'}`}>
-            {event.is_flagged ? '🚩 Flagged' : '🏳 Flag'}
+            className={`btn text-xs ${event.is_flagged ? 'bg-red-900/50 text-red-300 border border-red-800/50' : 'btn-ghost'}`}>
+            <Flag size={12} />
+            {event.is_flagged ? 'Flagged' : 'Flag'}
           </button>
         </div>
 
+        {/* MITRE ATT&CK */}
+        {mitre && (
+          <div className="rounded-lg border border-gray-700/40 bg-gray-800/40 p-2.5">
+            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5 flex items-center gap-1">
+              <Shield size={9} /> MITRE ATT&CK
+            </p>
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <p className="text-gray-200 font-medium">{mitre.technique_name}</p>
+                <p className="text-gray-500 text-[10px]">{mitre.tactic}</p>
+              </div>
+              <span className="badge bg-gray-700/60 text-gray-400 border border-gray-600/40 font-mono flex-shrink-0">
+                {mitre.technique_id}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* IOC Panel */}
+        {iocs.length > 0 && (
+          <div className="rounded-lg border border-yellow-900/40 bg-yellow-950/10 p-2.5">
+            <p className="text-[10px] font-semibold text-yellow-600 uppercase tracking-wider mb-2 flex items-center gap-1">
+              <AlertTriangle size={9} /> IOCs Detected ({iocs.length})
+            </p>
+            <div className="space-y-1">
+              {iocs.map((ioc, i) => (
+                <div key={i} className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="text-[10px] text-gray-600 flex-shrink-0 w-12">{ioc.type}</span>
+                    <span className={`font-mono text-[10px] truncate ${ioc.color}`}>{ioc.value}</span>
+                  </div>
+                  <button onClick={() => pivot(iocSearchQuery(ioc))}
+                    className="flex-shrink-0 p-1 rounded hover:bg-gray-700/50 text-gray-600 hover:text-gray-300 transition-colors"
+                    title="Find all events with this IOC">
+                    <Search size={10} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Tags */}
         <div>
-          <p className="text-gray-500 mb-1">Tags</p>
-          <div className="flex flex-wrap gap-1 mb-1">
+          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5 flex items-center gap-1">
+            <Tag size={9} /> Tags
+          </p>
+          <div className="flex flex-wrap gap-1 mb-1.5">
             {(event.tags || []).map(t => (
-              <span key={t} className="badge bg-indigo-900/40 text-indigo-400 cursor-pointer"
+              <span key={t} className="badge bg-indigo-900/40 text-indigo-400 border border-indigo-800/40 cursor-pointer hover:bg-indigo-900/60 transition-colors"
                 onClick={() => removeTag(t)}>{t} ×</span>
             ))}
           </div>
           <form onSubmit={addTag} className="flex gap-1">
             <input value={tagInput} onChange={e => setTagInput(e.target.value)}
-              placeholder="Add tag..." className="input flex-1 text-xs" />
-            <button type="submit" className="btn-ghost text-xs">+</button>
+              placeholder="Add tag…" className="input flex-1 py-1 text-xs" />
+            <button type="submit" className="btn-ghost px-2 text-xs"><Plus size={12} /></button>
           </form>
         </div>
 
-        {/* Analyst note */}
+        {/* Analyst Note */}
         <div>
-          <p className="text-gray-500 mb-1">Analyst Note</p>
+          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+            Analyst Note
+          </p>
           <textarea value={note} onChange={e => setNote(e.target.value)}
             className="input w-full h-20 resize-none text-xs"
-            placeholder="Add investigation notes..." />
-          <button onClick={saveNote} disabled={saving}
-            className="btn-primary text-xs mt-1">
-            {saving ? 'Saving...' : 'Save Note'}
+            placeholder="Investigation notes…" />
+          <button onClick={saveNote} disabled={saving} className="btn-primary text-xs mt-1.5">
+            <Save size={11} /> {saving ? 'Saving…' : 'Save Note'}
           </button>
         </div>
 
@@ -98,8 +174,7 @@ export default function EventDetail({ event: initialEvent, caseId, onClose }) {
           Process: event.process?.path || event.process?.name,
           PID: event.process?.pid,
           'Src IP': event.network?.src_ip,
-          'MITRE': event.mitre?.technique_id ? `${event.mitre.technique_id} – ${event.mitre.technique_name}` : undefined,
-        }} />
+        }} pivotFields={['Host', 'User', 'Src IP']} onPivot={pivot} />
 
         {/* Artifact-specific */}
         {Object.keys(artifactData).length > 0 && (
@@ -112,32 +187,39 @@ export default function EventDetail({ event: initialEvent, caseId, onClose }) {
           } />
         )}
 
-        {/* Job info */}
+        {/* Metadata */}
         <FieldGroup title="Metadata" fields={{
           'Ingest Job': event.ingest_job_id,
-          'Source': event.source_file,
-          'Ingested': event.ingested_at,
+          Source: event.source_file,
+          Ingested: event.ingested_at,
         }} />
       </div>
     </div>
   )
 }
 
-function FieldGroup({ title, fields }) {
+function FieldGroup({ title, fields, pivotFields = [], onPivot }) {
   const entries = Object.entries(fields).filter(([, v]) => v !== null && v !== undefined && v !== '')
   if (!entries.length) return null
   return (
     <div>
-      <p className="text-gray-500 uppercase tracking-wider text-xs mb-1">{title}</p>
-      <div className="space-y-0.5">
+      <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest mb-1.5">{title}</p>
+      <div className="space-y-1">
         {entries.map(([k, v]) => (
-          <div key={k} className="flex gap-2">
-            <span className="text-gray-600 flex-shrink-0 w-24 truncate">{k}</span>
-            <span className="text-gray-300 break-all font-mono text-xs">
+          <div key={k} className="flex gap-2 items-start">
+            <span className="text-gray-600 flex-shrink-0 w-20 text-[10px] pt-0.5">{k}</span>
+            <span className="text-gray-300 break-all font-mono text-[10px] flex-1">
               {typeof v === 'string' && v.includes('\n')
                 ? <pre className="whitespace-pre-wrap">{v}</pre>
                 : String(v)}
             </span>
+            {pivotFields.includes(k) && onPivot && v && (
+              <button onClick={() => onPivot(`"${v}"`)}
+                className="flex-shrink-0 p-0.5 rounded hover:bg-gray-700/50 text-gray-700 hover:text-indigo-400 transition-colors"
+                title={`Search all events for: ${v}`}>
+                <Search size={10} />
+              </button>
+            )}
           </div>
         ))}
       </div>

@@ -1,9 +1,11 @@
 import { useParams, useNavigate, Routes, Route, NavLink, Navigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
+import { AlertTriangle } from 'lucide-react'
 import { api } from '../api/client'
 import Timeline from './Timeline'
 import Search from './Search'
 import Ingest from './Ingest'
+import AlertRules from './AlertRules'
 
 export default function CaseDetail() {
   const { caseId } = useParams()
@@ -25,6 +27,7 @@ export default function CaseDetail() {
     { path: 'timeline', label: 'Timeline' },
     { path: 'search', label: 'Search' },
     { path: 'ingest', label: 'Ingest' },
+    { path: 'alerts', label: 'Alerts', icon: AlertTriangle },
   ]
 
   return (
@@ -60,12 +63,13 @@ export default function CaseDetail() {
               key={tab.path}
               to={tab.path}
               className={({ isActive }) =>
-                `px-3 py-1 text-xs rounded transition-colors ${
+                `px-3 py-1 text-xs rounded transition-colors flex items-center gap-1 ${
                   isActive
                     ? 'bg-indigo-600 text-white'
                     : 'text-gray-400 hover:text-gray-200 hover:bg-gray-700'
                 }`
               }>
+              {tab.icon && <tab.icon size={11} />}
               {tab.label}
             </NavLink>
           ))}
@@ -80,6 +84,7 @@ export default function CaseDetail() {
           <Route path="search" element={<Search caseId={caseId} />} />
           <Route path="ingest" element={<Ingest caseId={caseId} onComplete={() =>
             api.cases.get(caseId).then(setCaseData)} />} />
+          <Route path="alerts" element={<AlertRules caseId={caseId} />} />
         </Routes>
       </div>
     </div>

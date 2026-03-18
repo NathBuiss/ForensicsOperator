@@ -11,17 +11,6 @@ spec:
     scheme: https
     permanent: true
 ---
-# Strip /kibana prefix before forwarding to Kibana
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata:
-  name: strip-kibana
-  namespace: forensics-operator
-spec:
-  stripPrefix:
-    prefixes:
-      - /kibana
----
 # Strip /minio prefix before forwarding to MinIO console
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -85,6 +74,8 @@ spec:
                   number: 8000
 ---
 # ── HTTPS: Kibana (/kibana → Kibana on :5601) ─────────────────────────────────
+# No strip-prefix middleware here — Kibana handles the /kibana prefix itself
+# via SERVER_BASEPATH + SERVER_REWRITEBASEPATH=true in its deployment env vars.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -92,7 +83,6 @@ metadata:
   namespace: forensics-operator
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
-    traefik.ingress.kubernetes.io/router.middlewares: forensics-operator-strip-kibana@kubernetescrd
 spec:
   ingressClassName: traefik
   tls:

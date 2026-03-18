@@ -57,9 +57,30 @@ export const api = {
   plugins: {
     list: () => request('GET', '/plugins'),
     reload: () => request('POST', '/plugins/reload'),
+    upload: (formData) => request('POST', '/plugins/upload', formData),
   },
 
   health: {
     ready: () => request('GET', '/health/ready'),
+  },
+
+  savedSearches: {
+    list: (caseId) => request('GET', `/cases/${caseId}/saved-searches`),
+    create: (caseId, data) => request('POST', `/cases/${caseId}/saved-searches`, data),
+    delete: (caseId, id) => request('DELETE', `/cases/${caseId}/saved-searches/${id}`),
+  },
+
+  alertRules: {
+    list: (caseId) => request('GET', `/cases/${caseId}/alert-rules`),
+    create: (caseId, data) => request('POST', `/cases/${caseId}/alert-rules`, data),
+    delete: (caseId, id) => request('DELETE', `/cases/${caseId}/alert-rules/${id}`),
+    check: (caseId) => request('POST', `/cases/${caseId}/alert-rules/check`),
+  },
+
+  export: {
+    csv: (caseId, params = {}) => {
+      const q = new URLSearchParams(params).toString()
+      return `/api/v1/cases/${caseId}/export/csv${q ? '?' + q : ''}`
+    },
   },
 }
