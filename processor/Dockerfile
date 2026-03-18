@@ -3,15 +3,14 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
 
-# Install system deps + Plaso from GIFT PPA
+# Install system deps
+# Note: plaso-tools (psort) is NOT installed here because the GIFT PPA requires
+# a gpg-agent that is unavailable in Docker build contexts. The plaso plugin
+# falls back to reading .plaso SQLite storage files directly instead.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-dev \
-    software-properties-common \
     libmagic1 libmagic-dev \
     wget curl \
-    && add-apt-repository ppa:gift/stable -y \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends plaso-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Python deps
