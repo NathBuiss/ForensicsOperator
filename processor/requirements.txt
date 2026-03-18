@@ -3,8 +3,8 @@ redis==5.0.4
 minio==7.2.7
 python-evtx==0.7.4
 python-registry==1.3.1
-LnkParse3==1.4.1
-mft==0.2.4
+LnkParse3==1.4.0
+mft==0.7.0
 python-magic==0.4.27
 # pyscca (libscca-python) — install manually if MAM-compressed prefetch support needed
 # pip install libscca-python
