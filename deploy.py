@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -46,10 +47,6 @@ APPLY_ORDER = [
 
 SERVICES = ["api", "processor", "frontend"]
 
-NGINX_INGRESS_MANIFEST = (
-    "https://raw.githubusercontent.com/kubernetes/ingress-nginx"
-    "/controller-v1.10.1/deploy/static/provider/cloud/deploy.yaml"
-)
 
 # ── Output helpers ────────────────────────────────────────────────────────────
 
@@ -369,24 +366,114 @@ def _load_k3s(cfg):
         pass
 
 
-# ── NGINX Ingress ─────────────────────────────────────────────────────────────
+# ── Traefik Ingress ───────────────────────────────────────────────────────────
 
-def ensure_nginx_ingress():
-    step("Checking NGINX Ingress Controller")
-    r = run(["kubectl", "get", "ns", "ingress-nginx"], capture=True, check=False)
+def ensure_traefik_ingress():
+    """
+    k3s ships with Traefik pre-installed in kube-system.
+    For other clusters (minikube, kind, k3d) we check that the traefik
+    IngressClass exists — if not, we print a helpful hint and continue
+    (the user may have installed Traefik themselves or use a different class).
+    """
+    step("Checking Traefik Ingress Controller")
+    r = run(["kubectl", "get", "ingressclass", "traefik"], capture=True, check=False)
     if r.returncode == 0:
-        ok("Already installed")
+        ok("Traefik IngressClass found")
         return
-    print("  Not found — installing ...")
-    run(["kubectl", "apply", "-f", NGINX_INGRESS_MANIFEST])
-    print("  Waiting for ingress-nginx to become ready (~60 s) ...")
-    run([
-        "kubectl", "rollout", "status",
-        "deployment/ingress-nginx-controller",
-        "-n", "ingress-nginx",
-        "--timeout=120s",
-    ])
-    ok("NGINX Ingress Controller ready")
+    warn(
+        "traefik IngressClass not found.\n\n"
+        "  k3s includes Traefik automatically.\n"
+        "  For other clusters, install Traefik:\n"
+        "    helm repo add traefik https://traefik.github.io/charts\n"
+        "    helm install traefik traefik/traefik -n kube-system\n\n"
+        "  Continuing anyway — apply will still work if Traefik is present."
+    )
+
+
+# ── TLS certificate ───────────────────────────────────────────────────────────
+
+def _ensure_namespace():
+    """Apply namespace.yaml so the namespace exists before we create Secrets."""
+    subprocess.run(
+        ["kubectl", "apply", "-f", str(K8S / "namespace.yaml")],
+        capture_output=True, text=True,
+    )
+
+
+def setup_tls_secret(cfg):
+    """
+    Create the 'forensics-tls' K8s Secret used by the Traefik Ingress for TLS.
+
+    Priority:
+      1. config.json tls_cert + tls_key paths  → use those files
+      2. Secret already exists                 → skip (don't rotate automatically)
+      3. Neither                               → generate a self-signed cert via openssl
+    """
+    secret_name = "forensics-tls"
+    hostname     = cfg["access"]["hostname"]
+
+    cert_path = cfg["access"].get("tls_cert", "").strip()
+    key_path  = cfg["access"].get("tls_key",  "").strip()
+
+    # Always re-apply if the user has explicitly provided cert files
+    if cert_path and key_path:
+        step("Creating TLS secret from provided certificate")
+        run(["kubectl", "delete", "secret", secret_name, "-n", NS,
+             "--ignore-not-found"], capture=True)
+        run(["kubectl", "create", "secret", "tls", secret_name,
+             "--cert", cert_path, "--key", key_path, "-n", NS])
+        ok(f"TLS secret '{secret_name}' created from {cert_path}")
+        return
+
+    # Skip if secret already present (avoid breaking existing browser trust)
+    r = run(["kubectl", "get", "secret", secret_name, "-n", NS],
+            capture=True, check=False)
+    if r.returncode == 0:
+        ok(f"TLS secret '{secret_name}' already exists — keeping it")
+        return
+
+    # Auto-generate a self-signed certificate
+    step(f"Generating self-signed TLS certificate for {hostname}")
+    if not cmd_exists("openssl"):
+        die(
+            "openssl not found — cannot auto-generate a certificate.\n"
+            "  Install openssl or set tls_cert / tls_key in config.json."
+        )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp      = Path(tmpdir)
+        cfg_file = tmp / "openssl.cnf"
+        key_file = tmp / "tls.key"
+        cert_file = tmp / "tls.crt"
+
+        cfg_file.write_text(f"""\
+[req]
+distinguished_name = req_dn
+x509_extensions    = v3_req
+prompt             = no
+
+[req_dn]
+CN = {hostname}
+
+[v3_req]
+keyUsage           = keyEncipherment, dataEncipherment
+extendedKeyUsage   = serverAuth
+subjectAltName     = DNS:{hostname}
+""")
+        run(
+            ["openssl", "req", "-x509", "-nodes", "-days", "3650",
+             "-newkey", "rsa:2048",
+             "-config",  str(cfg_file),
+             "-keyout",  str(key_file),
+             "-out",     str(cert_file)],
+            capture=True,
+        )
+        run(["kubectl", "create", "secret", "tls", secret_name,
+             "--cert", str(cert_file),
+             "--key",  str(key_file),
+             "-n", NS])
+
+    ok(f"TLS secret '{secret_name}' created (self-signed, valid 10 years)")
 
 
 # ── Manifest application ──────────────────────────────────────────────────────
@@ -456,35 +543,51 @@ def apply_es_template():
 
 
 def get_ingress_ip():
+    # Traefik's LoadBalancer service in k3s lives in kube-system
     r = run([
-        "kubectl", "get", "svc", "ingress-nginx-controller",
-        "-n", "ingress-nginx",
+        "kubectl", "get", "svc", "traefik",
+        "-n", "kube-system",
         "-o", "jsonpath={.status.loadBalancer.ingress[0].ip}",
     ], capture=True, check=False)
-    return r.stdout.strip() or "127.0.0.1"
+    ip = r.stdout.strip()
+    if ip:
+        return ip
+    # Fallback: try the external IP field (some distros populate this instead)
+    r2 = run([
+        "kubectl", "get", "svc", "traefik",
+        "-n", "kube-system",
+        "-o", "jsonpath={.spec.externalIPs[0]}",
+    ], capture=True, check=False)
+    return r2.stdout.strip() or "127.0.0.1"
 
 
 def print_summary(cfg):
-    hostname = cfg["access"]["hostname"]
-    port     = cfg["access"]["http_port"]
-    port_str = f":{port}" if port != 80 else ""
-    ip       = get_ingress_ip()
+    hostname   = cfg["access"]["hostname"]
+    https_port = cfg["access"].get("https_port", 443)
+    port_str   = f":{https_port}" if https_port != 443 else ""
+    ip         = get_ingress_ip()
+    auto_cert  = not (cfg["access"].get("tls_cert") and cfg["access"].get("tls_key"))
 
     print()
     print("┌" + "─" * 58 + "┐")
     print("│  ForensicsOperator deployed!                           │")
     print("└" + "─" * 58 + "┘")
+    cert_note = (
+        "\n  Note: using a self-signed certificate — your browser will\n"
+        "  show a security warning. Accept it to proceed.\n"
+        "  To use your own cert, set tls_cert/tls_key in config.json.\n"
+    ) if auto_cert else ""
     print(f"""
   1. Add this line to /etc/hosts (one-time, requires sudo):
 
        echo "{ip}  {hostname}" | sudo tee -a /etc/hosts
 
-  2. Open in your browser:
-
-       Web UI:    http://{hostname}{port_str}/
-       API docs:  http://{hostname}{port_str}/api/v1/docs
-       Kibana:    http://{hostname}{port_str}/kibana/
-       MinIO:     http://{hostname}{port_str}/minio/
+  2. Open in your browser (HTTP auto-redirects to HTTPS):
+{cert_note}
+       Web UI:    https://{hostname}{port_str}/
+       API docs:  https://{hostname}{port_str}/api/v1/docs
+       Kibana:    https://{hostname}{port_str}/kibana/
+       MinIO:     https://{hostname}{port_str}/minio/
 
   Useful commands:
 
@@ -568,10 +671,14 @@ def main():
     # 4. Load images into the cluster (auto-detects engine)
     pull_policy = load_images(cfg)
 
-    # 5. Ensure NGINX ingress controller is present
-    ensure_nginx_ingress()
+    # 5. Ensure Traefik ingress controller is present (k3s includes it by default)
+    ensure_traefik_ingress()
 
-    # 6. Apply all manifests with substituted values
+    # 6. Ensure namespace exists, then create/verify TLS secret
+    _ensure_namespace()
+    setup_tls_secret(cfg)
+
+    # 7. Apply all manifests with substituted values
     apply_all_manifests(cfg, pull_policy)
 
     # 7. Wait for Elasticsearch, apply index template

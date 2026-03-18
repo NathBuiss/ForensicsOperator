@@ -1,51 +1,163 @@
+# ── Traefik Middlewares ────────────────────────────────────────────────────────
+
+# HTTP → HTTPS permanent redirect
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+  namespace: forensics-operator
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+---
+# Strip /kibana prefix before forwarding to Kibana
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-kibana
+  namespace: forensics-operator
+spec:
+  stripPrefix:
+    prefixes:
+      - /kibana
+---
+# Strip /minio prefix before forwarding to MinIO console
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-minio
+  namespace: forensics-operator
+spec:
+  stripPrefix:
+    prefixes:
+      - /minio
+---
+# ── HTTP catch-all → redirect to HTTPS ────────────────────────────────────────
+# This single rule handles ALL incoming HTTP traffic and issues a 301 redirect.
+# The backend is never actually reached (Traefik redirects before proxying).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: forensics-operator-ingress
+  name: forensics-http-redirect
   namespace: forensics-operator
   annotations:
-    nginx.ingress.kubernetes.io/proxy-body-size: "10g"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    nginx.ingress.kubernetes.io/rewrite-target: /$2
-    # cert-manager.io/cluster-issuer: letsencrypt-prod  # Uncomment for TLS
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+    traefik.ingress.kubernetes.io/router.middlewares: forensics-operator-redirect-https@kubernetescrd
 spec:
-  ingressClassName: nginx
-  # tls:                                                # Uncomment for TLS
-  #   - hosts:
-  #       - forensics.example.com
-  #     secretName: forensics-operator-tls
+  ingressClassName: traefik
   rules:
     - host: __FO_HOSTNAME__
       http:
         paths:
-          # API (no rewrite — FastAPI handles /api/v1/*)
-          - path: /api(/|$)(.*)
-            pathType: ImplementationSpecific
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service
+                port:
+                  number: 80
+---
+# ── HTTPS: API (/api → FastAPI on :8000) ──────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: forensics-api
+  namespace: forensics-operator
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - __FO_HOSTNAME__
+      secretName: forensics-tls
+  rules:
+    - host: __FO_HOSTNAME__
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
             backend:
               service:
                 name: api-service
                 port:
                   number: 8000
-          # Kibana (rewrite to strip /kibana prefix)
-          - path: /kibana(/|$)(.*)
-            pathType: ImplementationSpecific
+---
+# ── HTTPS: Kibana (/kibana → Kibana on :5601) ─────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: forensics-kibana
+  namespace: forensics-operator
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: forensics-operator-strip-kibana@kubernetescrd
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - __FO_HOSTNAME__
+      secretName: forensics-tls
+  rules:
+    - host: __FO_HOSTNAME__
+      http:
+        paths:
+          - path: /kibana
+            pathType: Prefix
             backend:
               service:
                 name: kibana-service
                 port:
                   number: 5601
-          # MinIO console
-          - path: /minio(/|$)(.*)
-            pathType: ImplementationSpecific
+---
+# ── HTTPS: MinIO console (/minio → MinIO console on :9001) ────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: forensics-minio
+  namespace: forensics-operator
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: forensics-operator-strip-minio@kubernetescrd
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - __FO_HOSTNAME__
+      secretName: forensics-tls
+  rules:
+    - host: __FO_HOSTNAME__
+      http:
+        paths:
+          - path: /minio
+            pathType: Prefix
             backend:
               service:
                 name: minio-service
                 port:
                   number: 9001
-          # Frontend SPA (catch-all — must be last)
-          - path: /()(.*)
-            pathType: ImplementationSpecific
+---
+# ── HTTPS: Frontend SPA (/ catch-all) ─────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: forensics-frontend
+  namespace: forensics-operator
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - __FO_HOSTNAME__
+      secretName: forensics-tls
+  rules:
+    - host: __FO_HOSTNAME__
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
             backend:
               service:
                 name: frontend-service

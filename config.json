@@ -15,7 +15,12 @@
   "access": {
     "_comment": "The hostname you will type in your browser. Add it to /etc/hosts pointing to your cluster's ingress IP.",
     "hostname": "forensics.local",
-    "http_port": 80
+    "http_port": 80,
+    "https_port": 443,
+
+    "_comment_tls": "Optional: paths to your own TLS certificate and private key files. Leave both empty to auto-generate a self-signed certificate (valid for 10 years).",
+    "tls_cert": "",
+    "tls_key": ""
   },
 
   "secrets": {
