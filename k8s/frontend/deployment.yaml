@@ -15,8 +15,8 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: forensics-operator/frontend:latest
-          imagePullPolicy: IfNotPresent
+          image: __FO_FRONTEND_IMAGE__
+          imagePullPolicy: __FO_PULL_POLICY__
           ports:
             - containerPort: 80
           resources:

@@ -7,58 +7,37 @@ NAMESPACE  := forensics-operator
 help:
 	@echo "ForensicsOperator — Kubernetes forensics analysis platform"
 	@echo ""
-	@echo "  make dev          Start local dev stack with docker-compose"
-	@echo "  make build        Build all Docker images"
-	@echo "  make push         Push images to registry (REGISTRY=...)"
-	@echo "  make deploy       Apply all K8s manifests"
-	@echo "  make undeploy     Delete all K8s resources"
+	@echo "  make dev          Start local dev stack with docker-compose (no K8s needed)"
+	@echo "  make deploy       Full K8s deploy — reads config.json, sets up cluster"
+	@echo "  make status       Show all pods and services"
+	@echo "  make destroy      Delete cluster and all data"
 	@echo "  make logs-api     Stream API logs"
 	@echo "  make logs-proc    Stream processor logs"
-	@echo "  make reload-plugins  Hot-reload plugins in running cluster"
+	@echo "  make reload-plugins  Hot-reload plugins without pod restart"
 	@echo "  make shell-api    Shell into API pod"
 	@echo "  make shell-proc   Shell into processor pod"
 
-# ── Local development ──────────────────────────────────────────────────────────
+# ── Local development (no Kubernetes) ─────────────────────────────────────────
 dev:
 	docker compose up --build
 
 dev-down:
 	docker compose down -v
 
-# ── Build images ───────────────────────────────────────────────────────────────
-build:
-	docker build -t $(REGISTRY)/forensics-operator/api:$(TAG) ./api
-	docker build -t $(REGISTRY)/forensics-operator/processor:$(TAG) ./processor
-	docker build -t $(REGISTRY)/forensics-operator/frontend:$(TAG) ./frontend
-
-push: build
-	docker push $(REGISTRY)/forensics-operator/api:$(TAG)
-	docker push $(REGISTRY)/forensics-operator/processor:$(TAG)
-	docker push $(REGISTRY)/forensics-operator/frontend:$(TAG)
-
-# ── Kubernetes deployment ──────────────────────────────────────────────────────
+# ── Kubernetes — all-in-one via deploy.py ─────────────────────────────────────
 deploy:
-	kubectl apply -f k8s/namespace.yaml
-	kubectl apply -f k8s/storage/
-	kubectl apply -f k8s/redis/
-	kubectl apply -f k8s/minio/
-	kubectl apply -f k8s/elasticsearch/
-	kubectl apply -f k8s/kibana/
-	kubectl apply -f k8s/configmaps/
-	kubectl apply -f k8s/api/
-	kubectl apply -f k8s/processor/
-	kubectl apply -f k8s/frontend/
-	kubectl apply -f k8s/ingress/
-	@echo "Deployment complete. Waiting for pods..."
-	kubectl rollout status deployment/api -n $(NAMESPACE)
-	kubectl rollout status deployment/processor -n $(NAMESPACE)
-	kubectl rollout status deployment/frontend -n $(NAMESPACE)
+	python3 deploy.py
 
-undeploy:
-	kubectl delete namespace $(NAMESPACE) --ignore-not-found
+deploy-no-build:
+	python3 deploy.py --no-build
 
 status:
-	kubectl get all -n $(NAMESPACE)
+	python3 deploy.py --status
+
+destroy:
+	python3 deploy.py --destroy
+
+undeploy: destroy
 
 # ── Logs ───────────────────────────────────────────────────────────────────────
 logs-api:

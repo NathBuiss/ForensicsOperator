@@ -1,0 +1,39 @@
+{
+  "_readme": "Edit this file then run: python3 deploy.py",
+
+  "cluster": {
+    "_comment_context": "The kubectl context to use. Leave empty to use whatever kubectl is currently pointing at.",
+    "context": "",
+
+    "_comment_auto_k3d": "Set to true ONLY if you have no cluster at all and want deploy.py to create a local one using k3d (requires Docker).",
+    "auto_create_k3d": false,
+
+    "_comment_name": "Used as the k3d cluster name when auto_create_k3d is true. Ignored otherwise.",
+    "name": "forensics-operator"
+  },
+
+  "access": {
+    "_comment": "The hostname you will type in your browser. Add it to /etc/hosts pointing to your cluster's ingress IP.",
+    "hostname": "forensics.local",
+    "http_port": 80
+  },
+
+  "secrets": {
+    "minio_access_key": "minioadmin",
+    "minio_secret_key": "ForensicsM1ni0!"
+  },
+
+  "resources": {
+    "_comment": "Reduce elasticsearch_heap_mb to 256 on machines with less than 8 GB RAM.",
+    "elasticsearch_heap_mb": 512,
+    "elasticsearch_storage_gi": 10,
+    "minio_storage_gi": 20,
+    "redis_storage_gi": 2
+  },
+
+  "images": {
+    "_comment": "Leave registry empty to auto-load images directly into the cluster (works for k3s, k3d, minikube, kind, Docker Desktop). Set registry to push/pull via a registry, e.g. 'docker.io/youruser/' (trailing slash required).",
+    "registry": "",
+    "tag": "latest"
+  }
+}

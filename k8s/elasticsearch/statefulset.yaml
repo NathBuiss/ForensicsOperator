@@ -30,7 +30,7 @@ spec:
             - name: xpack.security.enabled
               value: "false"
             - name: ES_JAVA_OPTS
-              value: "-Xms1g -Xmx1g"
+              value: "-Xms__FO_ES_HEAP__ -Xmx__FO_ES_HEAP__"
             - name: cluster.name
               value: forensics-operator
           ports:
@@ -59,4 +59,4 @@ spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
-            storage: 50Gi
+            storage: __FO_ES_STORAGE__

@@ -16,7 +16,7 @@ spec:
   #       - forensics.example.com
   #     secretName: forensics-operator-tls
   rules:
-    - host: forensics.example.com   # Change to your hostname
+    - host: __FO_HOSTNAME__
       http:
         paths:
           # API (no rewrite — FastAPI handles /api/v1/*)

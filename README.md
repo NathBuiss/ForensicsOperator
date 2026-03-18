@@ -137,99 +137,104 @@ make dev-down   # stops containers and removes volumes
 
 ## Kubernetes Deployment
 
-### 1. Build and push images
+All configuration lives in **`config.json`** — the only file you need to edit. The `deploy.py` script handles everything else: cluster creation, image builds, manifest templating, and health checks.
+
+### 1. Edit config.json
+
+Only change what you need — most defaults work out of the box.
+
+```jsonc
+{
+  "cluster": {
+    // Leave context empty to use whatever kubectl is already pointing at.
+    // Set it to switch: e.g. "default", "k3s", "my-prod-cluster"
+    "context": "",
+
+    // Only set to true if you have NO cluster at all.
+    // deploy.py will then install k3d and create one automatically.
+    "auto_create_k3d": false
+  },
+  "access": {
+    "hostname": "forensics.local",  // what you type in your browser
+    "http_port": 80
+  },
+  "secrets": {
+    "minio_access_key": "minioadmin",
+    "minio_secret_key": "ForensicsM1ni0!"   // change this
+  },
+  "resources": {
+    "elasticsearch_heap_mb": 512,           // use 256 if RAM is limited
+    "elasticsearch_storage_gi": 10,
+    "minio_storage_gi": 20,
+    "redis_storage_gi": 2
+  },
+  "images": {
+    // Leave empty to load images directly into the cluster (see below).
+    // Set to push/pull via a registry: "docker.io/youruser/"
+    "registry": "",
+    "tag": "latest"
+  }
+}
+```
+
+### 2. Point kubectl at your cluster
+
+For **k3s**, kubeconfig is usually at `/etc/rancher/k3s/k3s.yaml`:
 
 ```bash
-# Point to your registry
-export REGISTRY=registry.example.com/forensics
-
-make build REGISTRY=$REGISTRY TAG=1.0.0
-make push  REGISTRY=$REGISTRY TAG=1.0.0
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+# Verify it works:
+kubectl get nodes
 ```
 
-### 2. Update image references
+For any other cluster, just make sure `kubectl get nodes` returns something before running deploy.py.
 
-Edit these files to match your registry/tag:
-- `k8s/api/deployment.yaml` → `image:` field
-- `k8s/processor/deployment.yaml` → `image:` field
-- `k8s/frontend/deployment.yaml` → `image:` field
-
-### 3. Configure secrets
-
-The `k8s/minio/deployment.yaml` contains a `Secret` with example credentials.
-**Change these before deploying to production:**
+### 3. Run deploy.py
 
 ```bash
-# Create the secret directly instead of using the embedded one
-kubectl create secret generic minio-secret \
-  --namespace forensics-operator \
-  --from-literal=access_key=YOUR_ACCESS_KEY \
-  --from-literal=secret_key=YOUR_SECRET_KEY_LONG_ENOUGH
+python3 deploy.py
 ```
 
-Then remove the `Secret` block from `k8s/minio/deployment.yaml`.
+The script auto-detects your cluster engine and loads images accordingly:
 
-### 4. Configure the plugins volume
+| Engine detected | How images are loaded |
+|---|---|
+| k3d | `k3d image import` |
+| k3s | `k3s ctr images import` (via sudo if needed) |
+| minikube | `minikube image load` |
+| kind | `kind load docker-image` |
+| Docker Desktop | shared Docker daemon — already available |
+| Any + registry set | `docker push` → cluster pulls |
 
-The API and Processor pods share a `ReadWriteMany` volume for plugins.
-Edit `k8s/storage/plugins-pvc.yaml` to set the correct `storageClassName`:
+The full deploy sequence:
+1. Check Docker is running
+2. Verify (or switch to) the correct kubectl context
+3. Build the three Docker images
+4. Load images into the cluster using the right method
+5. Install NGINX Ingress Controller if not present
+6. Apply all K8s manifests (values from config.json substituted in)
+7. Wait for Elasticsearch to be ready
+8. Apply the Elasticsearch index template
+9. Print the `/etc/hosts` line to add and all URLs
 
-```yaml
-spec:
-  storageClassName: nfs-client   # or longhorn, cephfs, azurefile, etc.
-```
-
-For **single-node development clusters** (minikube, k3s), you can use a `hostPath`:
-
-```yaml
-# k8s/storage/plugins-pv.yaml  (create this file)
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: plugins-pv
-spec:
-  capacity:
-    storage: 1Gi
-  accessModes: [ReadWriteMany]
-  hostPath:
-    path: /opt/fo-plugins
-  storageClassName: manual
----
-# Then in plugins-pvc.yaml, set:
-#   storageClassName: manual
-```
-
-### 5. Deploy
+### 4. Add the /etc/hosts entry (printed by the script)
 
 ```bash
-# Deploy all resources in dependency order
-make deploy
+echo "127.0.0.1  forensics.local" | sudo tee -a /etc/hosts
+```
 
-# Check status
+### Other commands
+
+```bash
+python3 deploy.py --no-build   # re-apply config changes without rebuilding images
+python3 deploy.py --status     # show all pods, services, ingress
+python3 deploy.py --logs api   # stream API logs
+python3 deploy.py --destroy    # delete namespace (or k3d cluster if auto-created)
+
+make deploy          # alias for python3 deploy.py
 make status
-
-# Tail logs
 make logs-api
 make logs-proc
-```
-
-### 6. Set ingress hostname
-
-Edit `k8s/ingress/ingress.yaml`, change `forensics.example.com` to your hostname:
-
-```yaml
-rules:
-  - host: forensics.corp.example.com
-```
-
-Add a DNS record or `/etc/hosts` entry pointing to your ingress IP.
-
-### 7. Enable TLS (optional)
-
-Uncomment the `tls:` block in `k8s/ingress/ingress.yaml` and install cert-manager:
-
-```bash
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
 ```
 
 ---

@@ -25,8 +25,8 @@ spec:
           command: ['sh', '-c', 'until nc -z minio-service 9000; do echo waiting; sleep 2; done']
       containers:
         - name: processor
-          image: forensics-operator/processor:latest
-          imagePullPolicy: IfNotPresent
+          image: __FO_PROCESSOR_IMAGE__
+          imagePullPolicy: __FO_PULL_POLICY__
           env:
             - name: REDIS_URL
               value: "redis://redis-service:6379/0"

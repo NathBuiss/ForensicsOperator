@@ -43,7 +43,7 @@ spec:
   accessModes: ["ReadWriteOnce"]
   resources:
     requests:
-      storage: 2Gi
+      storage: __FO_REDIS_STORAGE__
 ---
 apiVersion: v1
 kind: Service
