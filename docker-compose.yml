@@ -64,7 +64,7 @@ services:
     volumes:
       - ./plugins:/app/plugins:ro
       - ./api:/app
-      - ./collector/collect.py:/app/static/collect.py:ro
+      - ./collector:/app/collector:ro
     depends_on:
       elasticsearch:
         condition: service_healthy

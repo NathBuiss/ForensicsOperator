@@ -7,6 +7,7 @@ import AlertLibrary from './pages/AlertLibrary'
 import Ingesters from './pages/Ingesters'
 import Modules from './pages/Modules'
 import Collector from './pages/Collector'
+import Cases from './pages/Cases'
 
 export default function App() {
   return (
@@ -14,6 +15,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Layout />}>
           <Route index element={<Dashboard />} />
+          <Route path="cases" element={<Cases />} />
           <Route path="cases/:caseId" element={<CaseTimeline />} />
           <Route path="cases/:caseId/search" element={<Search />} />
           <Route path="alert-rules" element={<AlertLibrary />} />

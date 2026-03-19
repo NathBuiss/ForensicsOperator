@@ -2,7 +2,7 @@ import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import { useState, useEffect } from 'react'
 import {
   LayoutDashboard, Puzzle, FolderOpen,
-  Plus, X, ChevronRight, Bell, Sun, Moon, Cpu, PackageOpen,
+  Plus, X, ChevronRight, Bell, Sun, Moon, Cpu, PackageOpen, Layers,
 } from 'lucide-react'
 import { api } from '../../api/client'
 
@@ -94,6 +94,12 @@ export default function Layout() {
             isActive ? 'nav-item-active' : 'nav-item-inactive'}>
             <LayoutDashboard size={15} />
             Dashboard
+          </NavLink>
+
+          <NavLink to="/cases" className={({ isActive }) =>
+            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
+            <Layers size={15} />
+            Cases
           </NavLink>
 
           <NavLink to="/alert-rules" className={({ isActive }) =>

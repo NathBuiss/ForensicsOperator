@@ -9,7 +9,7 @@ import { useState, useEffect } from 'react'
 import {
   Monitor, Terminal, FileCode, Download, Check,
   ChevronRight, ChevronLeft, Wifi, RefreshCw,
-  PackageOpen, AlertTriangle,
+  PackageOpen, AlertTriangle, Globe, Loader2, Trash2,
 } from 'lucide-react'
 import { api } from '../api/client'
 
@@ -86,7 +86,10 @@ export default function Collector() {
   const [apiUrl, setApiUrl]           = useState('')
   const [cases, setCases]             = useState([])
   const [netIps, setNetIps]           = useState([])
+  const [inK8s, setInK8s]             = useState(false)
   const [netLoading, setNetLoading]   = useState(false)
+  const [ingress, setIngress]         = useState(null)   // {status, external_ip, external_url}
+  const [ingressBusy, setIngressBusy] = useState(false)
   const [downloading, setDownloading] = useState(false)
   const [downloaded, setDownloaded]   = useState(false)
 
@@ -121,9 +124,53 @@ export default function Collector() {
   function detectIps() {
     setNetLoading(true)
     api.collector.networkInterfaces()
-      .then(r => setNetIps(r.candidates || []))
+      .then(r => {
+        setNetIps(r.candidates || [])
+        setInK8s(r.in_kubernetes || false)
+        // Auto-fill if K8s LoadBalancer found
+        const lbEntry = (r.candidates || []).find(c => c.k8s && c.label?.includes('LoadBalancer'))
+        if (lbEntry && !apiUrl) setApiUrl(lbEntry.url)
+      })
       .catch(() => {})
       .finally(() => setNetLoading(false))
+  }
+
+  async function createIngress() {
+    setIngressBusy(true)
+    try {
+      const r = await api.collector.createIngress()
+      setIngress(r)
+      if (r.external_url) setApiUrl(r.external_url)
+    } catch (e) {
+      setIngress({ status: 'error', error: e.message })
+    } finally {
+      setIngressBusy(false)
+    }
+  }
+
+  async function pollIngress() {
+    setIngressBusy(true)
+    try {
+      const r = await api.collector.getIngress()
+      setIngress(r)
+      if (r.external_url) setApiUrl(r.external_url)
+    } catch {
+      /* ignore */
+    } finally {
+      setIngressBusy(false)
+    }
+  }
+
+  async function removeIngress() {
+    setIngressBusy(true)
+    try {
+      await api.collector.deleteIngress()
+      setIngress(null)
+    } catch {
+      /* ignore */
+    } finally {
+      setIngressBusy(false)
+    }
   }
 
   function handleCaseSelect(id) {
@@ -387,6 +434,63 @@ export default function Collector() {
                     <p className="text-[11px] text-amber-500 mt-1.5 flex items-center gap-1">
                       <AlertTriangle size={10} /> Select a case first to enable upload configuration.
                     </p>
+                  )}
+                </div>
+              )}
+
+              {/* ── Kubernetes LoadBalancer ingress ──────────────────────── */}
+              {inK8s && (
+                <div className="mt-4 pt-4 border-t border-gray-100">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-1.5">
+                      <Globe size={12} className="text-brand-accent" />
+                      <span className="text-xs font-medium text-gray-600">
+                        Kubernetes LoadBalancer
+                      </span>
+                      {ingress?.status === 'ready' && (
+                        <span className="badge bg-green-100 text-green-700 border border-green-200 text-[10px]">ready</span>
+                      )}
+                      {ingress?.status === 'pending' && (
+                        <span className="badge bg-amber-100 text-amber-700 border border-amber-200 text-[10px]">pending IP…</span>
+                      )}
+                    </div>
+                    <div className="flex gap-1.5">
+                      {ingress ? (
+                        <>
+                          <button className="btn-ghost text-xs py-0.5 gap-1" onClick={pollIngress} disabled={ingressBusy}>
+                            {ingressBusy ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />}
+                            Refresh
+                          </button>
+                          <button className="btn-ghost text-xs py-0.5 gap-1 text-red-500 hover:text-red-600"
+                                  onClick={removeIngress} disabled={ingressBusy}>
+                            <Trash2 size={10} /> Delete
+                          </button>
+                        </>
+                      ) : (
+                        <button className="btn-primary text-xs py-0.5 gap-1" onClick={createIngress} disabled={ingressBusy || !caseId}>
+                          {ingressBusy ? <Loader2 size={10} className="animate-spin" /> : <Globe size={10} />}
+                          Create LoadBalancer
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-gray-500 mb-2">
+                    Creates a Kubernetes <code className="bg-gray-100 px-1 rounded">LoadBalancer</code> Service
+                    that exposes the API externally. The assigned IP is injected into the collector automatically.
+                    Requires RBAC permission to create Services.
+                  </p>
+                  {ingress?.external_url && (
+                    <div className="flex items-center gap-2 px-3 py-2 bg-green-50 border border-green-200 rounded-lg text-xs">
+                      <Check size={11} className="text-green-600 flex-shrink-0" />
+                      <span className="font-mono text-green-800 flex-1 truncate">{ingress.external_url}</span>
+                      <button className="text-green-600 hover:text-green-800 text-[10px]"
+                              onClick={() => setApiUrl(ingress.external_url)}>
+                        Use
+                      </button>
+                    </div>
+                  )}
+                  {ingress?.status === 'error' && (
+                    <p className="text-[11px] text-red-500 mt-1">{ingress.error}</p>
                   )}
                 </div>
               )}
