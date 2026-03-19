@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
   Bell, Plus, Trash2, ChevronDown, ChevronUp, Pencil, Check, X,
-  AlertTriangle, Loader2, Search, Play, CheckCircle, Clock,
+  AlertTriangle, Loader2, Search, Play, CheckCircle, Clock, RefreshCw,
 } from 'lucide-react'
 import { api } from '../api/client'
 
@@ -352,6 +352,8 @@ export default function AlertLibrary() {
   const [rules, setRules]     = useState([])
   const [cases, setCases]     = useState([])
   const [loading, setLoading] = useState(true)
+  const [seeding, setSeeding] = useState(false)
+  const [seedMsg, setSeedMsg] = useState(null)   // {added, total} or null
 
   const loadRules = useCallback(() => {
     api.alertRules.listLibrary()
@@ -364,6 +366,21 @@ export default function AlertLibrary() {
     loadRules()
     api.cases.list().then(r => setCases(r.cases || [])).catch(() => {})
   }, [loadRules])
+
+  async function seedDefaults(replace = false) {
+    setSeeding(true)
+    setSeedMsg(null)
+    try {
+      const r = await api.alertRules.seedLibrary(replace)
+      setSeedMsg(r)
+      loadRules()
+      setTimeout(() => setSeedMsg(null), 4000)
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setSeeding(false)
+    }
+  }
 
   function handleCreated(rule) {
     setRules(prev => [rule, ...prev])
@@ -406,6 +423,25 @@ export default function AlertLibrary() {
           {!loading && (
             <span className="badge-pill bg-gray-100 text-gray-600">{rules.length}</span>
           )}
+          <div className="ml-auto flex items-center gap-2">
+            {seedMsg && (
+              <span className="text-xs text-green-600 bg-green-50 border border-green-200 rounded-full px-3 py-1 flex items-center gap-1">
+                <CheckCircle size={11} />
+                {seedMsg.added > 0
+                  ? `${seedMsg.added} rule${seedMsg.added !== 1 ? 's' : ''} added (${seedMsg.total} total)`
+                  : 'Already up to date'}
+              </span>
+            )}
+            <button
+              onClick={() => seedDefaults(false)}
+              disabled={seeding}
+              className="btn-outline text-xs"
+              title="Append any built-in defaults not already in the library"
+            >
+              {seeding ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+              Load Default Rules
+            </button>
+          </div>
         </div>
 
         {loading ? (
@@ -416,8 +452,16 @@ export default function AlertLibrary() {
         ) : rules.length === 0 ? (
           <div className="card p-10 flex flex-col items-center text-center text-gray-400">
             <Bell size={32} className="mb-3 opacity-30" />
-            <p className="font-medium">No rules yet</p>
-            <p className="text-sm mt-1">Create your first rule below.</p>
+            <p className="font-medium text-brand-text">No rules yet</p>
+            <p className="text-sm mt-1 mb-5">Load the built-in detection rules to get started, or create your own below.</p>
+            <button
+              onClick={() => seedDefaults(false)}
+              disabled={seeding}
+              className="btn-primary"
+            >
+              {seeding ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+              Load Default Rules
+            </button>
           </div>
         ) : (
           <div className="space-y-2">
