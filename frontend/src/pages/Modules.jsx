@@ -5,6 +5,7 @@ import {
   PackageOpen, Terminal, Download,
 } from 'lucide-react'
 import { api } from '../api/client'
+import CollectorModal from '../components/CollectorModal'
 
 // ── Code templates shown in the documentation modal ──────────────────────────
 
@@ -204,8 +205,9 @@ fo-collector.exe --api-url http://FO_HOST/api/v1 --case-id CASE_ID
 # The ZIP is also saved locally for manual upload via the Ingest panel.`
 
 function CollectorSection() {
-  const [open, setOpen]     = useState(false)
-  const [copied, setCopied] = useState(false)
+  const [open, setOpen]           = useState(false)
+  const [copied, setCopied]       = useState(false)
+  const [showModal, setShowModal] = useState(false)
 
   function copy() {
     navigator.clipboard.writeText(COLLECTOR_STEPS)
@@ -218,10 +220,7 @@ function CollectorSection() {
       <h2 className="section-title mb-3">Artifact Collector</h2>
       <div className="card overflow-hidden">
         {/* Summary row */}
-        <button
-          className="w-full flex items-start gap-3 p-4 text-left hover:bg-gray-50 transition-colors"
-          onClick={() => setOpen(v => !v)}
-        >
+        <div className="flex items-start gap-3 p-4">
           <div className="w-8 h-8 rounded-lg bg-brand-accentlight border border-brand-accent/20 flex items-center justify-center flex-shrink-0 mt-0.5">
             <PackageOpen size={14} className="text-brand-accent" />
           </div>
@@ -232,12 +231,28 @@ function CollectorSection() {
               <span className="badge bg-gray-100 text-gray-600 border border-gray-200">Linux</span>
             </div>
             <p className="text-xs text-gray-500">
-              Standalone EXE / ELF binary that collects forensic artifacts from a live system
+              Standalone Python script that collects forensic artifacts from a live system
               and packages them as a ZIP for direct upload to a ForensicsOperator case.
             </p>
           </div>
-          <ChevronDown size={14} className={`text-gray-400 flex-shrink-0 mt-1 transition-transform ${open ? 'rotate-180' : ''}`} />
-        </button>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <button
+              onClick={() => setShowModal(true)}
+              className="btn-primary text-xs"
+              style={{ height: 30, gap: 5 }}
+            >
+              <Download size={12} />
+              Download
+            </button>
+            <button
+              onClick={() => setOpen(v => !v)}
+              className="btn-ghost p-1.5 rounded-lg"
+              title="Show details"
+            >
+              <ChevronDown size={14} className={`text-gray-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+            </button>
+          </div>
+        </div>
 
         {open && (
           <div className="border-t border-gray-100 bg-gray-50 p-4 space-y-4">
@@ -292,7 +307,7 @@ function CollectorSection() {
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <p className="section-title flex items-center gap-1.5">
-                  <Download size={11} /> Build &amp; Deploy
+                  <Download size={11} /> Build &amp; Deploy (optional — for zero-dependency binary)
                 </p>
                 <button onClick={copy} className="btn-ghost text-xs">
                   {copied
@@ -309,16 +324,19 @@ function CollectorSection() {
             <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
               <BookOpen size={13} className="flex-shrink-0 mt-0.5" />
               <div>
-                <strong>Requirements:</strong> Python 3.8+ and PyInstaller on the build machine.
-                The resulting binary has <strong>no runtime dependencies</strong> — copy a single file to the target.
-                Windows collection requires <strong>Administrator</strong> privileges for registry
-                hives (reg.exe SAVE) and locked files. Linux collection requires <strong>root</strong>
+                <strong>Requirements:</strong> Python 3.8+ on the target system (or use PyInstaller
+                to build a zero-dependency binary). Windows collection requires <strong>Administrator</strong>{' '}
+                privileges for registry hives and locked files. Linux collection requires <strong>root</strong>{' '}
                 for /etc/shadow, audit logs, and other privileged paths.
               </div>
             </div>
           </div>
         )}
       </div>
+
+      {showModal && (
+        <CollectorModal onClose={() => setShowModal(false)} />
+      )}
     </section>
   )
 }

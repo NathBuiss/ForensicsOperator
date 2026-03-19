@@ -101,4 +101,19 @@ export const api = {
     listRuns:    (caseId)       => request('GET', `/cases/${caseId}/module-runs`),
     getRun:      (runId)        => request('GET', `/module-runs/${runId}`),
   },
+
+  collector: {
+    /**
+     * Returns the download URL for the configured collector script.
+     * Trigger with window.location.href = api.collector.downloadUrl(...)
+     * or use with an <a href> tag.
+     */
+    downloadUrl: ({ platform = 'py', caseId, apiUrl, collect } = {}) => {
+      const params = new URLSearchParams({ platform })
+      if (caseId)  params.set('case_id',  caseId)
+      if (apiUrl)  params.set('api_url',  apiUrl)
+      if (collect && collect.length > 0) params.set('collect', collect.join(','))
+      return `/api/v1/collector/download?${params.toString()}`
+    },
+  },
 }

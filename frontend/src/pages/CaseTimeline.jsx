@@ -3,11 +3,12 @@ import { useParams, useNavigate } from 'react-router-dom'
 import {
   Upload, Search, Bell, X, ChevronRight, AlertTriangle,
   CheckCircle, Clock, Database, Loader2, Shield,
-  Cpu, RotateCcw, Plus,
+  Cpu, RotateCcw, Plus, Download,
 } from 'lucide-react'
 import { api } from '../api/client'
 import Timeline from './Timeline'
 import Ingest from './Ingest'
+import CollectorModal from '../components/CollectorModal'
 
 // ── Artifact badge colours ────────────────────────────────────────────────────
 const ARTIFACT_BADGE = {
@@ -623,6 +624,7 @@ export default function CaseTimeline() {
   const [runningAlerts, setRunningAlerts]   = useState(false)
   const [showModules, setShowModules]       = useState(false)
   const [showModuleRuns, setShowModuleRuns] = useState(false)
+  const [showCollector, setShowCollector]   = useState(false)
 
   const loadCase = useCallback(() => {
     api.cases.get(caseId)
@@ -732,6 +734,15 @@ export default function CaseTimeline() {
             Modules
           </button>
 
+          <button
+            onClick={() => setShowCollector(true)}
+            className="btn-outline"
+            title="Download artifact collector pre-configured for this case"
+          >
+            <Download size={14} />
+            Collector
+          </button>
+
           {/* View runs shortcut — only when runs panel is closed */}
           {!showModuleRuns && (
             <button
@@ -778,6 +789,14 @@ export default function CaseTimeline() {
         <ModuleRunsPanel
           caseId={caseId}
           onClose={() => setShowModuleRuns(false)}
+        />
+      )}
+
+      {showCollector && (
+        <CollectorModal
+          caseId={caseId}
+          apiUrl={`${window.location.origin}/api/v1`}
+          onClose={() => setShowCollector(false)}
         />
       )}
     </div>
