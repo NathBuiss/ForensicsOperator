@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import {
   Search, Filter, X, Flag, Loader2, Download,
-  BarChart2, Plus, Minus, Keyboard,
+  BarChart2, Plus, Minus, Keyboard, SlidersHorizontal,
 } from 'lucide-react'
 import { api } from '../api/client'
 import EventDetail from '../components/shared/EventDetail'
@@ -17,6 +17,46 @@ const ARTIFACT_COLORS = {
   generic:  'badge-generic',
 }
 
+const LEVEL_COLORS = {
+  crit:          'bg-red-100 text-red-700 border border-red-200',
+  critical:      'bg-red-100 text-red-700 border border-red-200',
+  high:          'bg-orange-100 text-orange-700 border border-orange-200',
+  med:           'bg-yellow-100 text-yellow-700 border border-yellow-200',
+  medium:        'bg-yellow-100 text-yellow-700 border border-yellow-200',
+  low:           'bg-blue-100 text-blue-700 border border-blue-200',
+  info:          'bg-gray-100 text-gray-500',
+  informational: 'bg-gray-100 text-gray-500',
+}
+
+// ── Column definitions ───────────────────────────────────────────────────────
+const ALL_COLUMNS = [
+  { id: 'timestamp', label: 'Timestamp', defaultOn: true },
+  { id: 'type',      label: 'Type',      defaultOn: true },
+  { id: 'level',     label: 'Level',     defaultOn: true },
+  { id: 'event_id',  label: 'Event ID',  defaultOn: true },
+  { id: 'host',      label: 'Host',      defaultOn: true },
+  { id: 'user',      label: 'User',      defaultOn: true },
+  { id: 'process',   label: 'Process',   defaultOn: false },
+  { id: 'channel',   label: 'Channel',   defaultOn: false },
+  { id: 'rule',      label: 'Rule',      defaultOn: false },
+  { id: 'message',   label: 'Message',   defaultOn: true },
+  { id: 'tags',      label: 'Tags',      defaultOn: true },
+]
+
+const DEFAULT_COLUMNS = ALL_COLUMNS.filter(c => c.defaultOn).map(c => c.id)
+const LS_KEY = 'timeline_visible_cols'
+
+function loadSavedColumns() {
+  try {
+    const raw = localStorage.getItem(LS_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed
+    }
+  } catch {}
+  return DEFAULT_COLUMNS
+}
+
 const PAGE_SIZE = 100
 
 const SHORTCUTS = [
@@ -26,6 +66,11 @@ const SHORTCUTS = [
   { keys: ['Esc'],      desc: 'Close panel / blur search' },
   { keys: ['?'],        desc: 'Toggle this help' },
 ]
+
+// Helper: pull artifact-specific sub-object from event
+function getArtifact(ev) {
+  return ev[ev.artifact_type] || {}
+}
 
 export default function Timeline({ caseId, artifactTypes }) {
   const [events, setEvents]               = useState([])
@@ -44,6 +89,9 @@ export default function Timeline({ caseId, artifactTypes }) {
   const [regexpMode, setRegexpMode]       = useState(false)
   const [showHelp, setShowHelp]           = useState(false)
   const [flaggedOnly, setFlaggedOnly]     = useState(false)
+  const [visibleCols, setVisibleCols]     = useState(loadSavedColumns)
+  const [showColPicker, setShowColPicker] = useState(false)
+  const colPickerRef                      = useRef(null)
 
   const loaderRef = useRef(null)
   const searchRef = useRef(null)
@@ -63,7 +111,6 @@ export default function Timeline({ caseId, artifactTypes }) {
       if (selectedType) params.artifact_type = selectedType
       if (fromTs) params.from = fromTs
       if (toTs)   params.to   = toTs
-      // Merge flaggedOnly into the effective query
       let effectiveQ = query
       if (flaggedOnly) {
         effectiveQ = effectiveQ ? `(${effectiveQ}) AND is_flagged:true` : 'is_flagged:true'
@@ -80,13 +127,11 @@ export default function Timeline({ caseId, artifactTypes }) {
 
   useEffect(() => { load(0, true) }, [load])
 
-  // Reset keyboard row selection when results change
   useEffect(() => {
     setSelectedRowIdx(-1)
     rowRefs.current = {}
   }, [query, selectedType, fromTs, toTs])
 
-  // Scroll keyboard-selected row into view
   useEffect(() => {
     if (selectedRowIdx >= 0 && rowRefs.current[selectedRowIdx]) {
       rowRefs.current[selectedRowIdx].scrollIntoView({ block: 'nearest', behavior: 'smooth' })
@@ -104,42 +149,34 @@ export default function Timeline({ caseId, artifactTypes }) {
     return () => obs.disconnect()
   }, [loaderRef.current, loading, events.length, total, page, load])
 
+  // Close col picker on outside click
+  useEffect(() => {
+    if (!showColPicker) return
+    function handleClick(e) {
+      if (colPickerRef.current && !colPickerRef.current.contains(e.target))
+        setShowColPicker(false)
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [showColPicker])
+
   // Global keyboard navigation
   useEffect(() => {
     function handleKey(e) {
       const tag = document.activeElement?.tagName
       const inInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)
 
-      if (e.key === '?' && !inInput) {
-        e.preventDefault()
-        setShowHelp(v => !v)
-        return
-      }
-      if (e.key === '/' && !inInput) {
-        e.preventDefault()
-        searchRef.current?.focus()
-        return
-      }
+      if (e.key === '?' && !inInput) { e.preventDefault(); setShowHelp(v => !v); return }
+      if (e.key === '/' && !inInput) { e.preventDefault(); searchRef.current?.focus(); return }
       if (e.key === 'Escape') {
-        if (document.activeElement === searchRef.current) {
-          searchRef.current.blur()
-          return
-        }
+        if (document.activeElement === searchRef.current) { searchRef.current.blur(); return }
         if (showHelp)      { setShowHelp(false);      return }
         if (selectedEvent) { setSelectedEvent(null);  return }
         return
       }
       if (inInput) return
-      if (e.key === 'ArrowDown') {
-        e.preventDefault()
-        setSelectedRowIdx(i => Math.min(i + 1, events.length - 1))
-        return
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault()
-        setSelectedRowIdx(i => Math.max(i - 1, 0))
-        return
-      }
+      if (e.key === 'ArrowDown') { e.preventDefault(); setSelectedRowIdx(i => Math.min(i + 1, events.length - 1)); return }
+      if (e.key === 'ArrowUp')   { e.preventDefault(); setSelectedRowIdx(i => Math.max(i - 1, 0)); return }
       if (e.key === 'Enter' && selectedRowIdx >= 0) {
         e.preventDefault()
         const ev = events[selectedRowIdx]
@@ -153,19 +190,12 @@ export default function Timeline({ caseId, artifactTypes }) {
   function submitSearch(e) {
     e.preventDefault()
     let q = inputVal.trim()
-    // In regexp mode, auto-wrap plain text (no field: prefix, no existing slashes) in /.../
-    if (regexpMode && q && !q.includes(':') && !q.startsWith('/')) {
-      q = `/${q}/`
-    }
+    if (regexpMode && q && !q.includes(':') && !q.startsWith('/')) q = `/${q}/`
     setQuery(q)
   }
 
-  function clearSearch() {
-    setInputVal('')
-    setQuery('')
-  }
+  function clearSearch() { setInputVal(''); setQuery('') }
 
-  // Append a filter clause to the active query and trigger search immediately
   function addFilter(field, value, exclude = false) {
     const term = `${field}:"${value}"`
     const clause = exclude ? `NOT ${term}` : term
@@ -188,12 +218,26 @@ export default function Timeline({ caseId, artifactTypes }) {
     window.open(api.export.csv(caseId, params))
   }
 
-  const maxCount = histogram.reduce((m, b) => Math.max(m, b.doc_count), 1)
+  function toggleCol(id) {
+    const next = visibleCols.includes(id)
+      ? visibleCols.filter(c => c !== id)
+      : [...visibleCols, id]
+    setVisibleCols(next)
+    localStorage.setItem(LS_KEY, JSON.stringify(next))
+  }
+
+  function resetCols() {
+    setVisibleCols(DEFAULT_COLUMNS)
+    localStorage.setItem(LS_KEY, JSON.stringify(DEFAULT_COLUMNS))
+  }
+
+  const maxCount  = histogram.reduce((m, b) => Math.max(m, b.doc_count), 1)
   const hasFilters = selectedType || fromTs || toTs || flaggedOnly
+  const vis        = col => visibleCols.includes(col)
 
   return (
     <div className="flex h-full">
-      {/* ── Filter sidebar ──────────────────────────────── */}
+      {/* ── Filter sidebar ─────────────────────────────── */}
       <div className="w-44 flex-shrink-0 bg-white border-r border-gray-200 flex flex-col">
         <div className="p-3 border-b border-gray-200">
           <p className="flex items-center gap-1.5 text-[10px] font-semibold text-gray-500 uppercase tracking-widest">
@@ -215,17 +259,12 @@ export default function Timeline({ caseId, artifactTypes }) {
               <option value="">All types</option>
               {artifactTypes.map(at => <option key={at} value={at}>{at}</option>)}
             </select>
-            {/* Active type badge */}
             {selectedType && (
               <div className="mt-1.5 flex items-center gap-1">
                 <span className={`badge ${ARTIFACT_COLORS[selectedType] || ARTIFACT_COLORS.generic} flex-1 justify-center`}>
                   {selectedType}
                 </span>
-                <button
-                  onClick={() => setSelectedType('')}
-                  className="text-gray-400 hover:text-gray-600 transition-colors"
-                  title="Clear type filter"
-                >
+                <button onClick={() => setSelectedType('')} className="text-gray-400 hover:text-gray-600" title="Clear">
                   <X size={10} />
                 </button>
               </div>
@@ -289,7 +328,7 @@ export default function Timeline({ caseId, artifactTypes }) {
         </div>
       </div>
 
-      {/* ── Main content ────────────────────────────────── */}
+      {/* ── Main content ──────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0">
 
         {/* Search bar */}
@@ -308,11 +347,10 @@ export default function Timeline({ caseId, artifactTypes }) {
               />
             </div>
 
-            {/* Regexp mode toggle */}
             <button
               type="button"
               onClick={() => setRegexpMode(v => !v)}
-              title={regexpMode ? 'Regexp mode ON — click to switch to query string' : 'Switch to regexp mode'}
+              title={regexpMode ? 'Regexp mode ON' : 'Switch to regexp mode'}
               className={`btn-outline text-xs px-2.5 py-1.5 font-mono tracking-tight ${
                 regexpMode ? 'border-brand-accent text-brand-accent bg-brand-accentlight' : 'text-gray-500'
               }`}
@@ -328,12 +366,7 @@ export default function Timeline({ caseId, artifactTypes }) {
               </button>
             )}
 
-            <button
-              type="button"
-              onClick={downloadCsv}
-              className="btn-ghost text-xs"
-              title="Export CSV"
-            >
+            <button type="button" onClick={downloadCsv} className="btn-ghost text-xs" title="Export CSV">
               <Download size={13} />
             </button>
 
@@ -348,6 +381,45 @@ export default function Timeline({ caseId, artifactTypes }) {
               </button>
             )}
 
+            {/* Column picker trigger */}
+            <div className="relative" ref={colPickerRef}>
+              <button
+                type="button"
+                onClick={() => setShowColPicker(v => !v)}
+                className={`btn-ghost text-xs ${showColPicker ? 'text-brand-accent' : ''}`}
+                title="Configure columns"
+              >
+                <SlidersHorizontal size={13} />
+              </button>
+
+              {showColPicker && (
+                <div className="absolute top-full right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg p-3 z-20 w-44">
+                  <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Columns</p>
+                  <div className="space-y-0.5">
+                    {ALL_COLUMNS.map(col => (
+                      <label key={col.id} className="flex items-center gap-2 cursor-pointer py-1 px-1 rounded hover:bg-gray-50">
+                        <input
+                          type="checkbox"
+                          checked={visibleCols.includes(col.id)}
+                          onChange={() => toggleCol(col.id)}
+                          className="rounded border-gray-300 accent-brand-accent"
+                        />
+                        <span className="text-xs text-gray-700">{col.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <div className="mt-2 pt-2 border-t border-gray-100">
+                    <button
+                      onClick={resetCols}
+                      className="text-[10px] text-brand-accent hover:underline"
+                    >
+                      Reset to defaults
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
             <button
               type="button"
               onClick={() => setShowHelp(v => !v)}
@@ -358,7 +430,6 @@ export default function Timeline({ caseId, artifactTypes }) {
             </button>
           </form>
 
-          {/* Active query badge */}
           {query && (
             <div className="flex items-center gap-2 mt-2 flex-wrap">
               <span className="text-[10px] text-gray-500">Query:</span>
@@ -425,22 +496,64 @@ export default function Timeline({ caseId, artifactTypes }) {
           <table className="w-full text-xs">
             <thead className="sticky top-0 bg-gray-50 border-b border-gray-200 z-10">
               <tr>
-                <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-40">
-                  Timestamp
-                </th>
-                <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-28">
-                  Type
-                </th>
-                <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-32">
-                  Host
-                </th>
-                <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-28">
-                  User
-                </th>
-                <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider">
-                  Message
-                </th>
-                <th className="px-3 py-2.5 w-12" />
+                {/* Flag — always visible, leftmost */}
+                <th className="px-2 py-2.5 w-6" />
+
+                {vis('timestamp') && (
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-40">
+                    Timestamp
+                  </th>
+                )}
+                {vis('type') && (
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-24">
+                    Type
+                  </th>
+                )}
+                {vis('level') && (
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-20">
+                    Level
+                  </th>
+                )}
+                {vis('event_id') && (
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-20">
+                    Event ID
+                  </th>
+                )}
+                {vis('host') && (
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-28">
+                    Host
+                  </th>
+                )}
+                {vis('user') && (
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-24">
+                    User
+                  </th>
+                )}
+                {vis('process') && (
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-28">
+                    Process
+                  </th>
+                )}
+                {vis('channel') && (
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-28">
+                    Channel
+                  </th>
+                )}
+                {vis('rule') && (
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-36">
+                    Rule
+                  </th>
+                )}
+                {vis('message') && (
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider">
+                    Message
+                  </th>
+                )}
+                {vis('tags') && (
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-32">
+                    Tags
+                  </th>
+                )}
               </tr>
             </thead>
             <tbody>
@@ -450,6 +563,7 @@ export default function Timeline({ caseId, artifactTypes }) {
                   index={i}
                   event={ev}
                   caseId={caseId}
+                  visibleCols={visibleCols}
                   onSelect={(ev, idx) => { setSelectedEvent(ev); setSelectedRowIdx(idx) }}
                   selected={selectedEvent?.fo_id === ev.fo_id}
                   keyboardSelected={selectedRowIdx === i}
@@ -489,7 +603,7 @@ export default function Timeline({ caseId, artifactTypes }) {
         />
       )}
 
-      {/* ── Keyboard shortcuts overlay ───────────────────── */}
+      {/* Keyboard shortcuts overlay */}
       {showHelp && (
         <div
           className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center"
@@ -508,7 +622,6 @@ export default function Timeline({ caseId, artifactTypes }) {
                 <X size={14} />
               </button>
             </div>
-
             <div className="space-y-3">
               {SHORTCUTS.map(({ keys, desc }) => (
                 <div key={desc} className="flex items-center justify-between gap-4">
@@ -524,7 +637,6 @@ export default function Timeline({ caseId, artifactTypes }) {
                 </div>
               ))}
             </div>
-
             <div className="mt-5 pt-4 border-t border-gray-200">
               <p className="text-xs text-gray-500 leading-relaxed">
                 Hover any row and click{' '}
@@ -541,7 +653,7 @@ export default function Timeline({ caseId, artifactTypes }) {
   )
 }
 
-/* ── Filter +/− buttons (appear on row group-hover) ── */
+/* ── Filter +/− buttons ── */
 function FilterButtons({ field, value, onIn, onOut }) {
   return (
     <span className="inline-flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-1">
@@ -566,21 +678,30 @@ function FilterButtons({ field, value, onIn, onOut }) {
 }
 
 /* ── Event row ── */
-function EventRow({ event, index, onSelect, selected, keyboardSelected, onFilterIn, onFilterOut, rowRef, caseId, onFlagged }) {
-  const ts    = event.timestamp ? new Date(event.timestamp).toISOString().replace('T', ' ').slice(0, 19) : '—'
-  const type  = event.artifact_type || 'generic'
+function EventRow({ event, index, onSelect, selected, keyboardSelected, onFilterIn, onFilterOut, rowRef, caseId, onFlagged, visibleCols }) {
+  const vis  = col => visibleCols.includes(col)
+  const art  = getArtifact(event)
+  const ts   = event.timestamp ? new Date(event.timestamp).toISOString().replace('T', ' ').slice(0, 19) : '—'
+  const type = event.artifact_type || 'generic'
   const color = ARTIFACT_COLORS[type] || ARTIFACT_COLORS.generic
-  const host  = event.host?.hostname || ''
-  const user  = event.user?.name || ''
+
+  // Resolve per-column values (check artifact sub-doc first, then top-level)
+  const level    = (art.level    || event.level    || '').toLowerCase()
+  const eventId  = art.event_id != null ? String(art.event_id) : ''
+  const host     = event.host?.hostname || ''
+  const user     = event.user?.name || ''
+  const process  = event.process?.name || event.process?.path?.split(/[\\/]/).pop() || ''
+  const channel  = art.channel  || event.channel  || ''
+  const rule     = art.rule_title || event.rule_title || ''
 
   async function handleFlag(e) {
     e.stopPropagation()
     const next = !event.is_flagged
-    onFlagged(event.fo_id, next)          // optimistic
+    onFlagged(event.fo_id, next)
     try {
       await api.search.flagEvent(caseId, event.fo_id)
     } catch {
-      onFlagged(event.fo_id, event.is_flagged)  // revert on error
+      onFlagged(event.fo_id, event.is_flagged)
     }
   }
 
@@ -598,60 +719,122 @@ function EventRow({ event, index, onSelect, selected, keyboardSelected, onFilter
           : 'border-gray-100 hover:bg-gray-50'
       }`}
     >
-      <td className="px-3 py-2 text-gray-400 font-mono whitespace-nowrap tabular-nums">{ts}</td>
-
-      <td className="px-3 py-2">
-        <div className="flex items-center">
-          <span className={`badge ${color}`}>{type}</span>
-          <FilterButtons field="artifact_type" value={type} onIn={onFilterIn} onOut={onFilterOut} />
-        </div>
+      {/* Flag — always first, always visible */}
+      <td className="px-2 py-2 w-6 text-center">
+        <button
+          onClick={handleFlag}
+          className={`transition-colors flex-shrink-0 ${
+            event.is_flagged
+              ? 'text-red-500 hover:text-red-400'
+              : 'text-gray-300 hover:text-red-400'
+          }`}
+          title={event.is_flagged ? 'Unflag event' : 'Flag event'}
+        >
+          <Flag size={11} />
+        </button>
       </td>
 
-      <td className="px-3 py-2 text-gray-500 max-w-[8rem]">
-        <div className="flex items-center">
-          <span className="truncate">{host}</span>
-          {host && <FilterButtons field="host.hostname" value={host} onIn={onFilterIn} onOut={onFilterOut} />}
-        </div>
-      </td>
+      {vis('timestamp') && (
+        <td className="px-3 py-2 text-gray-400 font-mono whitespace-nowrap tabular-nums">{ts}</td>
+      )}
 
-      <td className="px-3 py-2 text-gray-500 max-w-[7rem]">
-        <div className="flex items-center">
-          <span className="truncate">{user}</span>
-          {user && <FilterButtons field="user.name" value={user} onIn={onFilterIn} onOut={onFilterOut} />}
-        </div>
-      </td>
+      {vis('type') && (
+        <td className="px-3 py-2">
+          <div className="flex items-center">
+            <span className={`badge ${color}`}>{type}</span>
+            <FilterButtons field="artifact_type" value={type} onIn={onFilterIn} onOut={onFilterOut} />
+          </div>
+        </td>
+      )}
 
-      <td className="px-3 py-2 text-brand-text max-w-sm">
-        <span className="line-clamp-1">{event.message}</span>
-      </td>
+      {vis('level') && (
+        <td className="px-3 py-2">
+          {level ? (
+            <span className={`badge text-[10px] px-1.5 py-0.5 font-semibold uppercase tracking-wide ${LEVEL_COLORS[level] || 'bg-gray-100 text-gray-500'}`}>
+              {level}
+            </span>
+          ) : null}
+        </td>
+      )}
 
-      <td className="px-3 py-2 w-auto">
-        <div className="flex items-center gap-1 justify-end flex-wrap">
-          {/* Flag toggle button */}
-          <button
-            onClick={handleFlag}
-            className={`p-0.5 rounded transition-colors flex-shrink-0 ${
-              event.is_flagged
-                ? 'text-red-500 hover:text-red-400'
-                : 'text-gray-200 hover:text-red-400 opacity-0 group-hover:opacity-100'
-            }`}
-            title={event.is_flagged ? 'Unflag event' : 'Flag event'}
-          >
-            <Flag size={10} />
-          </button>
-          {/* Tag badges — each clickable to add tags:"value" filter */}
-          {event.tags?.map(t => (
-            <button
-              key={t}
-              onClick={e => { e.stopPropagation(); onFilterIn('tags', t) }}
-              className="text-[9px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 hover:bg-purple-200 transition-colors font-medium flex-shrink-0"
-              title={`Filter: tags:"${t}"`}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
-      </td>
+      {vis('event_id') && (
+        <td className="px-3 py-2 font-mono text-gray-500">
+          {eventId ? (
+            <div className="flex items-center">
+              <span>{eventId}</span>
+              <FilterButtons field={`${type}.event_id`} value={eventId} onIn={onFilterIn} onOut={onFilterOut} />
+            </div>
+          ) : null}
+        </td>
+      )}
+
+      {vis('host') && (
+        <td className="px-3 py-2 text-gray-500 max-w-[7rem]">
+          <div className="flex items-center">
+            <span className="truncate">{host}</span>
+            {host && <FilterButtons field="host.hostname" value={host} onIn={onFilterIn} onOut={onFilterOut} />}
+          </div>
+        </td>
+      )}
+
+      {vis('user') && (
+        <td className="px-3 py-2 text-gray-500 max-w-[6rem]">
+          <div className="flex items-center">
+            <span className="truncate">{user}</span>
+            {user && <FilterButtons field="user.name" value={user} onIn={onFilterIn} onOut={onFilterOut} />}
+          </div>
+        </td>
+      )}
+
+      {vis('process') && (
+        <td className="px-3 py-2 text-gray-500 max-w-[7rem]">
+          <div className="flex items-center">
+            <span className="truncate">{process}</span>
+            {process && <FilterButtons field="process.name" value={process} onIn={onFilterIn} onOut={onFilterOut} />}
+          </div>
+        </td>
+      )}
+
+      {vis('channel') && (
+        <td className="px-3 py-2 text-gray-500 max-w-[7rem]">
+          <div className="flex items-center">
+            <span className="truncate">{channel}</span>
+            {channel && <FilterButtons field={`${type}.channel`} value={channel} onIn={onFilterIn} onOut={onFilterOut} />}
+          </div>
+        </td>
+      )}
+
+      {vis('rule') && (
+        <td className="px-3 py-2 text-gray-600 max-w-[9rem]">
+          <div className="flex items-center">
+            <span className="truncate">{rule}</span>
+            {rule && <FilterButtons field={`${type}.rule_title`} value={rule} onIn={onFilterIn} onOut={onFilterOut} />}
+          </div>
+        </td>
+      )}
+
+      {vis('message') && (
+        <td className="px-3 py-2 text-brand-text max-w-sm">
+          <span className="line-clamp-1">{event.message}</span>
+        </td>
+      )}
+
+      {vis('tags') && (
+        <td className="px-3 py-2">
+          <div className="flex items-center gap-1 flex-wrap">
+            {event.tags?.map(t => (
+              <button
+                key={t}
+                onClick={e => { e.stopPropagation(); onFilterIn('tags', t) }}
+                className="text-[9px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 hover:bg-purple-200 transition-colors font-medium flex-shrink-0"
+                title={`Filter: tags:"${t}"`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+        </td>
+      )}
     </tr>
   )
 }
