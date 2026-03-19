@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import socket
 import logging
 import subprocess
@@ -201,7 +202,17 @@ def _only_docker_ips(candidates: list[dict]) -> bool:
 
 
 def _is_kubernetes() -> bool:
-    return os.path.isfile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+    """
+    Return True only when running inside a Kubernetes pod AND kubectl is
+    available in PATH (so the ingress management endpoints are actually usable).
+    The service-account token check catches pod deployments; the kubectl check
+    prevents showing the LB panel when the binary is absent (e.g. Docker Desktop
+    with Kubernetes enabled but no kubectl sidecar in the API container).
+    """
+    return (
+        os.path.isfile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+        and shutil.which("kubectl") is not None
+    )
 
 
 def _get_k8s_service_ips() -> list[dict]:

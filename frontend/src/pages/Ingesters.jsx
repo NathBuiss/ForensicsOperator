@@ -342,7 +342,8 @@ function UploadZone({ onUploaded }) {
               <Upload size={18} className="text-gray-500" />
             </div>
             <p className="text-sm text-gray-500">
-              Drop a <code className="text-brand-accent">*_plugin.py</code> file here
+              Drop an ingester file{' '}
+              <code className="text-brand-accent">*_plugin.py</code> here
             </p>
             <p className="text-xs text-gray-400">or click to browse</p>
           </div>
@@ -529,9 +530,9 @@ export default function Ingesters() {
           )}
         </div>
         <p className="text-xs text-gray-400 mb-4">
-          Upload a <code className="text-gray-500">*_plugin.py</code> file following the template above.
+          Upload a custom ingester file (named <code className="text-gray-500">*_plugin.py</code>) following the template above.
           Custom ingesters are stored in <code className="text-gray-500">/app/plugins/</code> and
-          loaded at worker startup (or after "Reload All").
+          activated at worker startup (or after "Reload All").
         </p>
 
         <UploadZone onUploaded={plugins => {
@@ -552,9 +553,9 @@ export default function Ingesters() {
             <Puzzle size={28} className="text-gray-300 mx-auto mb-3" />
             <p className="text-gray-500 text-sm font-medium mb-1">No custom ingesters</p>
             <p className="text-gray-400 text-xs">
-              Upload a plugin above or copy a{' '}
+              Upload a custom ingester above, or copy a{' '}
               <code className="text-gray-500">*_plugin.py</code> file into{' '}
-              <code className="text-gray-500">/app/plugins/</code> and click Reload.
+              <code className="text-gray-500">/app/plugins/</code> and click Reload All.
             </p>
           </div>
         ) : (
