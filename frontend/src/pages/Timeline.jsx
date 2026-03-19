@@ -681,12 +681,15 @@ function FilterButtons({ field, value, onIn, onOut }) {
 function EventRow({ event, index, onSelect, selected, keyboardSelected, onFilterIn, onFilterOut, rowRef, caseId, onFlagged, visibleCols }) {
   const vis  = col => visibleCols.includes(col)
   const art  = getArtifact(event)
-  const ts   = event.timestamp ? new Date(event.timestamp).toISOString().replace('T', ' ').slice(0, 19) : '—'
+  let ts = '—'
+  if (event.timestamp) {
+    try { ts = new Date(event.timestamp).toISOString().replace('T', ' ').slice(0, 19) } catch { ts = String(event.timestamp).slice(0, 19) }
+  }
   const type = event.artifact_type || 'generic'
   const color = ARTIFACT_COLORS[type] || ARTIFACT_COLORS.generic
 
   // Resolve per-column values (check artifact sub-doc first, then top-level)
-  const level    = (art.level    || event.level    || '').toLowerCase()
+  const level    = String(art.level || event.level || '').toLowerCase()
   const eventId  = art.event_id != null ? String(art.event_id) : ''
   const host     = event.host?.hostname || ''
   const user     = event.user?.name || ''
