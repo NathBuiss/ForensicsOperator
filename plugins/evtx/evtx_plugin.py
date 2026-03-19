@@ -106,7 +106,7 @@ class EvtxPlugin(BasePlugin):
             return n.get(attr, default) if n is not None else default
 
         event_id = int(sys_text("EventID") or 0)
-        timestamp = sys_attr("TimeCreated", "SystemTime")
+        timestamp = self._normalize_timestamp(sys_attr("TimeCreated", "SystemTime"))
         channel = sys_text("Channel")
         computer = sys_text("Computer")
         provider = sys_attr("Provider", "Name")
@@ -183,6 +183,31 @@ class EvtxPlugin(BasePlugin):
             },
             "raw": {"xml": xml_str},
         }
+
+    @staticmethod
+    def _normalize_timestamp(ts: str) -> str:
+        """
+        Truncate Windows EVTX timestamps to millisecond precision.
+
+        Windows stores SystemTime as 100-nanosecond intervals, producing 7
+        fractional digits (e.g. '2024-01-15T10:30:45.1234567Z').
+        Elasticsearch's strict_date_optional_time only accepts up to 3 decimal
+        places, so we truncate anything beyond milliseconds.
+        """
+        if not ts:
+            return ts
+        # Find the decimal point before the timezone suffix
+        dot = ts.find(".")
+        if dot == -1:
+            return ts
+        # Find where the fractional part ends (Z or + or -)
+        end = dot + 1
+        while end < len(ts) and ts[end].isdigit():
+            end += 1
+        suffix = ts[end:]           # 'Z' or '+00:00' etc.
+        frac = ts[dot + 1:end]      # fractional digits
+        frac = (frac + "000")[:3]   # pad to 3 digits, then truncate to 3
+        return ts[:dot + 1] + frac + suffix
 
     def _parse_pid(self, pid_str: str) -> int | None:
         if not pid_str:

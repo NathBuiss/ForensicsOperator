@@ -51,12 +51,12 @@ class ESBulkIndexer:
                         item for item in result.get("items", [])
                         if item.get("index", {}).get("error")
                     ]
-                    logger.warning(
+                    logger.error(
                         "Bulk indexing had %d errors (of %d total)",
                         len(error_items), len(events)
                     )
-                    for item in error_items[:3]:
-                        logger.debug("Bulk error: %s", item)
+                    for item in error_items[:5]:
+                        logger.error("Bulk error detail: %s", item)
                 else:
                     logger.debug("Bulk indexed %d events", len(events))
         except urllib.error.HTTPError as exc:
