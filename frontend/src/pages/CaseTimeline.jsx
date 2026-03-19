@@ -783,14 +783,16 @@ function ModuleRunCard({ run, caseId, navigate }) {
 
           {/* Tool output (stdout / log) */}
           {(hasOutput || run.status === 'FAILED') && (
-            <div className="border-t border-gray-100 bg-gray-50/80 px-4 py-2">
+            <div className="border-t border-gray-100 bg-gray-50/80 px-4 py-2.5">
               <button
                 onClick={() => setShowOutput(v => !v)}
-                className="w-full flex items-center gap-1.5 text-[10px] text-gray-400 hover:text-gray-600 transition-colors py-1"
+                className="flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-medium text-gray-600
+                           bg-white border border-gray-200 rounded-md hover:bg-gray-50
+                           hover:border-gray-300 transition-colors"
               >
                 <Terminal size={10} />
                 Tool output
-                <ChevronDown size={9} className={`ml-auto transition-transform ${showOutput ? 'rotate-180' : ''}`} />
+                <ChevronDown size={9} className={`ml-1 transition-transform ${showOutput ? 'rotate-180' : ''}`} />
               </button>
               {showOutput && (
                 <pre className="mt-1 bg-gray-950 text-green-300 rounded-lg p-3 text-[10px] font-mono overflow-x-auto max-h-72 leading-relaxed whitespace-pre-wrap break-all">

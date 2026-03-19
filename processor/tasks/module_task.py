@@ -333,61 +333,94 @@ def _parse_hayabusa_jsonl(path: Path, tool_meta: dict | None = None) -> list[dic
     """
     Parse Hayabusa output.  Handles two formats:
       • JSONL  – one JSON object per line  (Hayabusa default with .jsonl extension)
-      • JSON   – pretty-printed JSON array  (Hayabusa -o file.json, or pretty mode)
-    Also tolerates trailing commas and BOM headers.
+      • JSON   – a single JSON array       (Hayabusa -o file.json, pretty-print mode)
+
+    Streams line-by-line for JSONL to avoid loading the full file into memory.
+    utf-8-sig encoding handles UTF-8 BOM headers automatically.
     """
+
+    def _log(msg: str) -> None:
+        if tool_meta is not None:
+            tool_meta["log"] += msg
+
+    rows: list[dict] = []
     results: list[dict] = []
     skipped = 0
     total   = 0
     first_skip_msg = ""
 
-    # ── Read all rows regardless of format ───────────────────────────────────
-    rows: list[dict] = []
+    # ── Peek at the first non-empty line to detect format ────────────────────
+    first_line = ""
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
+            for raw_line in fh:
+                stripped_line = raw_line.strip()
+                if stripped_line:
+                    first_line = stripped_line
+                    break
+    except Exception as exc:
+        _log(f"\n[JSONL peek error: {exc}]\n")
+        return []
 
-    with open(path, "rb") as _fh:
-        raw = _fh.read()
+    _log(f"\nFirst non-empty line (120 chars): {first_line[:120]}\n")
 
-    # Strip BOM if present, decode
-    text = raw.lstrip(b"\xef\xbb\xbf").decode("utf-8", errors="replace")
-    stripped = text.lstrip()
-
-    if stripped.startswith("["):
-        # ── JSON array format ──────────────────────────────────────────────
+    if first_line.startswith("["):
+        # ── JSON array format — full read required ────────────────────────
         try:
+            with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
+                text = fh.read()
             data = json.loads(text)
             rows = data if isinstance(data, list) else [data]
-            if tool_meta is not None:
-                tool_meta["log"] += f"\n[format: JSON array, {len(rows):,} entries]\n"
-        except json.JSONDecodeError:
-            # Fallback: strip per-line trailing commas and parse line-by-line
-            for line in text.splitlines():
-                line = line.strip().rstrip(",")
-                if not line or line in ("[", "]"):
-                    continue
-                try:
-                    rows.append(json.loads(line))
-                except Exception:
-                    pass
-            if tool_meta is not None:
-                tool_meta["log"] += f"\n[format: JSON array (line fallback), {len(rows):,} entries]\n"
-    else:
-        # ── JSONL format ───────────────────────────────────────────────────
-        for lineno, line in enumerate(text.splitlines(), 1):
-            line = line.strip()
-            if not line:
-                continue
+            _log(f"\n[format: JSON array, {len(rows):,} entries]\n")
+        except (json.JSONDecodeError, MemoryError) as exc:
+            _log(f"\n[JSON array parse failed ({exc}); falling back to line-by-line]\n")
+            rows = []
             try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                # Try stripping a trailing comma (rare but seen in some builds)
-                try:
-                    rows.append(json.loads(line.rstrip(",")))
-                except Exception as exc:
-                    if lineno <= 3:
-                        logger.warning("Hayabusa: JSONL parse error line %d: %s | raw: %.120s",
-                                       lineno, exc, line)
-        if tool_meta is not None:
-            tool_meta["log"] += f"\n[format: JSONL, {len(rows):,} lines decoded]\n"
+                with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
+                    for line in fh:
+                        line = line.strip().rstrip(",")
+                        if not line or line in ("[", "]"):
+                            continue
+                        try:
+                            rows.append(json.loads(line))
+                        except Exception:
+                            pass
+                _log(f"\n[format: JSON array (line fallback), {len(rows):,} entries]\n")
+            except Exception as exc2:
+                _log(f"\n[line fallback error: {exc2}]\n")
+    else:
+        # ── JSONL format — stream line-by-line ───────────────────────────
+        parse_errors = 0
+        try:
+            with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
+                for lineno, raw_line in enumerate(fh, 1):
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rows.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        # Rare: some builds emit trailing commas
+                        try:
+                            rows.append(json.loads(line.rstrip(",")))
+                        except Exception as exc:
+                            parse_errors += 1
+                            if parse_errors <= 3:
+                                logger.warning(
+                                    "Hayabusa: JSONL parse error line %d: %s | raw: %.120s",
+                                    lineno, exc, line,
+                                )
+            _log(f"\n[format: JSONL, {len(rows):,} rows decoded, {parse_errors} parse errors]\n")
+        except Exception as exc:
+            _log(f"\n[JSONL streaming error: {exc}]\n")
+
+    # ── Log first row for diagnostics ─────────────────────────────────────────
+    if rows:
+        first_row = rows[0]
+        _log(f"\nFirst row keys: {list(first_row.keys())}\n")
+        _log(f"First row sample: {str(first_row)[:400]}\n")
+    else:
+        _log("\n[WARNING: 0 rows decoded from output file — check format above]\n")
 
     # ── Convert rows to hits ──────────────────────────────────────────────────
     for row in rows:
@@ -410,13 +443,12 @@ def _parse_hayabusa_jsonl(path: Path, tool_meta: dict | None = None) -> list[dic
             if skipped == 1:
                 first_skip_msg = f"row error: {exc} | keys: {list(row.keys())[:8]}"
 
-    logger.info("Hayabusa: %d rows decoded, %d hits parsed, %d skipped", total, len(results), skipped)
-    if tool_meta is not None:
-        tool_meta["log"] += (
-            f"\nDecoded {total:,} rows → {len(results):,} hits ({skipped:,} skipped)"
-            + (f"\n{first_skip_msg}" if first_skip_msg else "")
-            + "\n"
-        )
+    logger.info("Hayabusa: %d rows, %d hits, %d skipped", total, len(results), skipped)
+    _log(
+        f"\nDecoded {total:,} rows → {len(results):,} hits ({skipped:,} skipped)"
+        + (f"\n{first_skip_msg}" if first_skip_msg else "")
+        + "\n"
+    )
     return results
 
 

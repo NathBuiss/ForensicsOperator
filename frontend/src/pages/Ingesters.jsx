@@ -572,8 +572,8 @@ export default function Ingesters() {
                   {n}
                 </div>
                 <div>
-                  <p className="font-semibold text-brand-text mb-1">{title}</p>
-                  <p className="text-gray-500 leading-relaxed">{body}</p>
+                  <p className="font-semibold text-brand-text mb-1 text-xs">{title}</p>
+                  <p className="text-xs text-gray-500 leading-relaxed">{body}</p>
                 </div>
               </div>
             ))}

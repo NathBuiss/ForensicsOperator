@@ -1,5 +1,6 @@
 /**
  * Studio — in-browser code editor for custom ingesters and modules.
+ * Supports VS Code-style multi-file tabs with independent dirty state per tab.
  *
  * Ingesters  → ingester/*_ingester.py  — BasePlugin subclasses
  * Modules    → modules/*_module.py     — standalone run(run_id, …) functions
@@ -273,24 +274,34 @@ function CodeEditor({ value, onChange, readOnly = false }) {
 
 export default function Studio() {
   const location = useLocation()
-  const [tab, setTab]               = useState('ingesters')  // 'ingesters' | 'modules'
-  const [ingesterFiles, setIngFiles] = useState([])
-  const [moduleFiles, setModFiles]   = useState([])
-  const [selected, setSelected]     = useState(null)  // {type, name}
-  const [code, setCode]             = useState('')
-  const [originalCode, setOrigCode] = useState('')
-  const [loading, setLoading]       = useState(false)
-  const [saving, setSaving]         = useState(false)
-  const [validating, setValidating] = useState(false)
-  const [validation, setValidation] = useState(null)  // {valid, error?}
-  const [saveMsg, setSaveMsg]       = useState(null)
-  const [showNew, setShowNew]       = useState(false)
-  const [showDelete, setShowDelete] = useState(false)
-  const [copied, setCopied]         = useState(false)
 
-  const isDirty = code !== originalCode
+  // Sidebar panel selection ('ingesters' | 'modules')
+  const [sidebarTab, setSidebarTab]     = useState('ingesters')
+  const [ingesterFiles, setIngFiles]    = useState([])
+  const [moduleFiles, setModFiles]      = useState([])
 
-  // ── Load file lists ───────────────────────────────────────────────────────
+  // Multi-tab state — each tab: { type, name, code, originalCode, loading,
+  //   saving, validating, validation, saveMsg, copied }
+  const [openTabs, setOpenTabs]         = useState([])
+  const [activeTabKey, setActiveTabKey] = useState(null)   // "type:name"
+
+  // Modal visibility
+  const [showNew, setShowNew]           = useState(false)
+  const [showDelete, setShowDelete]     = useState(false)
+
+  // Derived state
+  const activeTab = openTabs.find(t => fileId(t.type, t.name) === activeTabKey) || null
+  const isDirty   = activeTab ? activeTab.code !== activeTab.originalCode : false
+
+  // ── Tab mutation helper ────────────────────────────────────────────────────
+
+  function updateTab(type, name, patch) {
+    setOpenTabs(tabs => tabs.map(t =>
+      t.type === type && t.name === name ? { ...t, ...patch } : t
+    ))
+  }
+
+  // ── Load file lists ────────────────────────────────────────────────────────
 
   const loadLists = useCallback(async () => {
     try {
@@ -306,6 +317,7 @@ export default function Studio() {
   useEffect(() => { loadLists() }, [loadLists])
 
   // ── Auto-open file when navigated from Modules / Ingesters pages ──────────
+
   const didAutoOpen = useRef(false)
   useEffect(() => {
     if (didAutoOpen.current) return
@@ -313,53 +325,101 @@ export default function Studio() {
     if (!state?.type) return
     const { type, name } = state
     const fileList = type === 'module' ? moduleFiles : ingesterFiles
-    if (fileList.length === 0) return  // wait until lists are loaded
+    if (fileList.length === 0) return   // wait until lists are loaded
     didAutoOpen.current = true
-    setTab(type === 'module' ? 'modules' : 'ingesters')
+    setSidebarTab(type === 'module' ? 'modules' : 'ingesters')
     if (name) {
-      // Try the exact name, then with suffix appended
       const suffix = type === 'module' ? '_module.py' : '_ingester.py'
       const candidateName = fileList.includes(name) ? name
         : fileList.includes(name + suffix) ? name + suffix
         : null
       if (candidateName) {
-        // Use setTimeout to let the tab switch render first
         setTimeout(() => openFile(type, candidateName), 50)
       }
     }
   }, [location.state, ingesterFiles, moduleFiles]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Open a file ───────────────────────────────────────────────────────────
+  // ── Open a file (or switch to existing tab) ───────────────────────────────
 
   async function openFile(type, name) {
-    if (isDirty && !confirm('Discard unsaved changes?')) return
-    setLoading(true)
-    setValidation(null)
-    setSaveMsg(null)
+    const key = fileId(type, name)
+
+    // Already open? Just switch to it
+    if (openTabs.some(t => fileId(t.type, t.name) === key)) {
+      setActiveTabKey(key)
+      return
+    }
+
+    // Add a new loading tab and make it active
+    const newTab = {
+      type, name,
+      code: '', originalCode: '',
+      loading: true, saving: false, validating: false,
+      validation: null, saveMsg: null, copied: false,
+    }
+    setOpenTabs(tabs => [...tabs, newTab])
+    setActiveTabKey(key)
+
     try {
       const res = type === 'ingester'
         ? await api.editor.getIngester(name)
         : await api.editor.getModule(name)
-      setCode(res.content)
-      setOrigCode(res.content)
-      setSelected({ type, name })
+      updateTab(type, name, {
+        code: res.content,
+        originalCode: res.content,
+        loading: false,
+      })
     } catch (err) {
+      // Remove the failed tab
+      setOpenTabs(tabs => tabs.filter(t => fileId(t.type, t.name) !== key))
+      setActiveTabKey(prev => prev === key ? null : prev)
       alert('Failed to load: ' + err.message)
-    } finally {
-      setLoading(false)
     }
   }
 
-  // ── Create new file ───────────────────────────────────────────────────────
+  // ── Close a tab (with unsaved-changes confirmation) ───────────────────────
+
+  function closeTab(type, name) {
+    const tab = openTabs.find(t => t.type === type && t.name === name)
+    if (!tab) return
+    if (tab.code !== tab.originalCode) {
+      if (!confirm(`Discard unsaved changes to ${name}?`)) return
+    }
+    const key = fileId(type, name)
+    const idx = openTabs.findIndex(t => fileId(t.type, t.name) === key)
+    const remaining = openTabs.filter(t => fileId(t.type, t.name) !== key)
+    setOpenTabs(remaining)
+    if (activeTabKey === key) {
+      const nextTab = remaining[idx] ?? remaining[idx - 1] ?? null
+      setActiveTabKey(nextTab ? fileId(nextTab.type, nextTab.name) : null)
+    }
+  }
+
+  // ── Create new file ────────────────────────────────────────────────────────
 
   async function handleCreate(name) {
-    const type = tab === 'ingesters' ? 'ingester' : 'module'
+    const type = sidebarTab === 'ingesters' ? 'ingester' : 'module'
     const stem = name.replace(/_ingester\.py$/, '').replace(/_module\.py$/, '')
     const template = type === 'ingester'
       ? INGESTER_TEMPLATE(stem)
       : MODULE_TEMPLATE(stem)
 
-    setSaving(true)
+    const key = fileId(type, name)
+    const newTab = {
+      type, name,
+      code: template, originalCode: template,
+      loading: false, saving: true, validating: false,
+      validation: null, saveMsg: null, copied: false,
+    }
+    // Open (or replace) tab immediately
+    setOpenTabs(tabs => {
+      const exists = tabs.some(t => fileId(t.type, t.name) === key)
+      return exists
+        ? tabs.map(t => fileId(t.type, t.name) === key ? newTab : t)
+        : [...tabs, newTab]
+    })
+    setActiveTabKey(key)
+
     try {
       if (type === 'ingester') {
         await api.editor.saveIngester(name, { content: template })
@@ -367,91 +427,100 @@ export default function Studio() {
         await api.editor.saveModule(name, { content: template })
       }
       await loadLists()
-      setCode(template)
-      setOrigCode(template)
-      setSelected({ type, name })
-      setValidation(null)
-      setSaveMsg({ ok: true, text: 'File created' })
-      setTimeout(() => setSaveMsg(null), 3000)
+      updateTab(type, name, {
+        saving: false,
+        saveMsg: { ok: true, text: 'File created' },
+      })
+      setTimeout(() => updateTab(type, name, { saveMsg: null }), 3000)
     } catch (err) {
+      updateTab(type, name, { saving: false })
       alert('Create failed: ' + err.message)
-    } finally {
-      setSaving(false)
     }
   }
 
-  // ── Save ──────────────────────────────────────────────────────────────────
+  // ── Save active tab ────────────────────────────────────────────────────────
 
   async function handleSave() {
-    if (!selected) return
-    setSaving(true)
-    setValidation(null)
-    setSaveMsg(null)
+    if (!activeTab) return
+    const { type, name, code } = activeTab   // capture at call time
+    updateTab(type, name, { saving: true, validation: null, saveMsg: null })
     try {
-      if (selected.type === 'ingester') {
-        await api.editor.saveIngester(selected.name, { content: code })
+      if (type === 'ingester') {
+        await api.editor.saveIngester(name, { content: code })
       } else {
-        await api.editor.saveModule(selected.name, { content: code })
+        await api.editor.saveModule(name, { content: code })
       }
-      setOrigCode(code)
-      setSaveMsg({ ok: true, text: 'Saved' })
-      setTimeout(() => setSaveMsg(null), 3000)
+      updateTab(type, name, {
+        originalCode: code,
+        saving: false,
+        saveMsg: { ok: true, text: 'Saved' },
+      })
+      setTimeout(() => updateTab(type, name, { saveMsg: null }), 3000)
     } catch (err) {
-      setSaveMsg({ ok: false, text: err.message })
-    } finally {
-      setSaving(false)
+      updateTab(type, name, {
+        saving: false,
+        saveMsg: { ok: false, text: err.message },
+      })
     }
   }
 
-  // ── Validate ──────────────────────────────────────────────────────────────
+  // ── Validate active tab ────────────────────────────────────────────────────
 
   async function handleValidate() {
-    setValidating(true)
-    setValidation(null)
+    if (!activeTab) return
+    const { type, name, code } = activeTab
+    updateTab(type, name, { validating: true, validation: null })
     try {
       const res = await api.editor.validate(code)
-      setValidation(res)
+      updateTab(type, name, { validating: false, validation: res })
     } catch (_) {
-      setValidation({ valid: false, error: 'Validation request failed' })
-    } finally {
-      setValidating(false)
+      updateTab(type, name, {
+        validating: false,
+        validation: { valid: false, error: 'Validation request failed' },
+      })
     }
   }
 
-  // ── Delete ────────────────────────────────────────────────────────────────
+  // ── Delete active tab's file ───────────────────────────────────────────────
 
   async function handleDelete() {
-    if (!selected) return
+    if (!activeTab) return
     setShowDelete(false)
+    const { type, name } = activeTab
+    const key = fileId(type, name)
+    const idx = openTabs.findIndex(t => fileId(t.type, t.name) === key)
     try {
-      if (selected.type === 'ingester') {
-        await api.editor.deleteIngester(selected.name)
+      if (type === 'ingester') {
+        await api.editor.deleteIngester(name)
       } else {
-        await api.editor.deleteModule(selected.name)
+        await api.editor.deleteModule(name)
       }
-      setSelected(null)
-      setCode('')
-      setOrigCode('')
-      setValidation(null)
+      // Force-close tab (no dirty check — file is already deleted)
+      const remaining = openTabs.filter(t => fileId(t.type, t.name) !== key)
+      setOpenTabs(remaining)
+      const nextTab = remaining[idx] ?? remaining[idx - 1] ?? null
+      setActiveTabKey(nextTab ? fileId(nextTab.type, nextTab.name) : null)
       await loadLists()
     } catch (err) {
       alert('Delete failed: ' + err.message)
     }
   }
 
-  // ── Copy ──────────────────────────────────────────────────────────────────
+  // ── Copy active tab ────────────────────────────────────────────────────────
 
   function handleCopy() {
+    if (!activeTab) return
+    const { type, name, code } = activeTab
     navigator.clipboard.writeText(code)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+    updateTab(type, name, { copied: true })
+    setTimeout(() => updateTab(type, name, { copied: false }), 2000)
   }
 
-  // ── File list for current tab ─────────────────────────────────────────────
+  // ── Sidebar helpers ────────────────────────────────────────────────────────
 
-  const files    = tab === 'ingesters' ? ingesterFiles : moduleFiles
-  const fileType = tab === 'ingesters' ? 'ingester' : 'module'
-  const existingNames = files.map(f => f.name)
+  const sidebarFiles    = sidebarTab === 'ingesters' ? ingesterFiles : moduleFiles
+  const sidebarFileType = sidebarTab === 'ingesters' ? 'ingester' : 'module'
+  const existingNames   = sidebarFiles.map(f => f.name)
 
   return (
     <div className="flex flex-1 overflow-hidden min-h-0">
@@ -459,12 +528,12 @@ export default function Studio() {
       {/* ── Sidebar ─────────────────────────────────────────────────────────── */}
       <aside className="w-56 flex-shrink-0 flex flex-col border-r border-gray-200 bg-white overflow-hidden">
 
-        {/* Tab switcher */}
+        {/* Panel tab switcher */}
         <div className="flex border-b border-gray-200 flex-shrink-0">
           <button
-            onClick={() => setTab('ingesters')}
+            onClick={() => setSidebarTab('ingesters')}
             className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium transition-colors ${
-              tab === 'ingesters'
+              sidebarTab === 'ingesters'
                 ? 'text-brand-accent border-b-2 border-brand-accent bg-brand-accentlight/50'
                 : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
             }`}
@@ -472,9 +541,9 @@ export default function Studio() {
             <Puzzle size={13} /> Ingesters
           </button>
           <button
-            onClick={() => setTab('modules')}
+            onClick={() => setSidebarTab('modules')}
             className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium transition-colors ${
-              tab === 'modules'
+              sidebarTab === 'modules'
                 ? 'text-brand-accent border-b-2 border-brand-accent bg-brand-accentlight/50'
                 : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
             }`}
@@ -489,33 +558,45 @@ export default function Studio() {
             onClick={() => setShowNew(true)}
             className="w-full btn-primary text-xs justify-center py-1.5"
           >
-            <Plus size={12} /> New {fileType === 'ingester' ? 'Ingester' : 'Module'}
+            <Plus size={12} /> New {sidebarFileType === 'ingester' ? 'Ingester' : 'Module'}
           </button>
         </div>
 
         {/* File list */}
         <div className="flex-1 overflow-y-auto py-1">
-          {files.length === 0 ? (
+          {sidebarFiles.length === 0 ? (
             <div className="px-3 py-4 text-center">
               <FileCode2 size={20} className="text-gray-300 mx-auto mb-2" />
               <p className="text-[11px] text-gray-400">No files yet</p>
             </div>
           ) : (
-            files.map(f => {
-              const isOpen = selected?.type === fileType && selected?.name === f.name
+            sidebarFiles.map(f => {
+              const key        = fileId(sidebarFileType, f.name)
+              const isActive   = activeTabKey === key
+              const openTab    = openTabs.find(t => fileId(t.type, t.name) === key)
+              const isOpen     = Boolean(openTab)
+              const isDirtyTab = isOpen && openTab.code !== openTab.originalCode
+
               return (
                 <button
                   key={f.name}
-                  onClick={() => openFile(fileType, f.name)}
+                  onClick={() => openFile(sidebarFileType, f.name)}
                   className={`w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors ${
-                    isOpen
+                    isActive
                       ? 'bg-brand-accentlight text-brand-accent'
-                      : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+                      : isOpen
+                        ? 'bg-blue-50/50 text-gray-700 hover:bg-blue-50'
+                        : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
                   }`}
                 >
                   <FileCode2 size={13} className="flex-shrink-0 opacity-60" />
                   <span className="text-[11px] font-mono truncate flex-1">{f.name}</span>
-                  {isOpen && <ChevronRight size={10} className="flex-shrink-0 opacity-50" />}
+                  {isDirtyTab && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0" title="Unsaved changes" />
+                  )}
+                  {isActive && !isDirtyTab && (
+                    <ChevronRight size={10} className="flex-shrink-0 opacity-50" />
+                  )}
                 </button>
               )
             })
@@ -526,19 +607,73 @@ export default function Studio() {
       {/* ── Editor pane ─────────────────────────────────────────────────────── */}
       <div className="flex-1 flex flex-col overflow-hidden">
 
-        {selected ? (
+        {/* ── Tab bar ───────────────────────────────────────────────────────── */}
+        {openTabs.length > 0 && (
+          <div className="flex items-stretch border-b border-gray-200 bg-gray-50/80 overflow-x-auto flex-shrink-0">
+            {openTabs.map(t => {
+              const key      = fileId(t.type, t.name)
+              const isActive = key === activeTabKey
+              const tabDirty = t.code !== t.originalCode
+
+              return (
+                <div
+                  key={key}
+                  onClick={() => setActiveTabKey(key)}
+                  className={`flex items-center gap-1.5 px-3 py-2 border-r border-gray-200
+                    cursor-pointer flex-shrink-0 max-w-[200px] group transition-colors
+                    ${isActive
+                      ? 'bg-white border-b-2 border-b-brand-accent text-gray-800'
+                      : 'border-b-2 border-b-transparent text-gray-500 hover:bg-gray-100 hover:text-gray-700'
+                    }`}
+                >
+                  {/* Type badge */}
+                  <span className={`text-[9px] px-1 py-px rounded font-bold flex-shrink-0 ${
+                    t.type === 'ingester'
+                      ? 'bg-blue-100 text-blue-600'
+                      : 'bg-purple-100 text-purple-600'
+                  }`}>
+                    {t.type === 'ingester' ? 'I' : 'M'}
+                  </span>
+
+                  {/* Filename */}
+                  <span className="text-[11px] font-mono truncate flex-1 min-w-0">{t.name}</span>
+
+                  {/* Dirty dot — always visible when dirty; hidden by close btn on hover */}
+                  {tabDirty && (
+                    <span
+                      className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0 group-hover:hidden"
+                      title="Unsaved changes"
+                    />
+                  )}
+
+                  {/* Close button — visible on hover or when active */}
+                  <button
+                    onClick={e => { e.stopPropagation(); closeTab(t.type, t.name) }}
+                    className={`rounded p-0.5 hover:bg-gray-200 flex-shrink-0 transition-opacity
+                      ${isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+                    title="Close tab"
+                  >
+                    <X size={9} className="text-gray-500" />
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        {activeTab ? (
           <>
             {/* Editor toolbar */}
             <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200 bg-white flex-shrink-0 gap-3">
               <div className="flex items-center gap-2 min-w-0">
                 <span className={`badge text-[10px] ${
-                  selected.type === 'ingester'
+                  activeTab.type === 'ingester'
                     ? 'bg-blue-50 text-blue-700 border border-blue-100'
                     : 'bg-purple-50 text-purple-700 border border-purple-100'
                 }`}>
-                  {selected.type === 'ingester' ? 'ingester' : 'module'}
+                  {activeTab.type === 'ingester' ? 'ingester' : 'module'}
                 </span>
-                <code className="text-xs font-mono text-gray-700 truncate">{selected.name}</code>
+                <code className="text-xs font-mono text-gray-700 truncate">{activeTab.name}</code>
                 {isDirty && (
                   <span className="w-2 h-2 rounded-full bg-amber-400 flex-shrink-0" title="Unsaved changes" />
                 )}
@@ -546,46 +681,51 @@ export default function Studio() {
 
               <div className="flex items-center gap-1.5 flex-shrink-0">
                 {/* Validation result badge */}
-                {validation && (
-                  validation.valid
+                {activeTab.validation && (
+                  activeTab.validation.valid
                     ? <span className="flex items-center gap-1 text-[11px] text-green-700 bg-green-50 border border-green-200 rounded-lg px-2 py-0.5">
                         <CheckCircle size={11} /> Valid
                       </span>
-                    : <span className="flex items-center gap-1 text-[11px] text-red-600 bg-red-50 border border-red-200 rounded-lg px-2 py-0.5 max-w-xs truncate" title={validation.error}>
+                    : <span className="flex items-center gap-1 text-[11px] text-red-600 bg-red-50 border border-red-200 rounded-lg px-2 py-0.5 max-w-xs truncate" title={activeTab.validation.error}>
                         <AlertCircle size={11} />
-                        <span className="truncate">{validation.error}</span>
+                        <span className="truncate">{activeTab.validation.error}</span>
                       </span>
                 )}
+
                 {/* Save message */}
-                {saveMsg && (
-                  <span className={`text-[11px] ${saveMsg.ok ? 'text-green-700' : 'text-red-600'}`}>
-                    {saveMsg.ok ? <CheckCircle size={11} className="inline mr-1" /> : <AlertCircle size={11} className="inline mr-1" />}
-                    {saveMsg.text}
+                {activeTab.saveMsg && (
+                  <span className={`text-[11px] ${activeTab.saveMsg.ok ? 'text-green-700' : 'text-red-600'}`}>
+                    {activeTab.saveMsg.ok
+                      ? <CheckCircle size={11} className="inline mr-1" />
+                      : <AlertCircle size={11} className="inline mr-1" />}
+                    {activeTab.saveMsg.text}
                   </span>
                 )}
 
                 <button onClick={handleCopy} className="btn-ghost text-xs py-1 px-2">
-                  {copied ? <><Check size={12} className="text-green-600" /> Copied</> : <><Copy size={12} /> Copy</>}
+                  {activeTab.copied
+                    ? <><Check size={12} className="text-green-600" /> Copied</>
+                    : <><Copy size={12} /> Copy</>}
                 </button>
                 <button
                   onClick={handleValidate}
-                  disabled={validating}
+                  disabled={activeTab.validating}
                   className="btn-outline text-xs py-1 px-2"
                 >
-                  {validating
+                  {activeTab.validating
                     ? <RefreshCw size={12} className="animate-spin" />
                     : <Play size={12} />}
-                  {validating ? 'Checking…' : 'Validate'}
+                  {activeTab.validating ? 'Checking…' : 'Validate'}
                 </button>
                 <button
                   onClick={handleSave}
-                  disabled={saving || !isDirty}
+                  disabled={activeTab.saving || !isDirty}
                   className="btn-primary text-xs py-1 px-2"
                 >
-                  {saving
+                  {activeTab.saving
                     ? <RefreshCw size={12} className="animate-spin" />
                     : <Save size={12} />}
-                  {saving ? 'Saving…' : 'Save'}
+                  {activeTab.saving ? 'Saving…' : 'Save'}
                 </button>
                 <button
                   onClick={() => setShowDelete(true)}
@@ -597,23 +737,27 @@ export default function Studio() {
             </div>
 
             {/* Validation error detail */}
-            {validation && !validation.valid && validation.error && (
+            {activeTab.validation && !activeTab.validation.valid && activeTab.validation.error && (
               <div className="bg-red-50 border-b border-red-200 px-4 py-2 flex items-start gap-2">
                 <AlertCircle size={13} className="text-red-500 flex-shrink-0 mt-0.5" />
                 <pre className="text-[11px] text-red-700 font-mono whitespace-pre-wrap break-all leading-relaxed">
-                  {validation.error}
+                  {activeTab.validation.error}
                 </pre>
               </div>
             )}
 
-            {/* Code editor */}
+            {/* Code editor — remount on tab switch to reset cursor position */}
             <div className="flex-1 overflow-hidden">
-              {loading ? (
+              {activeTab.loading ? (
                 <div className="h-full bg-gray-950 flex items-center justify-center">
                   <RefreshCw size={20} className="animate-spin text-gray-500" />
                 </div>
               ) : (
-                <CodeEditor value={code} onChange={setCode} />
+                <CodeEditor
+                  key={activeTabKey}
+                  value={activeTab.code}
+                  onChange={v => updateTab(activeTab.type, activeTab.name, { code: v })}
+                />
               )}
             </div>
           </>
@@ -641,15 +785,15 @@ export default function Studio() {
       {/* ── Modals ──────────────────────────────────────────────────────────── */}
       {showNew && (
         <NewFileModal
-          type={fileType}
+          type={sidebarFileType}
           existing={existingNames}
           onClose={() => setShowNew(false)}
           onCreate={handleCreate}
         />
       )}
-      {showDelete && selected && (
+      {showDelete && activeTab && (
         <DeleteConfirmModal
-          file={selected.name}
+          file={activeTab.name}
           onClose={() => setShowDelete(false)}
           onConfirm={handleDelete}
         />
