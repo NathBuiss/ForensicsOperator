@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import { api } from '../api/client'
 
-const ACCEPTED_TYPES = ['.evtx', '.plaso', '.pf', '.lnk', '.dat', '.hive', '.jsonl', '.csv']
+const ACCEPTED_TYPES = ['.evtx', '.plaso', '.pf', '.lnk', '.dat', '.hive', '.jsonl', '.csv', '.zip']
 const ACCEPTED_NAMES = ['$MFT', 'NTUSER.DAT', 'SYSTEM', 'SOFTWARE', 'SAM', 'SECURITY']
+const ACCEPT_ATTR   = [...ACCEPTED_TYPES, ...ACCEPTED_NAMES.map(n => `.${n.replace('$', '')}`)].join(',')
 
 function JobCard({ jobId }) {
   const [job, setJob] = useState(null)
@@ -44,6 +45,9 @@ function JobCard({ jobId }) {
 
       {job.plugin_used && (
         <p className="text-xs text-gray-500">Plugin: <code className="font-mono">{job.plugin_used}</code></p>
+      )}
+      {job.source_zip && (
+        <p className="text-xs text-gray-400">From: <span className="font-mono">{job.source_zip}</span></p>
       )}
 
       {job.status === 'RUNNING' && (
@@ -114,8 +118,12 @@ export default function Ingest({ caseId, onComplete }) {
   return (
     <div className="p-6 max-w-2xl">
       <h2 className="text-sm font-semibold text-brand-text mb-1">Ingest Forensics Files</h2>
-      <p className="text-xs text-gray-500 mb-4">
+      <p className="text-xs text-gray-500 mb-1">
         Supported: {ACCEPTED_TYPES.join(', ')}, {ACCEPTED_NAMES.join(', ')}
+      </p>
+      <p className="text-xs text-gray-400 mb-4">
+        📦 <strong>.zip</strong> archives are extracted automatically — each file inside is processed as a separate job.
+        Large files are streamed directly to storage.
       </p>
 
       {/* Dropzone */}
@@ -134,6 +142,7 @@ export default function Ingest({ caseId, onComplete }) {
           ref={inputRef}
           type="file"
           multiple
+          accept={ACCEPT_ATTR}
           className="hidden"
           onChange={e => handleFiles([...e.target.files])}
         />

@@ -17,7 +17,13 @@ def get_redis() -> redis_lib.Redis:
     return redis_lib.Redis.from_url(settings.REDIS_URL, decode_responses=True)
 
 
-def create_job(job_id: str, case_id: str, filename: str, minio_key: str) -> dict:
+def create_job(
+    job_id: str,
+    case_id: str,
+    filename: str,
+    minio_key: str,
+    source_zip: str = "",
+) -> dict:
     r = get_redis()
     job = {
         "job_id": job_id,
@@ -32,6 +38,7 @@ def create_job(job_id: str, case_id: str, filename: str, minio_key: str) -> dict
         "started_at": "",
         "completed_at": "",
         "task_id": "",
+        "source_zip": source_zip,
     }
     r.hset(f"job:{job_id}", mapping=job)
     r.expire(f"job:{job_id}", JOB_TTL)
