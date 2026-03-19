@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import {
   Upload, Search, Bell, X, ChevronRight, AlertTriangle,
   CheckCircle, Clock, Database, Loader2, Shield,
-  Cpu, Plus, Download, Play, Terminal,
+  Cpu, RefreshCw, Plus, Download, Play, Terminal,
   AlertCircle, ChevronDown, FileCode, ExternalLink,
 } from 'lucide-react'
 import { api } from '../api/client'
@@ -853,7 +853,7 @@ function ModuleRunsPanel({ caseId, onClose }) {
               className="btn-ghost p-1.5 rounded-lg"
               title="Refresh"
             >
-              <RotateCcw size={14} />
+              <RefreshCw size={14} />
             </button>
             <button onClick={onClose} className="btn-ghost p-1.5 rounded-lg">
               <X size={16} />
