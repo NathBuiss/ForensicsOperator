@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import {
   Upload, Search, Bell, X, ChevronRight, AlertTriangle,
   CheckCircle, Clock, Database, Loader2, Shield,
-  Cpu, History, Plus, Download, Play, Terminal,
+  Cpu, Plus, Download, Play, Terminal,
   AlertCircle, ChevronDown, FileCode, ExternalLink,
 } from 'lucide-react'
 import { api } from '../api/client'
@@ -1032,7 +1032,7 @@ export default function CaseTimeline() {
               className="btn-ghost p-1.5 rounded-lg text-gray-400 hover:text-brand-accent"
               title="View module runs"
             >
-              <History size={14} />
+              <Clock size={14} />
             </button>
           )}
         </div>
