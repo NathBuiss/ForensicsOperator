@@ -155,9 +155,10 @@ def process_artifact(
             "plugin_stats": stats,
             "completed_at": datetime.now(timezone.utc).isoformat(),
         }
-        update_job_status(r, job_id, **{k: str(v) if not isinstance(v, str) else v
-                                         for k, v in result.items()},
-                          plugin_stats=json.dumps(stats))
+        update_job_status(r, job_id, **{
+            k: json.dumps(v) if isinstance(v, (dict, list)) else str(v)
+            for k, v in result.items()
+        })
         logger.info("[%s] Completed: %d events indexed", job_id, events_indexed)
         return result
 
