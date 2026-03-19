@@ -14,49 +14,61 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Optional, Type
 
 logger = logging.getLogger(__name__)
 
-# Import from the shared plugins volume (mounted at /app/plugins)
-PLUGINS_DIR = Path("/app/plugins")
+# Built-in plugins (read-only volume)
+PLUGINS_DIR  = Path("/app/plugins")
+# Custom ingesters created via the Studio UI (read-write shared volume)
+INGESTER_DIR = Path(os.getenv("INGESTER_DIR", "/app/ingester"))
 
 
 class PluginLoader:
-    def __init__(self, plugins_dir: Path = PLUGINS_DIR) -> None:
-        self.plugins_dir = plugins_dir
+    def __init__(self, plugins_dir: Path = PLUGINS_DIR,
+                 ingester_dir: Path = INGESTER_DIR) -> None:
+        self.plugins_dir  = plugins_dir
+        self.ingester_dir = ingester_dir
         self._plugin_classes: list[type] = []
         self._loaded = False
 
     def load(self) -> None:
-        """Scan the plugins directory and import all plugin modules."""
+        """Scan built-in plugins/ and custom ingester/ directories."""
         self._plugin_classes = []
 
         if not self.plugins_dir.exists():
             logger.warning("Plugins directory %s does not exist", self.plugins_dir)
             return
 
-        # Add sys.path entries FIRST so that "from plugins.base_plugin import ..."
-        # resolves correctly before any import is attempted.
         plugins_str = str(self.plugins_dir)
         if plugins_str not in sys.path:
             sys.path.insert(0, plugins_str)
 
-        # Parent of plugins_dir (/app) must be on sys.path so the "plugins"
-        # namespace package is discoverable.
         parent_str = str(self.plugins_dir.parent)
         if parent_str not in sys.path:
             sys.path.insert(0, parent_str)
 
-        from plugins.base_plugin import BasePlugin  # noqa: F401 - needed for isinstance checks
+        from plugins.base_plugin import BasePlugin  # noqa: F401
 
-        # Find all *_plugin.py files recursively
+        # Built-in plugins (*_plugin.py)
         for plugin_file in sorted(self.plugins_dir.rglob("*_plugin.py")):
             if plugin_file.name.startswith("_"):
                 continue
             self._load_module(plugin_file)
+
+        # Custom ingesters (*_ingester.py) — created via Studio
+        if self.ingester_dir.exists():
+            for plugin_file in sorted(self.ingester_dir.glob("*_ingester.py")):
+                if plugin_file.name.startswith("_"):
+                    continue
+                self._load_module(plugin_file)
+            if list(self.ingester_dir.glob("*_ingester.py")):
+                logger.info("Loaded custom ingesters from %s", self.ingester_dir)
+        else:
+            logger.debug("Custom ingester dir %s not found — skipping", self.ingester_dir)
 
         self._loaded = True
         logger.info(

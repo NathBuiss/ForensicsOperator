@@ -15,17 +15,22 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-PLUGINS_DIR = Path("/app/plugins")
+PLUGINS_DIR   = Path("/app/plugins")
+INGESTER_DIR  = Path(os.getenv("INGESTER_DIR", "/app/ingester"))
+
+import os as _os_module  # noqa: E402  (used only for getenv above)
 
 
 class PluginLoader:
-    def __init__(self, plugins_dir: Path = PLUGINS_DIR) -> None:
-        self.plugins_dir = plugins_dir
+    def __init__(self, plugins_dir: Path = PLUGINS_DIR,
+                 ingester_dir: Path = INGESTER_DIR) -> None:
+        self.plugins_dir   = plugins_dir
+        self.ingester_dir  = ingester_dir
         self._plugin_classes: list[type] = []
         self._loaded = False
 
     def load(self) -> None:
-        """Scan the plugins directory and import all plugin modules."""
+        """Scan built-in plugins/ and custom ingester/ directories."""
         self._plugin_classes = []
 
         if not self.plugins_dir.exists():
@@ -42,10 +47,20 @@ class PluginLoader:
 
         from plugins.base_plugin import BasePlugin  # noqa: F401
 
+        # Built-in plugins (*_plugin.py under plugins/)
         for plugin_file in sorted(self.plugins_dir.rglob("*_plugin.py")):
             if plugin_file.name.startswith("_"):
                 continue
             self._load_module(plugin_file)
+
+        # Custom ingesters (*_ingester.py under ingester/)
+        if self.ingester_dir.exists():
+            for plugin_file in sorted(self.ingester_dir.glob("*_ingester.py")):
+                if plugin_file.name.startswith("_"):
+                    continue
+                self._load_module(plugin_file)
+        else:
+            logger.debug("Custom ingester directory %s not found — skipping", self.ingester_dir)
 
         self._loaded = True
         logger.info(

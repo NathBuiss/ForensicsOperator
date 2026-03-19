@@ -33,6 +33,9 @@ MINIO_ACCESS   = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET   = os.getenv("MINIO_SECRET_KEY", "minioadmin")
 MINIO_BUCKET   = os.getenv("MINIO_BUCKET",     "forensics-cases")
 
+# Custom modules directory (shared volume, created via Studio UI)
+CUSTOM_MODULES_DIR = Path(os.getenv("MODULES_DIR", "/app/modules"))
+
 MODULE_RUN_TTL = 604800  # 7 days
 
 LEVEL_INT = {
@@ -50,6 +53,31 @@ _ANSI_RE = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-9;]*[ -/]*[@-~])')
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub('', text)
+
+
+def _load_custom_module_runner(module_id: str, tool_meta: dict):
+    """
+    Dynamically load and return the run() function from modules/{module_id}_module.py.
+    Returns None if the file doesn't exist or fails to load.
+    """
+    module_file = CUSTOM_MODULES_DIR / f"{module_id}_module.py"
+    if not module_file.exists():
+        return None
+    try:
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location(f"_fo_cmod_{module_id}", module_file)
+        mod  = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        run_fn = getattr(mod, "run", None)
+        if run_fn is None:
+            raise RuntimeError("Module file has no run() function")
+        logger.info("Loaded custom module: %s", module_file)
+        tool_meta["log"] += f"[custom module] Loaded from {module_file}\n"
+        return run_fn
+    except Exception as exc:
+        logger.error("Failed to load custom module %s: %s", module_file, exc)
+        tool_meta["log"] += f"[custom module] Load error: {exc}\n"
+        raise RuntimeError(f"Custom module '{module_id}' failed to load: {exc}") from exc
 
 
 def get_redis() -> redis.Redis:
@@ -123,6 +151,10 @@ def run_module(
             "exiftool":    _run_exiftool,
         }
         runner = RUNNERS.get(module_id)
+
+        # Fall back to custom module from modules/ directory
+        if runner is None:
+            runner = _load_custom_module_runner(module_id, tool_meta)
         if not runner:
             raise RuntimeError(f"Unknown module: {module_id}")
 

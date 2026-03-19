@@ -14,12 +14,14 @@ affecting the main event timeline.
 """
 from __future__ import annotations
 
-import uuid
+import importlib.util
 import logging
+import os
+import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from services.jobs import list_case_jobs
@@ -29,6 +31,8 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["modules"])
+
+CUSTOM_MODULES_DIR = Path(os.getenv("MODULES_DIR", "/app/modules"))
 
 # ── Module registry ───────────────────────────────────────────────────────────
 # input_extensions : list of file extensions to match (lower-case, with dot)
@@ -172,9 +176,48 @@ class CreateModuleRunRequest(BaseModel):
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
+def _get_custom_modules() -> list[dict]:
+    """Scan CUSTOM_MODULES_DIR and return metadata for each *_module.py file."""
+    if not CUSTOM_MODULES_DIR.exists():
+        return []
+    built_in_ids = {m["id"] for m in MODULES}
+    result = []
+    for f in sorted(CUSTOM_MODULES_DIR.glob("*_module.py")):
+        module_id = f.stem[: -len("_module")]  # strip trailing _module
+        if module_id in built_in_ids:
+            continue  # skip if it shadows a built-in
+        try:
+            spec = importlib.util.spec_from_file_location(f"_meta_{module_id}", f)
+            if spec is None or spec.loader is None:
+                raise RuntimeError("Cannot create module spec")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)  # type: ignore[union-attr]
+            result.append({
+                "id":               module_id,
+                "name":             getattr(mod, "MODULE_NAME", module_id.replace("_", " ").title()),
+                "description":      getattr(mod, "MODULE_DESCRIPTION", "Custom analysis module"),
+                "input_extensions": getattr(mod, "INPUT_EXTENSIONS", []),
+                "input_filenames":  getattr(mod, "INPUT_FILENAMES", []),
+                "available":        True,
+                "custom":           True,
+            })
+        except Exception as exc:
+            result.append({
+                "id":                  module_id,
+                "name":                module_id.replace("_", " ").title(),
+                "description":         f"Load error: {exc}",
+                "input_extensions":    [],
+                "input_filenames":     [],
+                "available":           False,
+                "unavailable_reason":  f"Load error: {exc}",
+                "custom":              True,
+            })
+    return result
+
+
 @router.get("/modules")
 def list_modules():
-    return {"modules": MODULES}
+    return {"modules": MODULES + _get_custom_modules()}
 
 
 @router.get("/cases/{case_id}/sources")

@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react'
 import {
   LayoutDashboard, Puzzle, FolderOpen,
   Plus, X, ChevronRight, Bell, Sun, Moon, Cpu, PackageOpen, Layers,
+  Code2, BookOpen,
 } from 'lucide-react'
 import { api } from '../../api/client'
 
@@ -83,11 +84,11 @@ export default function Layout() {
           </button>
         </div>
 
-        <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-0.5 scrollbar-thin">
+        <nav className="flex-1 overflow-y-auto py-3 px-2 scrollbar-thin">
 
-          {/* Main nav */}
-          <p className="px-2 mb-1.5 text-[10px] font-semibold text-white/30 uppercase tracking-widest">
-            Navigation
+          {/* ── Platform ─────────────────────────────── */}
+          <p className="px-2 mb-1.5 mt-1 text-[10px] font-semibold text-white/30 uppercase tracking-widest">
+            Platform
           </p>
 
           <NavLink to="/" end className={({ isActive }) =>
@@ -102,16 +103,21 @@ export default function Layout() {
             Cases
           </NavLink>
 
+          <NavLink to="/collector" className={({ isActive }) =>
+            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
+            <PackageOpen size={15} />
+            Collector
+          </NavLink>
+
+          {/* ── Detection ────────────────────────────── */}
+          <p className="px-2 mb-1.5 mt-4 text-[10px] font-semibold text-white/30 uppercase tracking-widest">
+            Detection
+          </p>
+
           <NavLink to="/alert-rules" className={({ isActive }) =>
             isActive ? 'nav-item-active' : 'nav-item-inactive'}>
             <Bell size={15} />
             Alert Rules
-          </NavLink>
-
-          <NavLink to="/ingesters" className={({ isActive }) =>
-            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
-            <Puzzle size={15} />
-            Ingesters
           </NavLink>
 
           <NavLink to="/modules" className={({ isActive }) =>
@@ -120,10 +126,27 @@ export default function Layout() {
             Modules
           </NavLink>
 
-          <NavLink to="/collector" className={({ isActive }) =>
+          {/* ── Developer ────────────────────────────── */}
+          <p className="px-2 mb-1.5 mt-4 text-[10px] font-semibold text-white/30 uppercase tracking-widest">
+            Developer
+          </p>
+
+          <NavLink to="/ingesters" className={({ isActive }) =>
             isActive ? 'nav-item-active' : 'nav-item-inactive'}>
-            <PackageOpen size={15} />
-            Collector
+            <Puzzle size={15} />
+            Ingesters
+          </NavLink>
+
+          <NavLink to="/studio" className={({ isActive }) =>
+            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
+            <Code2 size={15} />
+            Studio
+          </NavLink>
+
+          <NavLink to="/docs" className={({ isActive }) =>
+            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
+            <BookOpen size={15} />
+            Docs
           </NavLink>
 
           {/* Cases section */}
@@ -197,7 +220,11 @@ export default function Layout() {
       </aside>
 
       {/* ── Main content ─────────────────────────────────────────────────── */}
-      <main className="flex-1 overflow-y-auto bg-gray-50">
+      {/*
+        flex flex-col: makes children that use flex-1 fill the height.
+        overflow-y-auto: regular pages scroll; Studio/Docs manage their own overflow.
+      */}
+      <main className="flex-1 flex flex-col overflow-y-auto bg-gray-50">
         <Outlet context={{ refreshCases }} />
       </main>
     </div>

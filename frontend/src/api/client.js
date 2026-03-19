@@ -104,6 +104,21 @@ export const api = {
     validateYara:   (rules)         => request('POST', '/modules/yara/validate', { rules }),
   },
 
+  editor: {
+    // Ingesters
+    listIngesters:  ()             => request('GET',    '/editor/ingesters'),
+    getIngester:    (name)         => request('GET',    `/editor/ingesters/${name}`),
+    saveIngester:   (name, data)   => request('PUT',    `/editor/ingesters/${name}`, data),
+    deleteIngester: (name)         => request('DELETE', `/editor/ingesters/${name}`),
+    // Modules
+    listModules:    ()             => request('GET',    '/editor/modules'),
+    getModule:      (name)         => request('GET',    `/editor/modules/${name}`),
+    saveModule:     (name, data)   => request('PUT',    `/editor/modules/${name}`, data),
+    deleteModule:   (name)         => request('DELETE', `/editor/modules/${name}`),
+    // Syntax validation
+    validate:       (code)         => request('POST',   '/editor/validate', { code }),
+  },
+
   collector: {
     /**
      * Returns the download URL for the configured collector script.

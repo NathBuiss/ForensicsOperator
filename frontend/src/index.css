@@ -179,10 +179,28 @@
   }
 }
 
+  /* ─ Studio / code editor full-height layout ─ */
+  .studio-layout {
+    @apply flex h-full overflow-hidden;
+  }
+
+  /* ─ Docs prose links ─ */
+  .docs-link {
+    @apply text-brand-accent hover:underline;
+  }
+
+  /* ─ Nav group label ─ */
+  .nav-group-label {
+    @apply px-2 mb-1.5 text-[10px] font-semibold text-white/30 uppercase tracking-widest;
+  }
+}
+
 /* ── Utilities ────────────────────────────────────────────────────────────── */
 
 @layer utilities {
   .scrollbar-thin { scrollbar-width: thin; }
+  /* Full-height outlet — needed for Studio & Docs */
+  .h-outlet { height: calc(100vh); }
 }
 
 /* ── Dark Mode ────────────────────────────────────────────────────────────── */

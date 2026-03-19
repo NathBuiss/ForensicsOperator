@@ -61,12 +61,16 @@ services:
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=forensics-cases
       - PLUGINS_DIR=/app/plugins
+      - INGESTER_DIR=/app/ingester
+      - MODULES_DIR=/app/modules
       # Set FO_PUBLIC_URL to your machine's LAN IP so the Collector page
       # can auto-detect the correct address for remote artifact upload.
       # Example: - FO_PUBLIC_URL=http://192.168.1.100:8000
       # - FO_PUBLIC_URL=
     volumes:
       - ./plugins:/app/plugins:ro
+      - ./ingester:/app/ingester   # custom ingesters (read-write: created via Studio)
+      - ./modules:/app/modules     # custom modules   (read-write: created via Studio)
       - ./api:/app
       - ./collector:/app/collector:ro
     depends_on:
@@ -86,8 +90,12 @@ services:
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=forensics-cases
       - BULK_SIZE=500
+      - INGESTER_DIR=/app/ingester
+      - MODULES_DIR=/app/modules
     volumes:
       - ./plugins:/app/plugins
+      - ./ingester:/app/ingester   # custom ingesters (shared with api)
+      - ./modules:/app/modules     # custom modules   (shared with api)
       - ./processor:/app
     depends_on:
       - redis

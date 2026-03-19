@@ -35,100 +35,96 @@ GLOBAL_SEEDED_KEY = "fo:alert_rules:_global:seeded"
 #   artifact_type     — Ingester that produced the event (evtx, suricata, syslog…)
 
 DEFAULT_RULES: list[dict] = [
+    # ── Anti-forensics ─────────────────────────────────────────────────────────
     {
-        "name":          "Security Event Log Cleared",
-        "description":   "The Windows Security audit log was cleared — this is a key anti-forensics indicator and should always be investigated.",
+        "name":          "Windows Event Log Cleared",
+        "description":   "The Windows Security (EID 1102) or System (EID 104) audit log was cleared. "
+                         "A strong anti-forensics indicator — always investigate immediately.",
         "artifact_type": "evtx",
-        "query":         "evtx.event_id:1102",
+        "query":         "evtx.event_id:1102 OR evtx.event_id:104",
         "threshold":     1,
     },
     {
-        "name":          "System Event Log Cleared",
-        "description":   "The Windows System event log was cleared (Event ID 104). Often accompanies Security log clearing during intrusion clean-up.",
+        "name":          "Audit Policy Modified",
+        "description":   "The system audit policy was changed (EID 4719). Attackers disable auditing "
+                         "before carrying out malicious actions to evade detection.",
         "artifact_type": "evtx",
-        "query":         "evtx.event_id:104",
+        "query":         "evtx.event_id:4719",
         "threshold":     1,
     },
+    # ── Authentication ─────────────────────────────────────────────────────────
     {
         "name":          "Brute Force — Multiple Failed Logons",
-        "description":   "More than 10 failed authentication attempts (EID 4625). Indicates a password spray or brute-force attack against local or network accounts.",
+        "description":   "More than 10 failed authentication attempts (EID 4625). Indicates a "
+                         "password spray or brute-force attack against local or network accounts.",
         "artifact_type": "evtx",
         "query":         "evtx.event_id:4625",
         "threshold":     10,
     },
     {
+        "name":          "Explicit Credential Use (Pass-the-Hash / RunAs)",
+        "description":   "A process authenticated using explicitly supplied credentials (EID 4648). "
+                         "Common during lateral movement, pass-the-hash, or RunAs abuse.",
+        "artifact_type": "evtx",
+        "query":         "evtx.event_id:4648",
+        "threshold":     1,
+    },
+    # ── Privilege & Group changes ───────────────────────────────────────────────
+    {
         "name":          "Account Added to Privileged Group",
-        "description":   "A user was added to a Global (4728), Local (4732), or Universal (4756) security group — common persistence or privilege escalation step.",
+        "description":   "A user was added to a Global (4728), Local (4732), or Universal (4756) "
+                         "security group — common persistence or privilege escalation step.",
         "artifact_type": "evtx",
         "query":         "evtx.event_id:4728 OR evtx.event_id:4732 OR evtx.event_id:4756",
         "threshold":     1,
     },
+    # ── Persistence ────────────────────────────────────────────────────────────
     {
         "name":          "New Service Installed",
-        "description":   "A new Windows service was installed (EID 7045). Malware frequently uses services for persistence (e.g. malicious drivers, RAT services).",
+        "description":   "A new Windows service was installed (EID 7045). Malware frequently uses "
+                         "services for persistence (e.g. malicious drivers, RAT services).",
         "artifact_type": "evtx",
         "query":         "evtx.event_id:7045",
         "threshold":     1,
     },
     {
         "name":          "Scheduled Task Created",
-        "description":   "A scheduled task was created (EID 4698). Review the task action — this is one of the most common persistence mechanisms.",
+        "description":   "A scheduled task was registered (EID 4698). Review the task action — "
+                         "one of the most common persistence mechanisms.",
         "artifact_type": "evtx",
         "query":         "evtx.event_id:4698",
         "threshold":     1,
     },
+    # ── Execution ──────────────────────────────────────────────────────────────
     {
         "name":          "PowerShell Script Block Logged",
-        "description":   "PowerShell script block logging fired (EID 4104). All executed script blocks are captured — search for encoded commands, download cradles, and Invoke-Expression.",
+        "description":   "PowerShell script block logging captured executed code (EID 4104). "
+                         "Search for encoded commands, download cradles, and Invoke-Expression.",
         "artifact_type": "evtx",
         "query":         "evtx.event_id:4104",
         "threshold":     1,
     },
     {
-        "name":          "Explicit Credential Use (Possible Pass-the-Hash / RunAs)",
-        "description":   "A process logged on using explicitly supplied credentials (EID 4648). Common during lateral movement, pass-the-hash, or RunAs abuse.",
-        "artifact_type": "evtx",
-        "query":         "evtx.event_id:4648",
-        "threshold":     1,
-    },
-    {
-        "name":          "Audit Policy Modified",
-        "description":   "The system audit policy was changed (EID 4719). Attackers modify audit policy to prevent logging of subsequent malicious actions.",
-        "artifact_type": "evtx",
-        "query":         "evtx.event_id:4719",
-        "threshold":     1,
-    },
-    {
-        "name":          "Special Privileges Assigned at Logon",
-        "description":   "Sensitive privileges were assigned to a new logon session (EID 4672). Look for SeDebugPrivilege or SeTcbPrivilege — indicators of privilege escalation or token manipulation.",
-        "artifact_type": "evtx",
-        "query":         "evtx.event_id:4672",
-        "threshold":     1,
-    },
-    {
-        "name":          "Process Created by Office Application",
-        "description":   "A new process was spawned (EID 4688) with a parent that is a Microsoft Office application — classic macro-based initial access pattern.",
+        "name":          "Process Spawned by Office Application",
+        "description":   "A child process was created (EID 4688) whose parent is a Microsoft Office "
+                         "application — the classic macro-based initial access pattern.",
         "artifact_type": "evtx",
         "query":         "evtx.event_id:4688 AND (message:*winword* OR message:*excel* OR message:*powerpnt* OR message:*outlook*)",
         "threshold":     1,
     },
+    # ── Network (Suricata) ─────────────────────────────────────────────────────
     {
-        "name":          "Network Logon from External Host",
-        "description":   "A network-type logon (type 3) occurred from a non-local IP address (EID 4624). Investigate the source — may indicate lateral movement or remote access.",
-        "artifact_type": "evtx",
-        "query":         "evtx.event_id:4624 AND evtx.event_data.LogonType:3 AND network.src_ip:* AND NOT network.src_ip:127.0.0.1 AND NOT network.src_ip:\"::1\"",
-        "threshold":     1,
-    },
-    {
-        "name":          "Suricata — High Severity Alert (Severity 1)",
-        "description":   "Suricata fired a severity-1 (critical) alert. Review the signature and investigate the involved hosts immediately.",
+        "name":          "Suricata — Critical Alert (Severity 1)",
+        "description":   "Suricata fired a severity-1 alert. Review the signature and investigate "
+                         "the involved hosts immediately.",
         "artifact_type": "suricata",
         "query":         "suricata.event_type:alert AND suricata.alert.severity:1",
         "threshold":     1,
     },
     {
         "name":          "Suricata — Malware Signature Match",
-        "description":   "Suricata detected a traffic pattern matching a known malware signature (ET MALWARE category). Indicates active infection or C2 communication.",
+        "description":   "Suricata detected traffic matching a known malware signature (ET MALWARE "
+                         "category). Indicates active infection or C2 communication.",
         "artifact_type": "suricata",
         "query":         "suricata.event_type:alert AND message:*ET\\ MALWARE*",
         "threshold":     1,

@@ -8,6 +8,8 @@ import Ingesters from './pages/Ingesters'
 import Modules from './pages/Modules'
 import Collector from './pages/Collector'
 import Cases from './pages/Cases'
+import Studio from './pages/Studio'
+import Docs from './pages/Docs'
 
 export default function App() {
   return (
@@ -22,6 +24,8 @@ export default function App() {
           <Route path="ingesters" element={<Ingesters />} />
           <Route path="modules" element={<Modules />} />
           <Route path="collector" element={<Collector />} />
+          <Route path="studio" element={<Studio />} />
+          <Route path="docs" element={<Docs />} />
           {/* Legacy redirect — keep old /plugins links working */}
           <Route path="plugins" element={<Navigate to="/ingesters" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
