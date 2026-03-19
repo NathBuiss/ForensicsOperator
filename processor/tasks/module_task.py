@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import uuid
@@ -101,6 +102,7 @@ def run_module(
             "strings":   _run_strings,
             "hindsight": _run_hindsight,
             "regripper": _run_regripper,
+            "wintriage": _run_wintriage,
         }
         runner = RUNNERS.get(module_id)
         if not runner:
@@ -518,5 +520,462 @@ def _parse_regripper_output(output: str, filename: str) -> list[dict]:
             "computer":    filename,          # hive filename
             "details_raw": content[:2000],    # cap per hit
         })
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Windows Artifact Triage
+# Handles: .evtx · registry hives · .lnk · .pf (Prefetch)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_EVTX_NS = "http://schemas.microsoft.com/win/2004/08/events/event"
+
+# Interesting Windows event IDs for forensic triage: {eid: (label, level)}
+_INTERESTING_EIDS: dict[int, tuple[str, str]] = {
+    # Authentication & Lateral Movement
+    4624:  ("Logon",                        "medium"),
+    4625:  ("Failed Logon",                 "high"),
+    4648:  ("Explicit-Credential Logon",    "high"),
+    4672:  ("Special Privileges Logon",     "medium"),
+    4776:  ("NTLM Auth Attempt",            "medium"),
+    4778:  ("RDP Session Reconnected",      "medium"),
+    4779:  ("RDP Session Disconnected",     "low"),
+    # Account Management
+    4720:  ("User Account Created",         "high"),
+    4722:  ("Account Enabled",              "medium"),
+    4724:  ("Password Reset",               "high"),
+    4732:  ("Added to Local Group",         "high"),
+    4756:  ("Added to Universal Group",     "medium"),
+    4728:  ("Added to Global Group",        "high"),
+    # Process / Execution Evidence
+    4688:  ("Process Created",              "medium"),
+    4689:  ("Process Terminated",           "low"),
+    # Service / Driver
+    7045:  ("Service Installed",            "high"),
+    7034:  ("Service Crashed",              "medium"),
+    7036:  ("Service State Changed",        "low"),
+    4697:  ("Service Installed (Security)", "high"),
+    # Scheduled Tasks
+    4698:  ("Scheduled Task Created",       "high"),
+    4702:  ("Scheduled Task Updated",       "medium"),
+    4699:  ("Scheduled Task Deleted",       "high"),
+    # PowerShell
+    4103:  ("PS Module Logging",            "medium"),
+    4104:  ("PS Script Block",              "high"),
+    # Audit Tampering
+    1102:  ("Security Log Cleared",         "critical"),
+    104:   ("System Log Cleared",           "critical"),
+    4719:  ("System Audit Policy Changed",  "high"),
+    # Policy / Object Access
+    4670:  ("Permissions Changed",          "medium"),
+    4663:  ("Object Access Attempted",      "low"),
+    # Network (Windows Firewall)
+    5156:  ("Network Connection Allowed",   "low"),
+    5158:  ("Network Bind Allowed",         "low"),
+    # BITS (common persistence / exfil channel)
+    59:    ("BITS Job Created",             "medium"),
+    60:    ("BITS Job Transferred",         "low"),
+    # System lifecycle
+    6005:  ("Event Log Started",            "low"),
+    6006:  ("Event Log Stopped",            "low"),
+    6009:  ("OS Version at Boot",           "low"),
+}
+
+MAX_EVTX_HITS = 3000  # per-file cap
+
+# Registry paths to examine per hive type (paths relative to hive root)
+_REG_TRIAGE_PATHS: dict[str, list[tuple[str, str]]] = {
+    "ntuser": [
+        (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+         "HKCU Run (Persistence)"),
+        (r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
+         "HKCU RunOnce (Persistence)"),
+        (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs",
+         "Recent Documents"),
+        (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\TypedPaths",
+         "Explorer Typed Paths"),
+        (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\RunMRU",
+         "Run Dialog MRU"),
+        (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Search\RecentApps",
+         "Recent Apps"),
+        (r"SOFTWARE\Microsoft\Internet Explorer\TypedURLs",
+         "IE Typed URLs"),
+        (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32\OpenSavePidlMRU",
+         "Open/Save Dialog MRU"),
+        (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Map Network Drive MRU",
+         "Mapped Drives MRU"),
+    ],
+    "usrclass": [
+        (r"Local Settings\Software\Microsoft\Windows\Shell\BagMRU",
+         "Shell Bags (folder navigation)"),
+        (r"Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages",
+         "Installed UWP Apps"),
+    ],
+    "software": [
+        (r"Microsoft\Windows\CurrentVersion\Run",
+         "HKLM Run (Persistence)"),
+        (r"Microsoft\Windows\CurrentVersion\RunOnce",
+         "HKLM RunOnce (Persistence)"),
+        (r"WOW6432Node\Microsoft\Windows\CurrentVersion\Run",
+         "HKLM Run WOW64 (Persistence)"),
+        (r"Microsoft\Windows NT\CurrentVersion",
+         "OS Version / Install Date"),
+        (r"Microsoft\Windows NT\CurrentVersion\ProfileList",
+         "User Profile List"),
+        (r"Microsoft\Windows NT\CurrentVersion\Winlogon",
+         "Winlogon (possible persistence)"),
+        (r"Microsoft\Windows\CurrentVersion\Policies\System",
+         "UAC & Policy Settings"),
+        (r"Clients\StartMenuInternet",
+         "Default Browser"),
+    ],
+    "system": [
+        (r"ControlSet001\Control\ComputerName\ComputerName",
+         "Computer Name"),
+        (r"ControlSet001\Control\TimeZoneInformation",
+         "Timezone"),
+        (r"ControlSet001\Services",
+         "Services (persistence)"),
+        (r"ControlSet001\Control\Session Manager\AppCompatCache",
+         "AppCompatCache / ShimCache"),
+        (r"MountedDevices",
+         "Mounted Devices (USB evidence)"),
+        (r"ControlSet001\Enum\USBSTOR",
+         "USB Storage History"),
+    ],
+    "sam": [
+        (r"SAM\Domains\Account\Users\Names",
+         "Local User Accounts"),
+        (r"SAM\Domains\Account",
+         "Account Policy"),
+    ],
+    "security": [],   # binary-heavy; RegRipper handles it better
+}
+
+MAX_REG_VALUES = 60  # per key
+
+
+def _hive_type(filename: str) -> str:
+    n = os.path.basename(filename).upper()
+    if "NTUSER" in n:    return "ntuser"
+    if "USRCLASS" in n:  return "usrclass"
+    if n == "SYSTEM":    return "system"
+    if n == "SOFTWARE":  return "software"
+    if n == "SAM":       return "sam"
+    if n == "SECURITY":  return "security"
+    return "ntuser"
+
+
+# ── EVTX ─────────────────────────────────────────────────────────────────────
+
+def _parse_evtx_triage(file_path: Path) -> list[dict]:
+    try:
+        import Evtx.Evtx as evtx_lib
+    except ImportError:
+        logger.warning("[wintriage] python-evtx not installed, skipping EVTX")
+        return []
+
+    ns = _EVTX_NS
+    results: list[dict] = []
+
+    try:
+        with evtx_lib.Evtx(str(file_path)) as log:
+            for record in log.records():
+                if len(results) >= MAX_EVTX_HITS:
+                    break
+                try:
+                    root   = record.lxml()
+                    sys_el = root.find(f"{{{ns}}}System")
+                    if sys_el is None:
+                        continue
+
+                    eid_el = sys_el.find(f"{{{ns}}}EventID")
+                    if eid_el is None:
+                        continue
+                    try:
+                        event_id = int(eid_el.text)
+                    except (ValueError, TypeError):
+                        continue
+
+                    if event_id not in _INTERESTING_EIDS:
+                        continue
+
+                    label, level = _INTERESTING_EIDS[event_id]
+
+                    tc_el   = sys_el.find(f"{{{ns}}}TimeCreated")
+                    ts      = tc_el.get("SystemTime", "") if tc_el is not None else ""
+
+                    comp_el = sys_el.find(f"{{{ns}}}Computer")
+                    computer = (comp_el.text or "") if comp_el is not None else ""
+
+                    chan_el = sys_el.find(f"{{{ns}}}Channel")
+                    channel = (chan_el.text or "") if chan_el is not None else ""
+
+                    # EventData key-value pairs
+                    ed_el  = root.find(f"{{{ns}}}EventData")
+                    parts: list[str] = []
+                    if ed_el is not None:
+                        for data_el in ed_el:
+                            name = data_el.get("Name", "")
+                            val  = (data_el.text or "").strip()
+                            if name and val and val not in ("-", "%%1840", "%%1843", "%%1842"):
+                                parts.append(f"{name}: {val}")
+                    details = " | ".join(parts[:7])
+
+                    results.append({
+                        "id":          str(uuid.uuid4()),
+                        "timestamp":   ts,
+                        "level":       level,
+                        "level_int":   LEVEL_INT.get(level, 1),
+                        "rule_title":  f"EID {event_id}: {label}",
+                        "computer":    computer,
+                        "details_raw": f"[{channel}] {details}" if details else f"[{channel}]",
+                    })
+                except Exception:
+                    continue
+    except Exception as exc:
+        logger.warning("[wintriage] EVTX error %s: %s", file_path.name, exc)
+
+    return results
+
+
+# ── Registry ──────────────────────────────────────────────────────────────────
+
+def _parse_registry_triage(file_path: Path) -> list[dict]:
+    try:
+        from Registry import Registry as RegistryLib
+    except ImportError:
+        logger.warning("[wintriage] python-registry not installed, skipping registry")
+        return []
+
+    hive_type   = _hive_type(file_path.name)
+    triage_paths = _REG_TRIAGE_PATHS.get(hive_type, [])
+    if not triage_paths:
+        return []
+
+    try:
+        reg = RegistryLib.Registry(str(file_path))
+    except Exception as exc:
+        logger.warning("[wintriage] Cannot open registry %s: %s", file_path.name, exc)
+        return []
+
+    results: list[dict] = []
+
+    for key_path, label in triage_paths:
+        try:
+            key = reg.open(key_path)
+        except Exception:
+            continue  # key absent in this hive variant
+
+        try:
+            ts_dt = key.timestamp()
+            ts = ts_dt.isoformat() + "Z" if ts_dt else ""
+        except Exception:
+            ts = ""
+
+        values_found = 0
+        for val in key.values():
+            if values_found >= MAX_REG_VALUES:
+                break
+            try:
+                name = val.name() or "(Default)"
+                data = str(val.value())[:600]
+                if not data.strip():
+                    continue
+            except Exception:
+                continue
+            results.append({
+                "id":          str(uuid.uuid4()),
+                "timestamp":   ts,
+                "level":       "informational",
+                "level_int":   1,
+                "rule_title":  f"{label}: {name}",
+                "computer":    file_path.name,
+                "details_raw": data,
+            })
+            values_found += 1
+
+        # No values → list subkey names as a single summary hit
+        if values_found == 0:
+            try:
+                subkeys = [sk.name() for sk in list(key.subkeys())[:MAX_REG_VALUES]]
+                if subkeys:
+                    results.append({
+                        "id":          str(uuid.uuid4()),
+                        "timestamp":   ts,
+                        "level":       "informational",
+                        "level_int":   1,
+                        "rule_title":  f"{label} (subkeys)",
+                        "computer":    file_path.name,
+                        "details_raw": " | ".join(subkeys),
+                    })
+            except Exception:
+                pass
+
+    return results
+
+
+# ── LNK ──────────────────────────────────────────────────────────────────────
+
+def _parse_lnk_triage(file_path: Path) -> list[dict]:
+    try:
+        import LnkParse3
+    except ImportError:
+        logger.warning("[wintriage] LnkParse3 not installed, skipping LNK")
+        return []
+
+    try:
+        with open(file_path, "rb") as fh:
+            lnk  = LnkParse3.lnk_file(fh)
+            data = lnk.get_json()
+    except Exception as exc:
+        logger.debug("[wintriage] LNK parse failed %s: %s", file_path.name, exc)
+        return []
+
+    header      = data.get("header",      {}) or {}
+    link_info   = data.get("link_info",   {}) or {}
+    string_data = data.get("string_data", {}) or {}
+
+    ts = header.get("creation_time") or header.get("write_time") or ""
+    if ts and not ts.endswith("Z"):
+        ts = ts.replace(" ", "T") + "Z"
+
+    target_path = (
+        link_info.get("local_base_path")
+        or string_data.get("relative_path")
+        or string_data.get("working_dir")
+        or file_path.stem
+    )
+
+    vol_info  = link_info.get("volume_id_and_local_base_path") or {}
+    vol_label = vol_info.get("volume_label", "") if isinstance(vol_info, dict) else ""
+    machine   = string_data.get("machine_identifier", "")
+    cmd_args  = string_data.get("command_line_arguments", "")
+
+    details = target_path or file_path.stem
+    if vol_label:  details += f"  [Vol: {vol_label}]"
+    if cmd_args:   details += f"  Args: {cmd_args}"
+    if machine:    details += f"  Machine: {machine}"
+
+    return [{
+        "id":          str(uuid.uuid4()),
+        "timestamp":   ts,
+        "level":       "informational",
+        "level_int":   1,
+        "rule_title":  f"LNK: {file_path.stem}",
+        "computer":    machine or "",
+        "details_raw": details,
+    }]
+
+
+# ── Prefetch ──────────────────────────────────────────────────────────────────
+
+_PF_RUN_COUNT_OFFSET: dict[int, int] = {
+    17: 0x90,   # Windows XP
+    23: 0x98,   # Windows Vista / 7
+    26: 0xD0,   # Windows 8 / 8.1
+    30: 0xD0,   # Windows 10 (uncompressed only)
+}
+
+
+def _parse_prefetch_triage(file_path: Path) -> list[dict]:
+    stem  = file_path.stem                     # e.g. NOTEPAD.EXE-AB1234CD
+    parts = stem.rsplit("-", 1)
+    exe_name = parts[0] if len(parts) == 2 else stem
+    pf_hash  = parts[1] if len(parts) == 2 else ""
+
+    try:
+        mtime = datetime.fromtimestamp(
+            file_path.stat().st_mtime, tz=timezone.utc
+        ).isoformat()
+    except Exception:
+        mtime = ""
+
+    run_count    = None
+    version_note = ""
+
+    try:
+        with open(file_path, "rb") as fh:
+            header = fh.read(512)
+
+        if header[:3] == b"MAM":
+            version_note = "Win10 (MAM-compressed)"
+        elif header[4:8] == b"SCCA" and len(header) >= 8:
+            ver    = struct.unpack_from("<I", header, 0)[0]
+            offset = _PF_RUN_COUNT_OFFSET.get(ver)
+            if offset and len(header) >= offset + 4:
+                run_count = struct.unpack_from("<I", header, offset)[0]
+            version_note = {17: "WinXP", 23: "Vista/7", 26: "Win8.x", 30: "Win10"}.get(ver, f"v{ver}")
+        else:
+            version_note = "unknown format"
+    except Exception:
+        pass
+
+    details = exe_name
+    if pf_hash:                   details += f"  hash={pf_hash}"
+    if run_count is not None:     details += f"  run_count={run_count}"
+    if version_note:              details += f"  [{version_note}]"
+
+    return [{
+        "id":          str(uuid.uuid4()),
+        "timestamp":   mtime,
+        "level":       "informational",
+        "level_int":   1,
+        "rule_title":  f"Prefetch: {exe_name}",
+        "computer":    "",
+        "details_raw": details,
+    }]
+
+
+# ── Main dispatcher ───────────────────────────────────────────────────────────
+
+_REGISTRY_FILENAMES  = frozenset({"NTUSER.DAT", "SYSTEM", "SOFTWARE", "SAM", "SECURITY", "USRCLASS.DAT"})
+_REGISTRY_EXTENSIONS = frozenset({".dat", ".hive"})
+
+
+def _run_wintriage(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
+    """
+    Auto-detect Windows artifact type and run the appropriate parser.
+
+      .evtx              → EVTX triage (filtered to ~35 high-value event IDs)
+      .dat / .hive /
+      SYSTEM / SOFTWARE /
+      SAM / SECURITY /
+      NTUSER.DAT         → Registry triage (persistence + forensic key paths)
+      .lnk               → LNK (target path, timestamps, machine ID)
+      .pf                → Prefetch (execution evidence + run count)
+    """
+    results: list[dict] = []
+
+    for file_path in sorted(sources_dir.iterdir()):
+        if not file_path.is_file():
+            continue
+
+        name_upper = file_path.name.upper()
+        ext        = file_path.suffix.lower()
+
+        if ext == ".evtx":
+            logger.info("[%s] wintriage EVTX: %s", run_id, file_path.name)
+            hits = _parse_evtx_triage(file_path)
+
+        elif name_upper in _REGISTRY_FILENAMES or ext in _REGISTRY_EXTENSIONS:
+            logger.info("[%s] wintriage Registry: %s", run_id, file_path.name)
+            hits = _parse_registry_triage(file_path)
+
+        elif ext == ".lnk":
+            logger.info("[%s] wintriage LNK: %s", run_id, file_path.name)
+            hits = _parse_lnk_triage(file_path)
+
+        elif ext == ".pf":
+            logger.info("[%s] wintriage Prefetch: %s", run_id, file_path.name)
+            hits = _parse_prefetch_triage(file_path)
+
+        else:
+            logger.debug("[%s] wintriage skip: %s", run_id, file_path.name)
+            continue
+
+        logger.info("[%s] %s → %d hits", run_id, file_path.name, len(hits))
+        results.extend(hits)
 
     return results

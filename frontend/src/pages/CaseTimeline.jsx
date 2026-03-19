@@ -31,12 +31,13 @@ const LEVEL_BADGE = {
 }
 
 const MODULE_NAMES = {
-  hayabusa:   'Hayabusa',
-  hindsight:  'Hindsight',
-  strings:    'Strings',
-  regripper:  'RegRipper',
-  chainsaw:   'Chainsaw',
-  evtxecmd:   'EvtxECmd',
+  wintriage:   'Windows Triage',
+  hayabusa:    'Hayabusa',
+  hindsight:   'Hindsight',
+  strings:     'Strings',
+  regripper:   'RegRipper',
+  chainsaw:    'Chainsaw',
+  evtxecmd:    'EvtxECmd',
   volatility3: 'Volatility 3',
 }
 

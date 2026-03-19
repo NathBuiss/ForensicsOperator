@@ -23,6 +23,16 @@ router = APIRouter(tags=["modules"])
 
 MODULES: list[dict] = [
     {
+        "id":               "wintriage",
+        "name":             "Windows Triage",
+        "description":      "Auto-detect and parse Windows artifacts — EVTX (35+ forensic event IDs), registry persistence keys, LNK shell-links, Prefetch execution evidence",
+        "input_extensions": [".evtx", ".dat", ".hive", ".lnk", ".pf"],
+        "input_filenames":  [
+            "NTUSER.DAT", "SYSTEM", "SOFTWARE", "SAM", "SECURITY", "USRCLASS.DAT",
+        ],
+        "available":        True,
+    },
+    {
         "id":               "hayabusa",
         "name":             "Hayabusa",
         "description":      "Sigma-based EVTX threat hunting with 4 000+ built-in detection rules",
