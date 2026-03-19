@@ -121,6 +121,8 @@ export const api = {
     getIngress:     () => request('GET',    '/collector/ingress'),
     deleteIngress:  () => request('DELETE', '/collector/ingress'),
     /** Returns a ready-to-apply RBAC YAML manifest (text/yaml) */
-    rbacUrl:        () => `${BASE}/collector/ingress/rbac`,
+    rbacUrl:        () => `${window.location.origin}${BASE}/collector/ingress/rbac`,
+    /** Fetch the RBAC YAML text */
+    getRbacYaml:    () => fetch(`${BASE}/collector/ingress/rbac`).then(r => r.text()),
   },
 }

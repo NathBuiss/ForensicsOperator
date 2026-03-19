@@ -155,7 +155,24 @@ def run_module(
 # Hayabusa
 # ─────────────────────────────────────────────────────────────────────────────
 
-_HAYABUSA_RULES_DIR = Path("/opt/hayabusa/rules")
+def _find_hayabusa_rules() -> Path | None:
+    """Locate the Hayabusa rules/ directory.
+
+    Tries (in order):
+    1. Sibling of the real binary (follows symlinks) — works when the full
+       distribution is kept next to the binary (e.g. /opt/hayabusa/).
+    2. Hardcoded fallback /opt/hayabusa/rules.
+    """
+    bin_path = shutil.which("hayabusa")
+    if bin_path:
+        real_bin = Path(bin_path).resolve()
+        candidate = real_bin.parent / "rules"
+        if candidate.is_dir():
+            return candidate
+    fallback = Path("/opt/hayabusa/rules")
+    if fallback.is_dir():
+        return fallback
+    return None
 
 
 def _run_hayabusa(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
@@ -165,19 +182,20 @@ def _run_hayabusa(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
             "Hayabusa binary not found. Ensure the processor image was built with the Hayabusa step."
         )
 
-    if not _HAYABUSA_RULES_DIR.is_dir():
+    rules_dir = _find_hayabusa_rules()
+    if rules_dir is None:
         raise RuntimeError(
-            f"Hayabusa rules directory not found at {_HAYABUSA_RULES_DIR}. "
-            "Rebuild the processor image — the full Hayabusa distribution must be "
-            "kept at /opt/hayabusa/ (not just the binary)."
+            "Hayabusa rules directory not found next to the binary or at /opt/hayabusa/rules. "
+            "Rebuild the processor image — the full distribution (binary + rules/) must be kept together."
         )
+    logger.info("[%s] Using Hayabusa rules: %s", run_id, rules_dir)
 
     output_jsonl = work_dir / "hayabusa_output.jsonl"
     cmd = [
         hayabusa_bin, "json-timeline",
         "--no-wizard",           # required: suppress interactive prompts
         "-d", str(sources_dir),
-        "-r", str(_HAYABUSA_RULES_DIR),
+        "-r", str(rules_dir),
         "-o", str(output_jsonl),
         "--no-color",
         "--quiet",

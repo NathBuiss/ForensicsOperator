@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import {
   X, Monitor, Terminal, FileCode, Download,
   ChevronRight, ChevronLeft, Check, Wifi, RefreshCw,
+  Globe, Loader2, Trash2, Info, Copy, ExternalLink,
 } from 'lucide-react'
 import { api } from '../api/client'
 
@@ -64,6 +65,11 @@ export default function CollectorModal({ onClose, caseId, apiUrl: propApiUrl }) 
   const [netLoading, setNetLoading] = useState(false)
   const [downloading, setDownloading] = useState(false)
 
+  // K8s LoadBalancer state
+  const [inK8s, setInK8s]         = useState(false)
+  const [ingress, setIngress]     = useState(null)
+  const [ingressBusy, setIngressBusy] = useState(false)
+
   const platformDef = PLATFORMS.find(p => p.id === platform)
   const artifacts   = platformDef?.artifacts || []
 
@@ -72,16 +78,58 @@ export default function CollectorModal({ onClose, caseId, apiUrl: propApiUrl }) 
     if (platformDef) setSelected(new Set(platformDef.artifacts.map(a => a.key)))
   }, [platform])
 
-  // Fetch detected IPs on step 3
+  // Fetch detected IPs + K8s status on step 3
   useEffect(() => {
     if (step !== 3) return
-    if (!caseId && !propApiUrl) return   // only useful when upload is intended
     setNetLoading(true)
     api.collector.networkInterfaces()
-      .then(r => setNetIps(r.candidates || []))
+      .then(r => {
+        setNetIps(r.candidates || [])
+        setInK8s(r.in_kubernetes || false)
+        const lbEntry = (r.candidates || []).find(c => c.k8s && c.label?.includes('LoadBalancer'))
+        if (lbEntry) setApiUrl(lbEntry.url)
+      })
       .catch(() => {})
       .finally(() => setNetLoading(false))
   }, [step])
+
+  async function createIngress() {
+    setIngressBusy(true)
+    try {
+      const r = await api.collector.createIngress()
+      setIngress(r)
+      if (r.external_url) setApiUrl(r.external_url)
+    } catch (e) {
+      setIngress({ status: 'error', error: e.message })
+    } finally {
+      setIngressBusy(false)
+    }
+  }
+
+  async function pollIngress() {
+    setIngressBusy(true)
+    try {
+      const r = await api.collector.getIngress()
+      setIngress(r)
+      if (r.external_url) setApiUrl(r.external_url)
+    } catch (e) {
+      setIngress({ status: 'error', error: e.message })
+    } finally {
+      setIngressBusy(false)
+    }
+  }
+
+  async function removeIngress() {
+    setIngressBusy(true)
+    try {
+      await api.collector.deleteIngress()
+      setIngress(null)
+    } catch (e) {
+      setIngress({ status: 'error', error: e.message })
+    } finally {
+      setIngressBusy(false)
+    }
+  }
 
   function toggleArtifact(key) {
     setSelected(prev => {
@@ -320,6 +368,60 @@ export default function CollectorModal({ onClose, caseId, apiUrl: propApiUrl }) 
                 )}
               </div>
 
+              {/* ── Kubernetes LoadBalancer ingress ──────────────────── */}
+              {inK8s && (
+                <div className="border border-gray-200 rounded-xl p-4 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5">
+                      <Globe size={12} className="text-brand-accent" />
+                      <span className="text-xs font-medium text-gray-600">Kubernetes LoadBalancer</span>
+                      {ingress?.status === 'ready' && (
+                        <span className="badge bg-green-100 text-green-700 border border-green-200 text-[10px]">ready</span>
+                      )}
+                      {ingress?.status === 'pending' && (
+                        <span className="badge bg-amber-100 text-amber-700 border border-amber-200 text-[10px]">pending IP…</span>
+                      )}
+                    </div>
+                    <div className="flex gap-1.5">
+                      {ingress ? (
+                        <>
+                          <button className="btn-ghost text-xs py-0.5 gap-1" onClick={pollIngress} disabled={ingressBusy}>
+                            {ingressBusy ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />}
+                            Refresh
+                          </button>
+                          <button className="btn-ghost text-xs py-0.5 gap-1 text-red-500 hover:text-red-600"
+                                  onClick={removeIngress} disabled={ingressBusy}>
+                            <Trash2 size={10} /> Delete
+                          </button>
+                        </>
+                      ) : (
+                        <button className="btn-primary text-xs py-0.5 gap-1" onClick={createIngress} disabled={ingressBusy}>
+                          {ingressBusy ? <Loader2 size={10} className="animate-spin" /> : <Globe size={10} />}
+                          Create LoadBalancer
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-gray-500">
+                    Expose this server externally via a Kubernetes <code className="bg-gray-100 px-1 rounded">LoadBalancer</code> Service.
+                    The assigned IP will be automatically filled above.
+                  </p>
+                  {ingress?.external_url && (
+                    <div className="flex items-center gap-2 px-3 py-2 bg-green-50 border border-green-200 rounded-lg text-xs">
+                      <Check size={11} className="text-green-600 flex-shrink-0" />
+                      <span className="font-mono text-green-800 flex-1 truncate">{ingress.external_url}</span>
+                      <button className="text-green-600 hover:text-green-800 text-[10px]"
+                              onClick={() => setApiUrl(ingress.external_url)}>
+                        Use
+                      </button>
+                    </div>
+                  )}
+                  {ingress?.status === 'error' && (
+                    <ModalRbacErrorBanner error={ingress.error} />
+                  )}
+                </div>
+              )}
+
               {/* Download button */}
               <button
                 className="btn-primary w-full justify-center h-10 gap-2"
@@ -385,6 +487,49 @@ function SummaryRow({ label, value, mono }) {
     <div className="flex gap-3 text-xs">
       <span className="text-gray-400 w-16 flex-shrink-0">{label}</span>
       <span className={`text-brand-text break-all ${mono ? 'font-mono' : ''}`}>{value}</span>
+    </div>
+  )
+}
+
+function ModalRbacErrorBanner({ error }) {
+  const [yaml, setYaml]     = useState(null)
+  const [copied, setCopied] = useState(false)
+  const is403 = error?.includes('403') || error?.toLowerCase().includes('forbidden')
+
+  useEffect(() => {
+    if (!is403) return
+    api.collector.getRbacYaml().then(t => setYaml(t)).catch(() => {})
+  }, [is403])
+
+  function copyYaml() {
+    if (!yaml) return
+    navigator.clipboard.writeText(yaml).then(() => {
+      setCopied(true); setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  return (
+    <div className="space-y-1">
+      <p className="text-[11px] text-red-500">{error}</p>
+      {is403 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-[11px] text-amber-800 space-y-2">
+          <p className="font-semibold flex items-center gap-1.5"><Info size={11} /> RBAC setup required</p>
+          <p>Download and apply this manifest from a machine with kubectl access to your cluster:</p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <a href={api.collector.rbacUrl()} download="fo-rbac.yaml"
+               className="inline-flex items-center gap-1 px-2 py-1 bg-amber-100 rounded border border-amber-300 text-amber-800 hover:bg-amber-200 font-medium">
+              <ExternalLink size={10} /> Download fo-rbac.yaml
+            </a>
+            {yaml && (
+              <button onClick={copyYaml}
+                      className="inline-flex items-center gap-1 px-2 py-1 bg-amber-100 rounded border border-amber-300 text-amber-800 hover:bg-amber-200">
+                <Copy size={10} /> {copied ? 'Copied!' : 'Copy YAML'}
+              </button>
+            )}
+          </div>
+          <pre className="bg-gray-900 text-green-300 rounded px-2 py-1.5 text-[10px] font-mono">kubectl apply -f fo-rbac.yaml</pre>
+        </div>
+      )}
     </div>
   )
 }

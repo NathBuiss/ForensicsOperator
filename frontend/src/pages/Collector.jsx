@@ -5,12 +5,12 @@
  * accessible from the sidebar nav without being inside a specific case.
  * Optionally linked to a case via a case-selector dropdown.
  */
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import {
   Monitor, Terminal, FileCode, Download, Check,
   ChevronRight, ChevronLeft, Wifi, RefreshCw,
   PackageOpen, AlertTriangle, Globe, Loader2, Trash2,
-  Info,
+  Info, Copy, ExternalLink,
 } from 'lucide-react'
 import { api } from '../api/client'
 
@@ -527,28 +527,7 @@ export default function Collector() {
                     </div>
                   )}
                   {ingress?.status === 'error' && (
-                    <div className="mt-2 space-y-1">
-                      <p className="text-[11px] text-red-500">{ingress.error}</p>
-                      {ingress.error?.includes('403') || ingress.error?.includes('forbidden') ? (
-                        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-[11px] text-amber-800 space-y-2">
-                          <p className="font-medium flex items-center gap-1.5">
-                            <Info size={11} /> RBAC permission required
-                          </p>
-                          <p>The pod's service account needs permission to create Services. Apply the RBAC manifest once:</p>
-                          <code className="block bg-amber-100 rounded px-2 py-1.5 font-mono text-[10px] break-all select-all">
-                            kubectl apply -f "{api.collector.rbacUrl()}"
-                          </code>
-                          <a
-                            href={api.collector.rbacUrl()}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center gap-1 text-amber-700 hover:text-amber-900 underline"
-                          >
-                            Download fo-rbac.yaml
-                          </a>
-                        </div>
-                      ) : null}
-                    </div>
+                    <RbacErrorBanner error={ingress.error} />
                   )}
                 </div>
               )}
@@ -667,6 +646,67 @@ function SummaryRow({ label, value, mono }) {
     <div className="flex items-baseline gap-2 text-sm">
       <span className="text-gray-400 text-xs w-20 flex-shrink-0">{label}</span>
       <span className={`text-brand-text ${mono ? 'font-mono text-xs' : ''}`}>{value}</span>
+    </div>
+  )
+}
+
+// ── RbacErrorBanner ───────────────────────────────────────────────────────────
+function RbacErrorBanner({ error }) {
+  const [yaml, setYaml]       = useState(null)
+  const [copied, setCopied]   = useState(false)
+  const is403 = error?.includes('403') || error?.toLowerCase().includes('forbidden')
+
+  useEffect(() => {
+    if (!is403) return
+    api.collector.getRbacYaml()
+      .then(text => setYaml(text))
+      .catch(() => {})
+  }, [is403])
+
+  function copyYaml() {
+    if (!yaml) return
+    navigator.clipboard.writeText(yaml).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  return (
+    <div className="mt-2 space-y-1.5">
+      <p className="text-[11px] text-red-500">{error}</p>
+      {is403 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-[11px] text-amber-800 space-y-2">
+          <p className="font-semibold flex items-center gap-1.5">
+            <Info size={11} /> RBAC setup required
+          </p>
+          <p>
+            The pod's service account lacks permission to create Services.
+            Download the manifest and apply it <strong>from any machine with kubectl access</strong> to your cluster:
+          </p>
+          <div className="flex items-center gap-2">
+            <a
+              href={api.collector.rbacUrl()}
+              download="fo-rbac.yaml"
+              className="inline-flex items-center gap-1 px-2 py-1 bg-amber-100 rounded border border-amber-300 text-amber-800 hover:bg-amber-200 font-medium"
+            >
+              <ExternalLink size={10} /> Download fo-rbac.yaml
+            </a>
+            {yaml && (
+              <button
+                onClick={copyYaml}
+                className="inline-flex items-center gap-1 px-2 py-1 bg-amber-100 rounded border border-amber-300 text-amber-800 hover:bg-amber-200"
+              >
+                <Copy size={10} /> {copied ? 'Copied!' : 'Copy YAML'}
+              </button>
+            )}
+          </div>
+          {yaml && (
+            <pre className="bg-gray-900 text-green-300 rounded p-2 text-[10px] font-mono overflow-x-auto max-h-40 leading-relaxed">
+              {`kubectl apply -f fo-rbac.yaml`}
+            </pre>
+          )}
+        </div>
+      )}
     </div>
   )
 }
