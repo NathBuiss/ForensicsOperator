@@ -61,6 +61,10 @@ services:
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET=forensics-cases
       - PLUGINS_DIR=/app/plugins
+      # Set FO_PUBLIC_URL to your machine's LAN IP so the Collector page
+      # can auto-detect the correct address for remote artifact upload.
+      # Example: - FO_PUBLIC_URL=http://192.168.1.100:8000
+      # - FO_PUBLIC_URL=
     volumes:
       - ./plugins:/app/plugins:ro
       - ./api:/app

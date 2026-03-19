@@ -127,11 +127,15 @@ export default function Collector() {
     setNetLoading(true)
     api.collector.networkInterfaces()
       .then(r => {
-        setNetIps(r.candidates || [])
+        const candidates = r.candidates || []
+        setNetIps(candidates)
         setInK8s(r.in_kubernetes || false)
-        // Auto-fill if K8s LoadBalancer found
-        const lbEntry = (r.candidates || []).find(c => c.k8s && c.label?.includes('LoadBalancer'))
-        if (lbEntry && !apiUrl) setApiUrl(lbEntry.url)
+        setIpHint(r.public_url_hint || null)
+        // Auto-fill best candidate
+        const lbEntry = candidates.find(c => c.k8s && c.label?.includes('LoadBalancer'))
+        const lanEntry = candidates.find(c => c.label === 'LAN' || c.label === 'host machine (Docker Desktop)')
+        const best     = lbEntry || lanEntry
+        if (best && !apiUrl) setApiUrl(best.url)
       })
       .catch(() => {})
       .finally(() => setNetLoading(false))
@@ -177,19 +181,19 @@ export default function Collector() {
 
   function handleCaseSelect(id) {
     setCaseId(id)
-    if (!apiUrl && id) {
-      // Auto-trigger IP detection when a case is selected
-      detectIps()
-    }
+    // Auto-detect IPs whenever case selection changes (or even when cleared)
+    if (!apiUrl) detectIps()
   }
 
   function handleDownload() {
     setDownloading(true)
     setDownloaded(false)
+    // Embed apiUrl whenever it is filled in, regardless of whether a case is selected.
+    // Without caseId the script still runs and saves a local ZIP; with both it auto-uploads.
     const url = api.collector.downloadUrl({
       platform,
-      caseId: caseId || undefined,
-      apiUrl: (apiUrl && caseId) ? apiUrl : undefined,
+      caseId:  caseId   || undefined,
+      apiUrl:  apiUrl   || undefined,
       collect: selected.size > 0 ? [...selected] : undefined,
     })
     const a = document.createElement('a')
@@ -398,45 +402,76 @@ export default function Collector() {
                     value={apiUrl}
                     onChange={e => setApiUrl(e.target.value)}
                     placeholder="http://192.168.1.x:8000/api/v1"
-                    disabled={!caseId}
                   />
                 </div>
               </div>
+
+              {/* FO_PUBLIC_URL hint — shown when only Docker-internal IPs detected */}
+              {ipHint && (
+                <div className="mt-3 flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
+                  <AlertTriangle size={13} className="flex-shrink-0 mt-0.5 text-amber-500" />
+                  <div>
+                    <strong>Only Docker-internal IPs detected.</strong>{' '}
+                    Remote collectors cannot reach the API via these addresses.
+                    Add the following to your <code className="bg-amber-100 px-1 rounded">docker-compose.yml</code>{' '}
+                    under the <code className="bg-amber-100 px-1 rounded">api:</code> environment section,
+                    replacing the IP with your machine's LAN address:
+                    <pre className="mt-1.5 bg-white border border-amber-200 rounded px-2 py-1.5 text-[10px] leading-relaxed overflow-x-auto font-mono">
+{`api:
+  environment:
+    - FO_PUBLIC_URL=http://192.168.x.x:8000`}
+                    </pre>
+                    <p className="mt-1 text-amber-700">
+                      Then enter the URL manually in the field above, or click Detect again after restarting.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {/* Detected IP suggestions */}
               {netIps.length > 0 && (
                 <div className="mt-3">
                   <p className="text-[11px] text-gray-400 mb-2 flex items-center gap-1">
-                    <Wifi size={10} /> Detected reachable addresses — click to use
+                    <Wifi size={10} /> Detected addresses — click to use
                   </p>
                   <div className="flex flex-wrap gap-2">
-                    {netIps.map(c => (
-                      <button
-                        key={c.url}
-                        onClick={() => setApiUrl(c.url)}
-                        disabled={!caseId}
-                        title={`Interface: ${c.iface}`}
-                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border
-                                    text-xs font-mono transition-all disabled:opacity-40
-                                    disabled:cursor-not-allowed ${
-                          apiUrl === c.url
-                            ? 'border-brand-accent bg-brand-accentlight text-brand-accent'
-                            : 'border-gray-200 bg-white text-gray-600 hover:border-brand-accent/50'
-                        }`}
-                      >
-                        <Wifi size={10} />
-                        <span>{c.ip}</span>
-                        {c.label && (
-                          <span className="text-gray-400 font-sans text-[10px]">({c.label})</span>
-                        )}
-                      </button>
-                    ))}
+                    {netIps.map(c => {
+                      // Visual hint: Docker bridge IPs are likely not reachable from target
+                      const isInternal = c.ip.startsWith('172.') || c.label === 'docker bridge'
+                      return (
+                        <button
+                          key={c.url}
+                          onClick={() => setApiUrl(c.url)}
+                          title={`Interface: ${c.iface}${isInternal ? ' — Docker-internal, may not be reachable externally' : ''}`}
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border
+                                      text-xs font-mono transition-all ${
+                            apiUrl === c.url
+                              ? 'border-brand-accent bg-brand-accentlight text-brand-accent'
+                              : isInternal
+                              ? 'border-gray-200 bg-gray-50 text-gray-400 hover:border-amber-300'
+                              : 'border-gray-200 bg-white text-gray-600 hover:border-brand-accent/50'
+                          }`}
+                        >
+                          {c.k8s
+                            ? <Globe size={10} />
+                            : isInternal
+                            ? <AlertTriangle size={10} className="text-amber-400" />
+                            : <Wifi size={10} />}
+                          <span>{c.ip}</span>
+                          {c.label && (
+                            <span className="text-gray-400 font-sans text-[10px]">({c.label})</span>
+                          )}
+                        </button>
+                      )
+                    })}
                   </div>
-                  {!caseId && (
-                    <p className="text-[11px] text-amber-500 mt-1.5 flex items-center gap-1">
-                      <AlertTriangle size={10} /> Select a case first to enable upload configuration.
-                    </p>
-                  )}
+                  <p className="text-[11px] text-gray-400 mt-1.5 flex items-center gap-1">
+                    <Info size={10} />
+                    <span>
+                      IPs marked <AlertTriangle size={9} className="inline text-amber-400" /> are Docker-internal and may not be reachable from the target machine.
+                      Prefer a LAN IP or set <code className="bg-gray-100 px-0.5 rounded">FO_PUBLIC_URL</code> in docker-compose.yml.
+                    </span>
+                  </p>
                 </div>
               )}
 
@@ -534,6 +569,27 @@ export default function Collector() {
                       {'\n'}
                       <span className="text-gray-500"># via </span>
                       <span className="text-emerald-400">{apiUrl}</span>
+                    </>
+                  )}
+                  {!caseId && apiUrl && (
+                    <>
+                      {'\n\n'}
+                      <span className="text-gray-500"># API URL embedded: </span>
+                      <span className="text-emerald-400">{apiUrl}</span>
+                      {'\n'}
+                      <span className="text-amber-400">
+                        ⚠ No case linked — collector will save a local ZIP.{'\n'}
+                        Drag & drop the ZIP into any case via Add Evidence.
+                      </span>
+                    </>
+                  )}
+                  {!caseId && !apiUrl && (
+                    <>
+                      {'\n\n'}
+                      <span className="text-amber-400">
+                        ⚠ No case or API URL — ZIP saved locally.{'\n'}
+                        Upload manually via any case Ingest panel.
+                      </span>
                     </>
                   )}
                   {caseId && !apiUrl && (
