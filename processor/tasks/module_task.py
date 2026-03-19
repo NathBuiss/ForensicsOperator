@@ -44,6 +44,13 @@ LEVEL_INT = {
     "info":          1,
 }
 
+# Strip ANSI terminal escape sequences before storing output in Redis / displaying in UI
+_ANSI_RE = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-9;]*[ -/]*[@-~])')
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub('', text)
+
 
 def get_redis() -> redis.Redis:
     return redis.Redis.from_url(REDIS_URL, decode_responses=True)
@@ -142,9 +149,9 @@ def run_module(
                 hits_by_level=json.dumps(hits_by_level),
                 results_preview=json.dumps(results[:200]),
                 output_minio_key=output_key,
-                tool_stdout=tool_meta.get("stdout", "")[:8000],
+                tool_stdout=tool_meta.get("stdout", "")[:16000],
                 tool_stderr=tool_meta.get("stderr", "")[:4000],
-                tool_log=tool_meta.get("log",    "")[:4000],
+                tool_log=tool_meta.get("log",    "")[:8000],
                 completed_at=datetime.now(timezone.utc).isoformat())
 
         logger.info("[%s] Module run complete: %d hits", run_id, len(results))
@@ -225,7 +232,6 @@ def _run_hayabusa(
         "-d", str(sources_dir),
         "-r", str(rules_dir),
         "-o", str(output_jsonl),
-        "--no-color",            # plain text output for parsing
         "--min-level", min_level,
     ]
 
@@ -241,8 +247,9 @@ def _run_hayabusa(
     except subprocess.TimeoutExpired:
         raise RuntimeError("Hayabusa timed out after 1 hour")
 
-    stdout_str = (proc.stdout or "").strip()
-    stderr_str = (proc.stderr or "").strip()
+    # Strip ANSI escape codes before storing in Redis / displaying in UI
+    stdout_str = _strip_ansi((proc.stdout or "").strip())
+    stderr_str = _strip_ansi((proc.stderr or "").strip())
 
     # Combine both streams into tool_meta for display in the UI
     combined = ""
@@ -268,36 +275,82 @@ def _run_hayabusa(
         logger.warning("[%s] Hayabusa produced no output file (or empty)%s", run_id, detail)
         return []
 
-    logger.info("[%s] Hayabusa output file: %d bytes", run_id, output_jsonl.stat().st_size)
-    return _parse_hayabusa_jsonl(output_jsonl)
+    file_size = output_jsonl.stat().st_size
+    logger.info("[%s] Hayabusa output file: %d bytes", run_id, file_size)
+
+    # ── Diagnostic: log first 3 raw lines so we can verify the JSONL format ──
+    try:
+        with open(output_jsonl, "r", encoding="utf-8-sig", errors="replace") as _fh:
+            _sample_lines = []
+            for _ in range(3):
+                _ln = _fh.readline()
+                if _ln:
+                    _sample_lines.append(_ln.rstrip()[:200])
+        tool_meta["log"] += (
+            f"\nJSONL file size: {file_size:,} bytes"
+            f"\nFirst 3 JSONL lines (200 chars each):\n"
+            + "\n".join(_sample_lines) + "\n"
+        )
+    except Exception as _e:
+        tool_meta["log"] += f"\n[diagnostic read error: {_e}]\n"
+
+    return _parse_hayabusa_jsonl(output_jsonl, tool_meta)
 
 
-def _parse_hayabusa_jsonl(path: Path) -> list[dict]:
+def _parse_hayabusa_jsonl(path: Path, tool_meta: dict | None = None) -> list[dict]:
     results: list[dict] = []
+    skipped = 0
+    total   = 0
+    first_skip_msg = ""
     with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
         for lineno, line in enumerate(fh, 1):
             line = line.strip()
             if not line:
                 continue
+            total += 1
             try:
                 row = json.loads(line)
                 hit = _hayabusa_row_to_hit(row)
                 if hit:
                     results.append(hit)
+                else:
+                    skipped += 1
+                    if skipped == 1:
+                        first_skip_msg = f"first skipped row keys: {list(row.keys())[:10]}"
             except Exception as exc:
-                logger.debug("Hayabusa: skipped line %d: %s", lineno, exc)
+                skipped += 1
+                if skipped <= 3:
+                    logger.warning("Hayabusa: parse error line %d: %s | raw: %.120s", lineno, exc, line)
+                if skipped == 1:
+                    first_skip_msg = f"parse error: {exc} | raw[:100]: {line[:100]}"
+
+    logger.info("Hayabusa JSONL: %d total lines, %d parsed hits, %d skipped", total, len(results), skipped)
+    if tool_meta is not None:
+        tool_meta["log"] += (
+            f"\nParsed {len(results):,} hits from {total:,} JSONL lines ({skipped:,} skipped)"
+            + (f"\n{first_skip_msg}" if first_skip_msg else "")
+            + "\n"
+        )
     return results
 
 
 def _hayabusa_row_to_hit(row: dict) -> dict | None:
-    timestamp_raw = row.get("Timestamp") or row.get("timestamp") or ""
-    rule_title    = str(row.get("RuleTitle") or row.get("RuleTitle") or row.get("ruleTitle") or "")
-    level         = str(row.get("Level")     or row.get("level")     or "informational").lower()
-    computer      = str(row.get("Computer")  or row.get("computer")  or "")
-    channel       = str(row.get("Channel")   or row.get("channel")   or "")
-    event_id_raw  = str(row.get("EventID")   or row.get("eventId")   or "")
-    rule_file     = str(row.get("RuleFile")  or row.get("ruleFile")  or "")
-    evtx_file     = str(row.get("EvtxFile")  or row.get("evtxFile")  or "")
+    # Accept PascalCase (2.x / 3.x standard), camelCase, snake_case, and @-prefixed variants
+    def _g(*keys):
+        for k in keys:
+            v = row.get(k)
+            if v is not None and v != "":
+                return v
+        return ""
+
+    timestamp_raw = _g("Timestamp", "timestamp", "@timestamp", "datetime", "time")
+    rule_title    = str(_g("RuleTitle", "ruleTitle", "rule_title", "Title", "title", "RuleName", "rule_name") or "")
+    level         = str(_g("Level", "level", "Severity", "severity") or "informational").lower()
+    computer      = str(_g("Computer", "computer", "Hostname", "hostname", "host") or "")
+    channel       = str(_g("Channel", "channel") or "")
+    event_id_raw  = str(_g("EventID", "eventId", "event_id", "EventId") or "")
+    rule_file     = str(_g("RuleFile", "ruleFile", "rule_file") or "")
+    evtx_file     = str(_g("EvtxFile", "evtxFile", "evtx_file", "SrcFile", "src_file") or "")
 
     if not rule_title and not timestamp_raw:
         return None

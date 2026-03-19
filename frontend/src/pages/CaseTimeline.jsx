@@ -518,8 +518,9 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
 // ModuleRunCard
 // ─────────────────────────────────────────────────────────────────────────────
 function ModuleRunCard({ run }) {
-  const [open, setOpen]         = useState(false)
-  const [showOutput, setShowOutput] = useState(false)
+  const zeroDetected = run.status === 'COMPLETED' && run.total_hits === 0
+  const [open, setOpen]             = useState(zeroDetected)   // auto-expand card when no detections
+  const [showOutput, setShowOutput] = useState(zeroDetected)   // auto-show tool output when no detections
 
   const moduleName = MODULE_NAMES[run.module_id] || run.module_id
 
@@ -538,7 +539,10 @@ function ModuleRunCard({ run }) {
 
   const preview    = run.results_preview || []
   const byLevel    = run.hits_by_level   || {}
-  const toolOutput = (run.tool_stdout || '') + (run.tool_log ? '\n' + run.tool_log : '')
+  // Strip residual ANSI codes (belt-and-suspenders: server already strips them for new runs)
+  const _stripAnsi = s => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\x1b[@-_][^\x1b]*/g, '')
+  const rawOutput  = (run.tool_stdout || '') + (run.tool_log ? '\n--- log ---\n' + run.tool_log : '')
+  const toolOutput = _stripAnsi(rawOutput)
   const hasOutput  = toolOutput.trim().length > 0
 
   return (
