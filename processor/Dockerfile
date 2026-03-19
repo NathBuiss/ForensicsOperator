@@ -14,13 +14,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Python deps
-COPY requirements.txt .
+COPY processor/requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-COPY . .
+# Processor source code
+COPY processor/ .
 RUN touch tasks/__init__.py utils/__init__.py
 
-# Mount point for the shared plugins volume
+# Built-in plugins baked into the image at a separate path.
+# The seed-plugins init container copies these into the shared PVC (/app/plugins)
+# at pod startup, so they are available at runtime without being overwritten by
+# the volume mount.
+COPY plugins/ /app/plugins_builtin/
+
+# Mount point for the shared plugins volume (populated at runtime by init container)
 RUN mkdir -p /app/plugins
 
 CMD ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=2"]
