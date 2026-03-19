@@ -32,24 +32,25 @@ class PluginLoader:
 
     def load(self) -> None:
         """Scan the plugins directory and import all plugin modules."""
-        from plugins.base_plugin import BasePlugin  # noqa: F401 - needed for isinstance checks
-
         self._plugin_classes = []
 
         if not self.plugins_dir.exists():
             logger.warning("Plugins directory %s does not exist", self.plugins_dir)
             return
 
-        # Add plugins dir to sys.path so relative imports work
+        # Add sys.path entries FIRST so that "from plugins.base_plugin import ..."
+        # resolves correctly before any import is attempted.
         plugins_str = str(self.plugins_dir)
         if plugins_str not in sys.path:
             sys.path.insert(0, plugins_str)
 
-        # Also add the parent of plugins_dir so "from plugins.base_plugin import ..."
-        # works inside plugin modules
+        # Parent of plugins_dir (/app) must be on sys.path so the "plugins"
+        # namespace package is discoverable.
         parent_str = str(self.plugins_dir.parent)
         if parent_str not in sys.path:
             sys.path.insert(0, parent_str)
+
+        from plugins.base_plugin import BasePlugin  # noqa: F401 - needed for isinstance checks
 
         # Find all *_plugin.py files recursively
         for plugin_file in sorted(self.plugins_dir.rglob("*_plugin.py")):
