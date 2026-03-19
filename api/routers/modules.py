@@ -1,10 +1,25 @@
-"""Modules registry and module run management."""
+"""
+Analysis Modules registry and run management.
+
+Modules are on-demand analysis tools that run asynchronously via Celery
+against files already ingested into a case.  They differ from Ingesters:
+
+  Ingesters  — parse uploaded raw files into the timeline (EVTX, logs, etc.)
+  Modules    — perform deeper forensic analysis on stored artifacts
+               (threat hunting, malware scanning, metadata extraction…)
+
+Each module run is independent: you select source files from the case,
+launch the module, and results appear in the Module Runs panel without
+affecting the main event timeline.
+"""
 from __future__ import annotations
 
 import uuid
 import logging
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from services.jobs import list_case_jobs
@@ -152,6 +167,7 @@ _MODULES_BY_ID: dict[str, dict] = {m["id"]: m for m in MODULES}
 class CreateModuleRunRequest(BaseModel):
     module_id: str
     job_ids: list[str]
+    params: dict[str, Any] = {}   # module-specific parameters (e.g. custom YARA rules)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -223,7 +239,7 @@ def create_module_run(case_id: str, req: CreateModuleRunRequest):
         celery_app = Celery(broker=settings.REDIS_URL)
         celery_app.send_task(
             "module.run",
-            args=[run_id, case_id, req.module_id, source_files],
+            args=[run_id, case_id, req.module_id, source_files, req.params],
             task_id=run_id,
         )
     except Exception as exc:
@@ -248,3 +264,26 @@ def get_module_run(run_id: str):
     if not run:
         raise HTTPException(status_code=404, detail="Module run not found")
     return run
+
+
+# ── YARA utilities ────────────────────────────────────────────────────────────
+
+class ValidateYaraRequest(BaseModel):
+    rules: str
+
+
+@router.post("/modules/yara/validate")
+def validate_yara_rules(req: ValidateYaraRequest):
+    """
+    Validate YARA rules syntax without running a scan.
+    Returns {valid: true} or {valid: false, error: "..."}.
+    """
+    try:
+        import yara  # type: ignore
+        yara.compile(source=req.rules)
+        return {"valid": True}
+    except ImportError:
+        # yara-python not available in the API container — skip validation
+        return {"valid": True, "warning": "yara-python not available in API; validation skipped"}
+    except Exception as exc:
+        return {"valid": False, "error": str(exc)}

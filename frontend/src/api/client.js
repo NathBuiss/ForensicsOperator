@@ -95,11 +95,12 @@ export const api = {
   },
 
   modules: {
-    list:        ()             => request('GET', '/modules'),
-    listSources: (caseId)       => request('GET', `/cases/${caseId}/sources`),
-    createRun:   (caseId, data) => request('POST', `/cases/${caseId}/module-runs`, data),
-    listRuns:    (caseId)       => request('GET', `/cases/${caseId}/module-runs`),
-    getRun:      (runId)        => request('GET', `/module-runs/${runId}`),
+    list:           ()              => request('GET',  '/modules'),
+    listSources:    (caseId)        => request('GET',  `/cases/${caseId}/sources`),
+    createRun:      (caseId, data)  => request('POST', `/cases/${caseId}/module-runs`, data),
+    listRuns:       (caseId)        => request('GET',  `/cases/${caseId}/module-runs`),
+    getRun:         (runId)         => request('GET',  `/module-runs/${runId}`),
+    validateYara:   (rules)         => request('POST', '/modules/yara/validate', { rules }),
   },
 
   collector: {

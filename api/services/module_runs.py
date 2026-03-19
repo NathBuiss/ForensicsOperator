@@ -36,6 +36,9 @@ def create_module_run(
         "results_preview":  "[]",
         "output_minio_key": "",
         "error":            "",
+        "tool_stdout":      "",
+        "tool_stderr":      "",
+        "tool_log":         "",
     }
     r.hset(f"fo:module_run:{run_id}", mapping=run)
     r.expire(f"fo:module_run:{run_id}", MODULE_RUN_TTL)

@@ -9,27 +9,43 @@ import { api } from '../api/client'
 
 const RUNNER_TEMPLATE = `# processor/tasks/module_task.py
 # ─────────────────────────────────────────────────────────
+# MODULES vs INGESTERS — key distinction:
+#
+#   Ingesters  (plugins/*/  *_plugin.py)
+#     • Parse raw uploaded files into timeline events at ingest time
+#     • Run synchronously, output stored in OpenSearch
+#     • Example: evtx_plugin.py, suricata_plugin.py
+#
+#   Modules  (processor/tasks/module_task.py  +  api/routers/modules.py)
+#     • On-demand forensic analysis tools run against already-ingested files
+#     • Run asynchronously via Celery, results stored in Redis/MinIO
+#     • Do NOT add events to the main timeline — results shown in Module Runs panel
+#     • Example: Hayabusa (threat hunting), YARA (malware scan), ExifTool
+#
+# ─────────────────────────────────────────────────────────
 # 1. Add your runner function
+#    Signature: (run_id, work_dir, sources_dir, params, tool_meta) -> list[dict]
 
-def _run_my_module(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
+def _run_my_module(
+    run_id: str,
+    work_dir: Path,
+    sources_dir: Path,
+    params: dict,          # module-specific parameters from the UI
+    tool_meta: dict,       # write stdout/stderr here for display in the UI
+) -> list[dict]:
     """
     Execute the module against the downloaded source files.
-
-    Args:
-        run_id      — unique run identifier (use for logging)
-        work_dir    — temporary working directory (cleaned up automatically)
-        sources_dir — directory containing downloaded source files
 
     Returns:
         list of hit dicts — each hit must contain at least:
           {
             "id":          str(uuid.uuid4()),
-            "timestamp":   "",          # ISO-8601 string or ""
+            "timestamp":   "",               # ISO-8601 string or ""
             "level":       "informational",  # critical/high/medium/low/informational
-            "level_int":   1,           # 5/4/3/2/1  (matches level)
-            "rule_title":  "...",       # short label shown in the results panel
-            "computer":    "...",       # hostname or source filename
-            "details_raw": "...",       # detail text shown below the title
+            "level_int":   1,                # 5/4/3/2/1 (matches level)
+            "rule_title":  "...",            # short label shown in the results panel
+            "computer":    "...",            # hostname or source filename
+            "details_raw": "...",            # detail text shown below the title
           }
     """
     results: list[dict] = []
@@ -37,48 +53,61 @@ def _run_my_module(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]
     for file_path in sorted(sources_dir.iterdir()):
         if not file_path.is_file():
             continue
-
         logger.info("[%s] Processing %s", run_id, file_path.name)
 
-        # --- your analysis logic here ---
-        hits = _analyse_file(file_path)
+        proc = subprocess.run(["my-tool", str(file_path)],
+                              capture_output=True, text=True, timeout=300)
+        tool_meta["stdout"] = proc.stdout[:4000]   # shown in the UI
 
-        for h in hits:
+        for line in proc.stdout.splitlines():
             results.append({
                 "id":          str(uuid.uuid4()),
-                "timestamp":   h.get("ts", ""),
-                "level":       h.get("severity", "informational"),
-                "level_int":   LEVEL_INT.get(h.get("severity", "informational"), 1),
-                "rule_title":  h.get("name", ""),
-                "computer":    file_path.name,
-                "details_raw": h.get("detail", ""),
+                "timestamp":   "",
+                "level":       "informational",
+                "level_int":   1,
+                "rule_title":  file_path.name,
+                "computer":    "",
+                "details_raw": line,
             })
 
     return results
 
 
-# 2. Register the runner in the dispatch table (same file, ~line 99)
+# 2. Register the runner in the dispatch table (same file, run_module function)
 
 RUNNERS = {
     "hayabusa":   _run_hayabusa,
     "strings":    _run_strings,
-    "hindsight":  _run_hindsight,
-    "regripper":  _run_regripper,
     "my_module":  _run_my_module,   # ← add this line
 }
 `
 
-const REGISTRY_TEMPLATE = `# api/routers/modules.py  — add an entry to MODULES
+const REGISTRY_TEMPLATE = `# api/routers/modules.py  — add an entry to MODULES list
 
 {
     "id":               "my_module",          # must match the RUNNERS key above
-    "name":             "My Module",          # display name
-    "description":      "One-line description shown in the launch modal",
-    "input_extensions": [".bin", ".exe"],     # file extensions to match
-    "input_filenames":  ["config.dat"],       # exact basenames to match (optional)
-    # Both lists empty → accept every uploaded file (like "strings")
+    "name":             "My Module",          # display name in the launch modal
+    "description":      "One-line description of what this module does",
+    "input_extensions": [".bin", ".exe"],     # file extensions accepted
+    "input_filenames":  ["config.dat"],       # exact basenames accepted (optional)
+    # Both lists empty → accept every ingested file (like "strings")
     "available":        True,
+    # "unavailable_reason": "Coming soon.",   # set available: False + this for stubs
 },
+
+# ─────────────────────────────────────────────────────────
+# Module-specific parameters (params dict)
+#
+# Pass structured params from the UI to your runner via the
+# CreateModuleRunRequest.params field.  Example for a custom
+# ruleset module:
+#
+#   Frontend sends:  { module_id: "my_module", job_ids: [...],
+#                      params: { threshold: 5, extra_rules: "..." } }
+#   Backend passes:  params dict to _run_my_module(... params, tool_meta)
+#
+# Built-in example: YARA Scanner uses params["custom_rules"]
+# to accept user-supplied YARA rules from the UI textarea.
 `
 
 // ── DocsModal ─────────────────────────────────────────────────────────────────

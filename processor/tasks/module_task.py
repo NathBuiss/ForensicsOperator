@@ -72,14 +72,17 @@ def run_module(
     case_id: str,
     module_id: str,
     source_files: list,
+    params: dict | None = None,
 ) -> dict:
     """
     Execute a module against a set of source files already stored in MinIO.
 
     source_files: list of {job_id, filename, minio_key}
+    params: optional module-specific parameters (e.g. custom YARA rules)
     """
     r = get_redis()
     work_dir = Path(tempfile.mkdtemp(prefix=f"fo_mod_{run_id}_"))
+    params = params or {}
 
     try:
         _update(r, run_id,
@@ -96,7 +99,13 @@ def run_module(
             logger.info("[%s] Downloading %s", run_id, sf["minio_key"])
             minio.fget_object(MINIO_BUCKET, sf["minio_key"], str(dest))
 
+        logger.info("[%s] Sources: %s", run_id,
+                    [p.name for p in sorted(sources_dir.iterdir()) if p.is_file()])
+
         # ── 2. Run module ─────────────────────────────────────────────────────
+        # tool_meta captures subprocess output for display in the UI
+        tool_meta: dict[str, str] = {"stdout": "", "stderr": "", "log": ""}
+
         RUNNERS = {
             "hayabusa":    _run_hayabusa,
             "strings":     _run_strings,
@@ -110,7 +119,7 @@ def run_module(
         if not runner:
             raise RuntimeError(f"Unknown module: {module_id}")
 
-        results = runner(run_id, work_dir, sources_dir)
+        results = runner(run_id, work_dir, sources_dir, params, tool_meta)
 
         # ── 3. Upload full results to MinIO ───────────────────────────────────
         results_json = work_dir / "results.json"
@@ -133,6 +142,9 @@ def run_module(
                 hits_by_level=json.dumps(hits_by_level),
                 results_preview=json.dumps(results[:200]),
                 output_minio_key=output_key,
+                tool_stdout=tool_meta.get("stdout", "")[:8000],
+                tool_stderr=tool_meta.get("stderr", "")[:4000],
+                tool_log=tool_meta.get("log",    "")[:4000],
                 completed_at=datetime.now(timezone.utc).isoformat())
 
         logger.info("[%s] Module run complete: %d hits", run_id, len(results))
@@ -143,6 +155,8 @@ def run_module(
         _update(r, run_id,
                 status="FAILED",
                 error=str(exc),
+                tool_stdout=tool_meta.get("stdout", "")[:8000] if 'tool_meta' in dir() else "",
+                tool_stderr=tool_meta.get("stderr", "")[:4000] if 'tool_meta' in dir() else "",
                 completed_at=datetime.now(timezone.utc).isoformat())
         raise
 
@@ -175,7 +189,13 @@ def _find_hayabusa_rules() -> Path | None:
     return None
 
 
-def _run_hayabusa(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
+def _run_hayabusa(
+    run_id: str,
+    work_dir: Path,
+    sources_dir: Path,
+    params: dict,
+    tool_meta: dict,
+) -> list[dict]:
     hayabusa_bin = shutil.which("hayabusa")
     if not hayabusa_bin:
         raise RuntimeError(
@@ -190,16 +210,23 @@ def _run_hayabusa(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
         )
     logger.info("[%s] Using Hayabusa rules: %s", run_id, rules_dir)
 
+    # List EVTX files we are about to scan
+    evtx_files = [p.name for p in sources_dir.iterdir()
+                  if p.is_file() and p.suffix.lower() == ".evtx"]
+    logger.info("[%s] EVTX files in sources_dir: %s", run_id, evtx_files)
+    tool_meta["log"] = f"Rules: {rules_dir}\nEVTX files: {', '.join(evtx_files) or 'none'}\n"
+
     output_jsonl = work_dir / "hayabusa_output.jsonl"
+    min_level    = params.get("min_level", "informational")
+
     cmd = [
         hayabusa_bin, "json-timeline",
-        "--no-wizard",           # required: suppress interactive prompts
+        "--no-wizard",           # required since 3.x: suppress interactive wizard
         "-d", str(sources_dir),
         "-r", str(rules_dir),
         "-o", str(output_jsonl),
-        "--no-color",
-        "--quiet",
-        "--min-level", "informational",  # capture ALL severity levels
+        "--no-color",            # plain text output for parsing
+        "--min-level", min_level,
     ]
 
     logger.info("[%s] Running: %s", run_id, " ".join(cmd))
@@ -214,21 +241,34 @@ def _run_hayabusa(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
     except subprocess.TimeoutExpired:
         raise RuntimeError("Hayabusa timed out after 1 hour")
 
-    # Log output for diagnosability (visible in Celery worker logs)
-    if proc.stdout:
-        logger.info("[%s] Hayabusa stdout: %s", run_id, proc.stdout[:1000])
-    if proc.stderr:
-        logger.info("[%s] Hayabusa stderr: %s", run_id, proc.stderr[:1000])
+    stdout_str = (proc.stdout or "").strip()
+    stderr_str = (proc.stderr or "").strip()
+
+    # Combine both streams into tool_meta for display in the UI
+    combined = ""
+    if stdout_str:
+        combined += stdout_str
+    if stderr_str:
+        combined += ("\n" if combined else "") + "[stderr]\n" + stderr_str
+    tool_meta["stdout"] = combined
+    tool_meta["log"] += f"\nReturn code: {proc.returncode}\n"
+
+    if stdout_str:
+        logger.info("[%s] Hayabusa stdout:\n%s", run_id, stdout_str[:3000])
+    if stderr_str:
+        logger.info("[%s] Hayabusa stderr:\n%s", run_id, stderr_str[:1000])
 
     if proc.returncode not in (0, 1):
         raise RuntimeError(
-            f"Hayabusa exited {proc.returncode}: {(proc.stderr or proc.stdout or '')[:500]}"
+            f"Hayabusa exited {proc.returncode}: {(stderr_str or stdout_str or '')[:500]}"
         )
 
     if not output_jsonl.exists() or output_jsonl.stat().st_size == 0:
-        logger.warning("[%s] Hayabusa produced no output file (or empty)", run_id)
+        detail = f"\n\nHayabusa output:\n{combined[:1000]}" if combined else ""
+        logger.warning("[%s] Hayabusa produced no output file (or empty)%s", run_id, detail)
         return []
 
+    logger.info("[%s] Hayabusa output file: %d bytes", run_id, output_jsonl.stat().st_size)
     return _parse_hayabusa_jsonl(output_jsonl)
 
 
@@ -323,7 +363,7 @@ def _normalize_ts(ts: str) -> str:
 MAX_STRINGS_HITS = 10_000
 
 
-def _run_strings(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
+def _run_strings(run_id: str, work_dir: Path, sources_dir: Path, params: dict, tool_meta: dict) -> list[dict]:
     strings_bin = shutil.which("strings")
     if not strings_bin:
         raise RuntimeError(
@@ -371,7 +411,7 @@ def _run_strings(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
 # Hindsight
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _run_hindsight(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
+def _run_hindsight(run_id: str, work_dir: Path, sources_dir: Path, params: dict, tool_meta: dict) -> list[dict]:
     hindsight_bin = shutil.which("hindsight") or shutil.which("hindsight.py")
     if not hindsight_bin:
         raise RuntimeError(
@@ -486,7 +526,7 @@ def _parse_hindsight_timestamp(ts) -> str:
 _RIP_PL = Path("/opt/regripper/rip.pl")
 
 
-def _run_regripper(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
+def _run_regripper(run_id: str, work_dir: Path, sources_dir: Path, params: dict, tool_meta: dict) -> list[dict]:
     if not _RIP_PL.exists():
         raise RuntimeError(
             "RegRipper not found at /opt/regripper/rip.pl. "
@@ -992,7 +1032,7 @@ _REGISTRY_FILENAMES  = frozenset({"NTUSER.DAT", "SYSTEM", "SOFTWARE", "SAM", "SE
 _REGISTRY_EXTENSIONS = frozenset({".dat", ".hive"})
 
 
-def _run_wintriage(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
+def _run_wintriage(run_id: str, work_dir: Path, sources_dir: Path, params: dict, tool_meta: dict) -> list[dict]:
     """
     Auto-detect Windows artifact type and run the appropriate parser.
 
@@ -1043,18 +1083,18 @@ def _run_wintriage(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]
 # YARA Scanner
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Inline ruleset — common malware patterns and suspicious indicators
+# Built-in ruleset — 16 rules covering common malware patterns and threat-hunting
 _YARA_RULES_SOURCE = r"""
 rule SuspiciousPE_Packer {
     meta:
         description = "Detects common PE packer signatures"
         severity = "medium"
     strings:
-        $upx0 = "UPX0" ascii
-        $upx1 = "UPX1" ascii
-        $upx2 = "UPX2" ascii
-        $aspack = "ASPack" ascii
-        $fsg = ".ndata" ascii
+        $upx0   = "UPX0"    ascii
+        $upx1   = "UPX1"    ascii
+        $upx2   = "UPX2"    ascii
+        $aspack = "ASPack"  ascii
+        $fsg    = ".ndata"  ascii
         $mpress = "MPRESS1" ascii
     condition:
         2 of them
@@ -1062,17 +1102,19 @@ rule SuspiciousPE_Packer {
 
 rule SuspiciousScript_PowerShellEncoded {
     meta:
-        description = "Detects base64-encoded PowerShell commands"
+        description = "Detects base64-encoded or obfuscated PowerShell commands"
         severity = "high"
     strings:
-        $enc1 = "-EncodedCommand" ascii nocase
-        $enc2 = "-encodedcommand" ascii nocase
+        $enc1 = "-EncodedCommand"  ascii nocase
         $enc3 = "FromBase64String" ascii nocase
-        $enc4 = "JABlAG4AYwBvAGQA" ascii   // base64 of "$encod"
+        $enc4 = "JABlAG4AYwBvAGQA" ascii
         $iex1 = "Invoke-Expression" ascii nocase
-        $iex2 = "IEX(" ascii nocase
+        $iex2 = "IEX("             ascii nocase
+        $byp1 = "bypass"           ascii nocase
+        $byp2 = "DownloadString"   ascii nocase
+        $byp3 = "DownloadFile"     ascii nocase
     condition:
-        any of ($enc*) or any of ($iex*)
+        2 of ($enc*) or any of ($iex*) or (any of ($byp*) and any of ($enc*))
 }
 
 rule SuspiciousShell_ReverseShell {
@@ -1080,11 +1122,11 @@ rule SuspiciousShell_ReverseShell {
         description = "Detects common reverse shell patterns"
         severity = "critical"
     strings:
-        $nc1  = "nc -e /bin/bash" ascii nocase
-        $nc2  = "nc -e /bin/sh" ascii nocase
+        $nc1  = "nc -e /bin/bash"         ascii nocase
+        $nc2  = "nc -e /bin/sh"           ascii nocase
         $nc3  = "/bin/bash -i >& /dev/tcp/" ascii
-        $nc4  = "bash -i >& /dev/tcp/" ascii
-        $perl = "perl -e 'use Socket" ascii nocase
+        $nc4  = "bash -i >& /dev/tcp/"    ascii
+        $perl = "perl -e 'use Socket"     ascii nocase
         $py1  = "python -c 'import socket" ascii nocase
         $py2  = "python3 -c 'import socket" ascii nocase
     condition:
@@ -1096,14 +1138,13 @@ rule SuspiciousStrings_Credentials {
         description = "Detects hard-coded credential patterns"
         severity = "high"
     strings:
-        $pass1 = "password=" ascii nocase
-        $pass2 = "passwd=" ascii nocase
-        $pass3 = "pwd=" ascii nocase
-        $api1  = "api_key" ascii nocase
-        $api2  = "apikey" ascii nocase
+        $pass1 = "password="  ascii nocase
+        $pass2 = "passwd="    ascii nocase
+        $api1  = "api_key"    ascii nocase
+        $api2  = "apikey"     ascii nocase
         $sec1  = "secret_key" ascii nocase
         $sec2  = "aws_secret" ascii nocase
-        $tok1  = "bearer " ascii nocase
+        $tok1  = "bearer "    ascii nocase
     condition:
         2 of them
 }
@@ -1113,13 +1154,13 @@ rule Mimikatz_Indicators {
         description = "Detects Mimikatz credential dumping tool signatures"
         severity = "critical"
     strings:
-        $s1 = "mimikatz" ascii nocase
-        $s2 = "sekurlsa::" ascii nocase
-        $s3 = "lsadump::" ascii nocase
-        $s4 = "kerberos::" ascii nocase
+        $s1 = "mimikatz"       ascii nocase
+        $s2 = "sekurlsa::"     ascii nocase
+        $s3 = "lsadump::"      ascii nocase
+        $s4 = "kerberos::"     ascii nocase
         $s5 = "privilege::debug" ascii nocase
-        $s6 = "SamSs" ascii wide
-        $s7 = "wdigest" ascii wide
+        $s6 = "SamSs"          ascii wide
+        $s7 = "wdigest"        ascii wide
     condition:
         2 of them
 }
@@ -1129,13 +1170,13 @@ rule Webshell_PHP {
         description = "Detects common PHP webshell patterns"
         severity = "critical"
     strings:
-        $p1 = "eval(base64_decode(" ascii nocase
-        $p2 = "eval(gzinflate(" ascii nocase
-        $p3 = "eval(str_rot13(" ascii nocase
-        $p4 = "eval($_POST[" ascii nocase
-        $p5 = "system($_GET[" ascii nocase
-        $p6 = "exec($_REQUEST[" ascii nocase
-        $p7 = "passthru($_" ascii nocase
+        $p1 = "eval(base64_decode("  ascii nocase
+        $p2 = "eval(gzinflate("      ascii nocase
+        $p3 = "eval(str_rot13("      ascii nocase
+        $p4 = "eval($_POST["         ascii nocase
+        $p5 = "system($_GET["        ascii nocase
+        $p6 = "exec($_REQUEST["      ascii nocase
+        $p7 = "passthru($_"          ascii nocase
     condition:
         any of them
 }
@@ -1145,37 +1186,215 @@ rule Ransomware_ExtensionTargets {
         description = "Detects ransomware-like file extension targeting patterns"
         severity = "high"
     strings:
-        $ext1 = ".docx,.xlsx,.pptx" ascii nocase
-        $ext2 = "encrypt" ascii nocase
-        $ext3 = "ransom" ascii nocase
-        $ext4 = "YOUR_FILES_ARE_ENCRYPTED" ascii nocase
-        $ext5 = "HOW_TO_DECRYPT" ascii nocase
-        $ext6 = "RECOVERY_KEY" ascii nocase
+        $ext2 = "encrypt"                    ascii nocase
+        $ext3 = "ransom"                     ascii nocase
+        $ext4 = "YOUR_FILES_ARE_ENCRYPTED"   ascii nocase
+        $ext5 = "HOW_TO_DECRYPT"             ascii nocase
+        $ext6 = "RECOVERY_KEY"               ascii nocase
+        $ext7 = "bitcoin"                    ascii nocase
+    condition:
+        2 of them
+}
+
+rule CobaltStrike_Beacon {
+    meta:
+        description = "Detects CobaltStrike beacon patterns and default strings"
+        severity = "critical"
+    strings:
+        $s1 = "ReflectiveLoader"       ascii
+        $s2 = "beacon.dll"             ascii nocase
+        $s3 = "cobaltstrike"           ascii nocase
+        $s4 = "sleep_mask"             ascii
+        $s5 = "%s (admin)"             ascii
+        $s6 = "post-ex"                ascii
+        $b1 = { 68 74 74 70 73 3A 2F 2F }   // "https://" in shellcode context
+        $w1 = "www6"                   ascii
+        $w2 = "cdn."                   ascii
+    condition:
+        2 of ($s*) or ($b1 and 1 of ($w*))
+}
+
+rule Metasploit_Meterpreter {
+    meta:
+        description = "Detects Metasploit/Meterpreter staging and session strings"
+        severity = "critical"
+    strings:
+        $m1 = "meterpreter"     ascii nocase
+        $m2 = "metasploit"      ascii nocase
+        $m3 = "Msf::"           ascii
+        $m4 = "PAYLOAD_UUID"    ascii
+        $m5 = "stageless"       ascii nocase
+        $sh1 = "windows/meterpreter" ascii nocase
+        $sh2 = "linux/x86/meterpreter" ascii nocase
+    condition:
+        any of them
+}
+
+rule Persistence_Registry_AppInit {
+    meta:
+        description = "Detects AppInit_DLLs and other covert registry persistence keys"
+        severity = "high"
+    strings:
+        $k1 = "AppInit_DLLs"        ascii nocase wide
+        $k2 = "AppCertDlls"         ascii nocase wide
+        $k3 = "Notify\\"            ascii nocase wide
+        $k4 = "SecurityProviders"   ascii nocase wide
+        $k5 = "LSA\\Authentication" ascii nocase wide
+        $k6 = "Print\\Providers"    ascii nocase wide
+        $k7 = "Winsock2\\Parameters\\Protocol_Catalog9" ascii nocase wide
+    condition:
+        any of them
+}
+
+rule ProcessInjection_APIs {
+    meta:
+        description = "Detects common process injection API call sequences"
+        severity = "high"
+    strings:
+        $va   = "VirtualAllocEx"     ascii wide
+        $wpm  = "WriteProcessMemory" ascii wide
+        $ct   = "CreateRemoteThread" ascii wide
+        $nt1  = "NtCreateThreadEx"   ascii wide
+        $nt2  = "NtMapViewOfSection" ascii wide
+        $apc  = "QueueUserAPC"       ascii wide
+        $sh   = "SetWindowsHookEx"   ascii wide
+    condition:
+        3 of them
+}
+
+rule LOLBIN_Abuse {
+    meta:
+        description = "Detects Living-off-the-Land Binary abuse patterns"
+        severity = "high"
+    strings:
+        $c1 = "certutil" ascii nocase
+        $c2 = "-decode"  ascii nocase
+        $c3 = "-urlcache" ascii nocase
+        $r1 = "regsvr32" ascii nocase
+        $r2 = "scrobj.dll" ascii nocase
+        $b1 = "bitsadmin"  ascii nocase
+        $b2 = "/transfer"  ascii nocase
+        $w1 = "wmic"       ascii nocase
+        $w2 = "process call create" ascii nocase
+        $m1 = "mshta"      ascii nocase
+        $m2 = "vbscript"   ascii nocase
+    condition:
+        ($c1 and 1 of ($c2, $c3)) or
+        ($r1 and $r2) or
+        ($b1 and $b2) or
+        ($w1 and $w2) or
+        ($m1 and $m2)
+}
+
+rule LateralMovement_PsExec {
+    meta:
+        description = "Detects PsExec and common lateral movement tool artifacts"
+        severity = "high"
+    strings:
+        $px1 = "PSEXESVC"      ascii wide nocase
+        $px2 = "psexec"        ascii nocase
+        $wm1 = "wmiexec"       ascii nocase
+        $wm2 = "Win32_Process" ascii wide
+        $sm1 = "smbexec"       ascii nocase
+        $at1 = "atexec"        ascii nocase
+        $dc  = "dcomexec"      ascii nocase
+    condition:
+        any of them
+}
+
+rule SuspiciousOfficeDoc_Macro {
+    meta:
+        description = "Detects suspicious VBA macro execution patterns in Office documents"
+        severity = "high"
+    strings:
+        $v1 = "Auto_Open"     ascii nocase
+        $v2 = "Document_Open" ascii nocase
+        $v3 = "AutoOpen"      ascii nocase
+        $v4 = "Shell("        ascii nocase
+        $v5 = "CreateObject(" ascii nocase
+        $v6 = "WScript.Shell" ascii nocase
+        $v7 = "cmd.exe"       ascii nocase
+    condition:
+        2 of ($v1, $v2, $v3) or (1 of ($v1, $v2, $v3) and 1 of ($v4, $v5, $v6, $v7))
+}
+
+rule DataStaging_Exfil {
+    meta:
+        description = "Detects data staging and potential exfiltration indicators"
+        severity = "medium"
+    strings:
+        $z1 = "7z.exe"        ascii nocase
+        $z2 = "WinRAR"        ascii nocase
+        $z3 = ".7z"           ascii nocase
+        $n1 = "\\\\\\\\*"     ascii
+        $f1 = "passwords"     ascii nocase
+        $f2 = "credentials"   ascii nocase
+        $f3 = "sensitive"     ascii nocase
+        $u1 = "ftp://"        ascii nocase
+        $u2 = "pastebin.com"  ascii nocase
+        $u3 = "mega.nz"       ascii nocase
+    condition:
+        (1 of ($z*) and 1 of ($f*)) or
+        (1 of ($f*) and 1 of ($u*))
+}
+
+rule CryptoMiner {
+    meta:
+        description = "Detects cryptocurrency miner strings and configuration"
+        severity = "high"
+    strings:
+        $s1 = "xmrig"         ascii nocase
+        $s2 = "stratum+tcp://" ascii nocase
+        $s3 = "monero"        ascii nocase
+        $s4 = "--donate-level" ascii nocase
+        $s5 = "pool.minexmr"  ascii nocase
+        $s6 = "cryptonight"   ascii nocase
+        $s7 = "nicehash"      ascii nocase
+        $s8 = "2miners.com"   ascii nocase
     condition:
         2 of them
 }
 """
 
 
-def _run_yara(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
-    """Scan source files with YARA rules."""
+def _compile_yara_rules(custom_rules_source: str | None = None):
+    """Compile YARA rules from the built-in set, optionally merging custom rules."""
+    import yara
+    source = _YARA_RULES_SOURCE
+    if custom_rules_source and custom_rules_source.strip():
+        source = source + "\n\n" + custom_rules_source.strip()
+    return yara.compile(source=source)
+
+
+def _run_yara(
+    run_id: str,
+    work_dir: Path,
+    sources_dir: Path,
+    params: dict,
+    tool_meta: dict,
+) -> list[dict]:
+    """Scan source files with YARA rules (built-in + optional custom rules)."""
+    custom_rules = params.get("custom_rules", "") or ""
+
     try:
         import yara
     except ImportError:
-        # Try system binary as fallback
         yara_bin = shutil.which("yara")
         if not yara_bin:
             raise RuntimeError(
                 "yara-python is not installed and the yara CLI binary is not in PATH. "
                 "Ensure yara-python is installed in the processor image (pip install yara-python)."
             )
-        return _run_yara_cli(run_id, work_dir, sources_dir, yara_bin)
+        return _run_yara_cli(run_id, work_dir, sources_dir, yara_bin, params, tool_meta)
 
-    # Compile inline rules
+    # Compile built-in rules + any custom rules
     try:
-        rules = yara.compile(source=_YARA_RULES_SOURCE)
+        rules = _compile_yara_rules(custom_rules if custom_rules.strip() else None)
     except yara.SyntaxError as exc:
         raise RuntimeError(f"YARA rule compilation failed: {exc}") from exc
+
+    n_custom = custom_rules.strip().count("rule ") if custom_rules.strip() else 0
+    tool_meta["log"] = f"Built-in rules + {n_custom} custom rule(s)\n"
 
     _SEVERITY_MAP = {
         "critical": ("critical", 5),
@@ -1234,7 +1453,7 @@ def _run_yara(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
     return results
 
 
-def _run_yara_cli(run_id: str, work_dir: Path, sources_dir: Path, yara_bin: str) -> list[dict]:
+def _run_yara_cli(run_id: str, work_dir: Path, sources_dir: Path, yara_bin: str, params: dict, tool_meta: dict) -> list[dict]:
     """Fallback: use the yara CLI binary."""
     rules_file = work_dir / "rules.yar"
     rules_file.write_text(_YARA_RULES_SOURCE)
@@ -1275,7 +1494,7 @@ def _run_yara_cli(run_id: str, work_dir: Path, sources_dir: Path, yara_bin: str)
 # ExifTool
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _run_exiftool(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
+def _run_exiftool(run_id: str, work_dir: Path, sources_dir: Path, params: dict, tool_meta: dict) -> list[dict]:
     """Extract metadata from files using ExifTool."""
     exiftool_bin = shutil.which("exiftool")
     if not exiftool_bin:

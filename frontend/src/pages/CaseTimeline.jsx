@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   Upload, Search, Bell, X, ChevronRight, AlertTriangle,
   CheckCircle, Clock, Database, Loader2, Shield,
-  Cpu, RotateCcw, Plus, Download,
+  Cpu, RotateCcw, Plus, Download, Play, Terminal,
+  AlertCircle, ChevronDown, FileCode,
 } from 'lucide-react'
 import { api } from '../api/client'
 import Timeline from './Timeline'
@@ -40,6 +41,10 @@ const MODULE_NAMES = {
   chainsaw:    'Chainsaw',
   evtxecmd:    'EvtxECmd',
   volatility3: 'Volatility 3',
+  yara:        'YARA Scanner',
+  exiftool:    'ExifTool',
+  bulk_extractor: 'Bulk Extractor',
+  capa:        'CAPA',
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -183,18 +188,37 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
   const [running, setRunning]               = useState(false)
   const [error, setError]                   = useState(null)
 
+  // YARA-specific state
+  const [yaraRules, setYaraRules]           = useState('')
+  const [yaraValidating, setYaraValidating] = useState(false)
+  const [yaraValid, setYaraValid]           = useState(null)  // null | {valid, error}
+  const yaraDebounce                        = useRef(null)
+
   useEffect(() => {
     Promise.all([api.modules.list(), api.modules.listSources(caseId)])
       .then(([modResp, srcResp]) => {
-        setModules(modResp.modules || [])
+        // Only show available modules
+        setModules((modResp.modules || []).filter(m => m.available))
         setSources(srcResp.sources || [])
         setLoading(false)
       })
       .catch(err => { setError(err.message); setLoading(false) })
   }, [caseId])
 
-  // Filter sources by extension OR exact basename (case-insensitive).
-  // Empty both lists → module accepts all files (e.g. "strings").
+  // Validate YARA rules with debounce
+  useEffect(() => {
+    if (selectedModule?.id !== 'yara') return
+    if (!yaraRules.trim()) { setYaraValid(null); return }
+    if (yaraDebounce.current) clearTimeout(yaraDebounce.current)
+    setYaraValidating(true)
+    yaraDebounce.current = setTimeout(() => {
+      api.modules.validateYara(yaraRules)
+        .then(r => setYaraValid(r))
+        .catch(() => setYaraValid({ valid: false, error: 'Validation request failed' }))
+        .finally(() => setYaraValidating(false))
+    }, 600)
+  }, [yaraRules, selectedModule])
+
   const compatibleSources = selectedModule
     ? sources.filter(s => {
         const fnameLower = (s.original_filename || '').toLowerCase()
@@ -206,7 +230,7 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
         const nameMatch = nameList.some(fn => basename === fn.toLowerCase())
         return extMatch || nameMatch
       })
-    : []
+    : sources
 
   const visibleSources = sourceSearch.trim()
     ? compatibleSources.filter(s =>
@@ -222,14 +246,31 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
     })
   }
 
+  function selectAll() {
+    setSelectedJobs(new Set(compatibleSources.map(s => s.job_id)))
+  }
+
+  function selectModule(mod) {
+    setSelectedModule(mod)
+    setSelectedJobs(new Set())
+    setYaraRules('')
+    setYaraValid(null)
+  }
+
   async function handleRun() {
     if (!selectedModule || selectedJobs.size === 0) return
+    if (selectedModule.id === 'yara' && yaraValid && !yaraValid.valid) return
     setRunning(true)
     setError(null)
     try {
+      const params = {}
+      if (selectedModule.id === 'yara' && yaraRules.trim()) {
+        params.custom_rules = yaraRules.trim()
+      }
       const run = await api.modules.createRun(caseId, {
         module_id: selectedModule.id,
-        job_ids: [...selectedJobs],
+        job_ids:   [...selectedJobs],
+        params,
       })
       onRunCreated(run)
     } catch (err) {
@@ -238,179 +279,235 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
     }
   }
 
-  const canRun = selectedModule && selectedJobs.size > 0 && !running
-
-  // Sources to display in the right column:
-  // if a module is selected → filtered; otherwise → all case sources
-  const displaySources = selectedModule ? compatibleSources : sources
-
-  const visibleDisplaySources = sourceSearch.trim()
-    ? displaySources.filter(s =>
-        (s.original_filename || '').toLowerCase().includes(sourceSearch.toLowerCase())
-      )
-    : displaySources
+  const yaraInvalid = selectedModule?.id === 'yara' && yaraValid && !yaraValid.valid
+  const canRun = selectedModule && selectedJobs.size > 0 && !running && !yaraInvalid
 
   return (
     <div className="panel-backdrop" onClick={onClose}>
       <div
-        className="absolute right-0 top-0 h-full w-[720px] bg-white border-l border-gray-200 flex flex-col"
+        className="absolute right-0 top-0 h-full w-[800px] bg-white border-l border-gray-200 flex flex-col"
         style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.10)' }}
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
           <div className="flex items-center gap-2">
-            <Cpu size={16} className="text-brand-accent" />
-            <span className="font-semibold text-brand-text">Launch Module</span>
+            <Play size={15} className="text-brand-accent" />
+            <span className="font-semibold text-brand-text">Run Analysis Module</span>
           </div>
           <button onClick={onClose} className="btn-ghost p-1.5 rounded-lg">
             <X size={16} />
           </button>
         </div>
 
-        {/* Body — two columns */}
         {loading ? (
           <div className="flex-1 flex items-center justify-center text-gray-400">
-            <Loader2 size={20} className="animate-spin mr-2" />
-            Loading…
+            <Loader2 size={20} className="animate-spin mr-2" />Loading…
           </div>
         ) : (
           <div className="flex-1 flex overflow-hidden">
 
-            {/* Left: module list */}
-            <div className="w-[300px] flex-shrink-0 border-r border-gray-100 flex flex-col">
+            {/* ── Left: module list ──────────────────────────────────────── */}
+            <div className="w-[280px] flex-shrink-0 border-r border-gray-100 flex flex-col bg-gray-50/50">
               <div className="px-4 pt-4 pb-2">
-                <p className="section-title">Select Module</p>
+                <p className="section-title text-[11px] uppercase tracking-wider text-gray-400">Modules</p>
               </div>
-              <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-2">
-                {modules.filter(m => m.available).map(mod => (
-                  <button
-                    key={mod.id}
-                    onClick={() => { setSelectedModule(mod); setSelectedJobs(new Set()) }}
-                    className={`w-full text-left p-3 rounded-lg border transition-all ${
-                      selectedModule?.id === mod.id
-                        ? 'border-brand-accent bg-brand-accentlight ring-1 ring-brand-accent/30'
-                        : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
-                    }`}
-                  >
-                    <p className="font-medium text-sm text-brand-text">{mod.name}</p>
-                    <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{mod.description}</p>
-                    {(mod.input_extensions?.length > 0 || mod.input_filenames?.length > 0) && (
-                      <p className="text-[10px] text-gray-400 mt-1 font-mono">
-                        {[...(mod.input_extensions || []), ...(mod.input_filenames || [])].join('  ')}
-                      </p>
-                    )}
-                  </button>
-                ))}
+              <div className="flex-1 overflow-y-auto px-3 pb-4 space-y-1.5">
+                {modules.map(mod => {
+                  const isSelected = selectedModule?.id === mod.id
+                  return (
+                    <button
+                      key={mod.id}
+                      onClick={() => selectModule(mod)}
+                      className={`w-full text-left p-3 rounded-xl border-2 transition-all ${
+                        isSelected
+                          ? 'border-brand-accent bg-brand-accentlight shadow-sm'
+                          : 'border-transparent bg-white hover:border-gray-200 hover:shadow-sm'
+                      }`}
+                    >
+                      <div className="flex items-start gap-2">
+                        <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 ${
+                          isSelected ? 'bg-brand-accent text-white' : 'bg-gray-100 text-gray-500'
+                        }`}>
+                          <Cpu size={13} />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-semibold text-xs text-brand-text">{mod.name}</p>
+                          <p className="text-[10px] text-gray-400 mt-0.5 line-clamp-2 leading-relaxed">
+                            {mod.description}
+                          </p>
+                          {(mod.input_extensions?.length > 0 || mod.input_filenames?.length > 0) && (
+                            <p className="text-[9px] text-gray-400 mt-1 font-mono truncate">
+                              {[...(mod.input_extensions || []), ...(mod.input_filenames || [])].slice(0, 6).join(' ')}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </button>
+                  )
+                })}
               </div>
             </div>
 
-            {/* Right: source files */}
+            {/* ── Right: source files + params ──────────────────────────── */}
             <div className="flex-1 flex flex-col overflow-hidden">
-              <div className="px-4 pt-4 pb-2 flex items-center justify-between">
-                <p className="section-title">
-                  Source Files
-                  {displaySources.length > 0 && (
-                    <span className="ml-1.5 font-normal text-gray-400">
-                      ({selectedJobs.size}/{displaySources.length})
-                    </span>
-                  )}
-                </p>
-                {displaySources.length > 0 && (
-                  <button
-                    onClick={() => setSelectedJobs(new Set(displaySources.map(s => s.job_id)))}
-                    className="text-xs text-brand-accent hover:underline"
-                  >
-                    Select all
-                  </button>
-                )}
-              </div>
 
-              {!selectedModule && sources.length === 0 && (
-                <p className="px-4 text-xs text-gray-400 italic">
-                  No ingested files in this case yet.
-                </p>
-              )}
-              {!selectedModule && sources.length > 0 && (
-                <p className="px-4 pb-2 text-[11px] text-gray-400 italic">
-                  Select a module to filter compatible files.
-                </p>
-              )}
-              {selectedModule && compatibleSources.length === 0 && (
-                <p className="px-4 text-xs text-gray-400 italic">
-                  No compatible files for <strong>{selectedModule.name}</strong>.
-                  {(selectedModule.input_extensions?.length > 0 || selectedModule.input_filenames?.length > 0) && (
-                    <> Ingest {[
-                      ...(selectedModule.input_extensions || []),
-                      ...(selectedModule.input_filenames  || []),
-                    ].join(', ')} files first.</>
-                  )}
-                </p>
-              )}
-
-              {displaySources.length > 5 && (
-                <div className="px-4 pb-2">
-                  <input
-                    type="text"
-                    value={sourceSearch}
-                    onChange={e => setSourceSearch(e.target.value)}
-                    placeholder="Filter files…"
-                    className="w-full px-3 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-brand-accent/40 focus:border-brand-accent"
-                  />
+              {!selectedModule ? (
+                <div className="flex-1 flex flex-col items-center justify-center text-center px-8 gap-3">
+                  <div className="w-12 h-12 rounded-2xl bg-gray-100 flex items-center justify-center">
+                    <Cpu size={22} className="text-gray-400" />
+                  </div>
+                  <p className="font-medium text-brand-text">Select a module</p>
+                  <p className="text-xs text-gray-500 max-w-xs">
+                    Choose an analysis module from the left panel, then select the source files to process.
+                  </p>
                 </div>
-              )}
+              ) : (
+                <>
+                  {/* Source file selection */}
+                  <div className="flex items-center justify-between px-4 pt-4 pb-2 flex-shrink-0">
+                    <p className="section-title text-[11px] uppercase tracking-wider text-gray-400">
+                      Input Files
+                      {compatibleSources.length > 0 && (
+                        <span className="ml-1.5 font-normal normal-case text-gray-400">
+                          {selectedJobs.size}/{compatibleSources.length} selected
+                        </span>
+                      )}
+                    </p>
+                    {compatibleSources.length > 0 && selectedJobs.size < compatibleSources.length && (
+                      <button onClick={selectAll} className="text-xs text-brand-accent hover:underline">
+                        Select all
+                      </button>
+                    )}
+                  </div>
 
-              <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-1">
-                {visibleDisplaySources.map(src => (
-                  <label
-                    key={src.job_id}
-                    className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-gray-50 cursor-pointer border border-transparent hover:border-gray-200 transition-colors"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selectedJobs.has(src.job_id)}
-                      onChange={() => toggleJob(src.job_id)}
-                      className="rounded border-gray-300 flex-shrink-0"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm text-brand-text truncate font-medium">
-                        {src.original_filename}
-                      </p>
-                      <p className="text-[10px] text-gray-400 mt-0.5">
-                        {(src.events_indexed || 0).toLocaleString()} events
-                        {src.plugin_used ? ` · ${src.plugin_used}` : ''}
+                  {compatibleSources.length === 0 ? (
+                    <div className="mx-4 mb-4 p-4 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800">
+                      <p className="font-medium mb-1">No compatible files ingested yet</p>
+                      <p>
+                        {selectedModule.name} requires:{' '}
+                        {[...(selectedModule.input_extensions || []), ...(selectedModule.input_filenames || [])].join(', ') || 'any file'}
                       </p>
                     </div>
-                  </label>
-                ))}
-                {visibleDisplaySources.length === 0 && sourceSearch && (
-                  <p className="text-xs text-gray-400 italic py-4 text-center">
-                    No files match "{sourceSearch}"
-                  </p>
-                )}
-              </div>
+                  ) : (
+                    <>
+                      {compatibleSources.length > 6 && (
+                        <div className="px-4 pb-2 flex-shrink-0">
+                          <input
+                            type="text"
+                            value={sourceSearch}
+                            onChange={e => setSourceSearch(e.target.value)}
+                            placeholder="Filter files…"
+                            className="w-full px-3 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-brand-accent/40 focus:border-brand-accent"
+                          />
+                        </div>
+                      )}
+                      <div className={`px-4 pb-3 space-y-1 ${selectedModule?.id === 'yara' ? 'max-h-48' : 'flex-1'} overflow-y-auto flex-shrink-0`}>
+                        {visibleSources.map(src => (
+                          <label
+                            key={src.job_id}
+                            className={`flex items-center gap-3 p-2.5 rounded-lg cursor-pointer border transition-colors ${
+                              selectedJobs.has(src.job_id)
+                                ? 'border-brand-accent/40 bg-brand-accentlight'
+                                : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={selectedJobs.has(src.job_id)}
+                              onChange={() => toggleJob(src.job_id)}
+                              className="rounded border-gray-300 flex-shrink-0 accent-brand-accent"
+                            />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs text-brand-text truncate font-medium">
+                                {src.original_filename}
+                              </p>
+                              <p className="text-[10px] text-gray-400 mt-0.5">
+                                {(src.events_indexed || 0).toLocaleString()} events
+                                {src.plugin_used ? ` · ${src.plugin_used}` : ''}
+                              </p>
+                            </div>
+                          </label>
+                        ))}
+                        {visibleSources.length === 0 && sourceSearch && (
+                          <p className="text-xs text-gray-400 italic py-4 text-center">
+                            No files match "{sourceSearch}"
+                          </p>
+                        )}
+                      </div>
+                    </>
+                  )}
+
+                  {/* ── YARA custom rules ─────────────────────────────────── */}
+                  {selectedModule.id === 'yara' && (
+                    <div className="flex-1 flex flex-col px-4 pb-4 min-h-0">
+                      <div className="flex items-center gap-2 mb-2 flex-shrink-0">
+                        <FileCode size={12} className="text-gray-400" />
+                        <p className="section-title text-[11px] uppercase tracking-wider text-gray-400">
+                          Custom YARA Rules
+                        </p>
+                        <span className="text-[10px] text-gray-400">(appended to built-in rules)</span>
+                        {yaraValidating && <Loader2 size={10} className="animate-spin text-gray-400 ml-auto" />}
+                        {!yaraValidating && yaraValid && (
+                          yaraValid.valid
+                            ? <span className="ml-auto text-[10px] text-green-600 flex items-center gap-1">
+                                <CheckCircle size={10} /> Valid
+                              </span>
+                            : <span className="ml-auto text-[10px] text-red-500 flex items-center gap-1">
+                                <AlertCircle size={10} /> Syntax error
+                              </span>
+                        )}
+                      </div>
+                      <textarea
+                        value={yaraRules}
+                        onChange={e => setYaraRules(e.target.value)}
+                        placeholder={`rule MyRule {\n    meta:\n        description = "My custom rule"\n        severity = "high"\n    strings:\n        $s1 = "suspicious_string" ascii nocase\n    condition:\n        any of them\n}`}
+                        spellCheck={false}
+                        className={`flex-1 w-full min-h-0 px-3 py-2.5 text-[11px] font-mono border rounded-xl resize-none focus:outline-none focus:ring-2 leading-relaxed ${
+                          yaraValid && !yaraValid.valid
+                            ? 'border-red-300 bg-red-50 focus:ring-red-200'
+                            : 'border-gray-200 bg-gray-950 text-green-300 focus:ring-brand-accent/30 focus:border-brand-accent'
+                        }`}
+                      />
+                      {yaraValid && !yaraValid.valid && (
+                        <p className="mt-1 text-[10px] text-red-500 font-mono flex-shrink-0">
+                          {yaraValid.error}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           </div>
         )}
 
         {/* Footer */}
-        <div className="border-t border-gray-200 px-5 py-4 flex items-center gap-3">
+        <div className="border-t border-gray-200 px-5 py-3.5 flex items-center gap-3 bg-gray-50/50">
           {error && (
             <p className="flex-1 text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2 truncate" title={error}>
               {error}
             </p>
           )}
-          <button
-            onClick={handleRun}
-            disabled={!canRun}
-            className="btn-primary ml-auto justify-center"
-          >
-            {running
-              ? <Loader2 size={14} className="animate-spin" />
-              : <Cpu size={14} />
-            }
-            {running ? 'Launching…' : 'Run Module'}
-          </button>
+          <div className="ml-auto flex items-center gap-2">
+            {selectedModule && selectedJobs.size === 0 && (
+              <p className="text-xs text-gray-400">Select at least one file</p>
+            )}
+            <button
+              onClick={handleRun}
+              disabled={!canRun}
+              className={`flex items-center gap-2 px-5 py-2 rounded-xl font-semibold text-sm transition-all ${
+                canRun
+                  ? 'bg-brand-accent text-white hover:bg-brand-accent/90 shadow-sm hover:shadow'
+                  : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+              }`}
+            >
+              {running
+                ? <><Loader2 size={14} className="animate-spin" /> Launching…</>
+                : <><Play size={14} /> Run {selectedModule?.name || 'Module'}</>
+              }
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -421,7 +518,8 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
 // ModuleRunCard
 // ─────────────────────────────────────────────────────────────────────────────
 function ModuleRunCard({ run }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen]         = useState(false)
+  const [showOutput, setShowOutput] = useState(false)
 
   const moduleName = MODULE_NAMES[run.module_id] || run.module_id
 
@@ -438,8 +536,10 @@ function ModuleRunCard({ run }) {
     ? new Date(ts).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
     : null
 
-  const preview  = run.results_preview || []
-  const byLevel  = run.hits_by_level   || {}
+  const preview    = run.results_preview || []
+  const byLevel    = run.hits_by_level   || {}
+  const toolOutput = (run.tool_stdout || '') + (run.tool_log ? '\n' + run.tool_log : '')
+  const hasOutput  = toolOutput.trim().length > 0
 
   return (
     <div className="card overflow-hidden">
@@ -455,34 +555,35 @@ function ModuleRunCard({ run }) {
               {run.status}
             </span>
             {run.status === 'COMPLETED' && run.total_hits > 0 && (
-              <span className="badge bg-gray-100 text-gray-600">
+              <span className="badge bg-orange-50 text-orange-700 border border-orange-200">
                 {run.total_hits.toLocaleString()} hits
               </span>
             )}
             {run.status === 'COMPLETED' && run.total_hits === 0 && (
-              <span className="badge bg-green-50 text-green-600">No detections</span>
+              <span className="badge bg-gray-50 text-gray-500">0 detections</span>
             )}
           </div>
           {tsDisplay && (
             <p className="text-[10px] text-gray-400 mt-0.5 font-mono">{tsDisplay}</p>
           )}
           {run.status === 'FAILED' && run.error && (
-            <p className="text-xs text-red-600 mt-0.5 truncate" title={run.error}>
+            <p className="text-xs text-red-600 mt-0.5 line-clamp-2" title={run.error}>
               {run.error}
             </p>
           )}
         </div>
-        <ChevronRight
+        <ChevronDown
           size={14}
-          className={`text-gray-400 flex-shrink-0 mt-0.5 transition-transform ${open ? 'rotate-90' : ''}`}
+          className={`text-gray-400 flex-shrink-0 mt-0.5 transition-transform ${open ? 'rotate-180' : ''}`}
         />
       </button>
 
-      {open && run.status === 'COMPLETED' && (
+      {open && (
         <div className="border-t border-gray-100 bg-gray-50 p-3 space-y-2">
-          {/* Level summary */}
+
+          {/* ── Level summary ──────────────────────────────────── */}
           {Object.keys(byLevel).length > 0 && (
-            <div className="flex flex-wrap gap-1 mb-2">
+            <div className="flex flex-wrap gap-1 mb-1">
               {['critical', 'high', 'medium', 'low', 'informational'].map(lvl => {
                 const count = byLevel[lvl]
                 if (!count) return null
@@ -495,9 +596,19 @@ function ModuleRunCard({ run }) {
             </div>
           )}
 
-          {preview.length === 0 ? (
-            <p className="text-xs text-gray-400 text-center py-4 italic">No detections</p>
-          ) : (
+          {/* ── Hits ───────────────────────────────────────────── */}
+          {preview.length === 0 && run.status === 'COMPLETED' && (
+            <div className="bg-white rounded-lg border border-gray-200 p-3 text-center">
+              <p className="text-xs text-gray-500 font-medium">No detections</p>
+              {hasOutput && (
+                <p className="text-[10px] text-gray-400 mt-0.5">
+                  See tool output below for details
+                </p>
+              )}
+            </div>
+          )}
+
+          {preview.length > 0 && (
             <>
               {preview.slice(0, 50).map((hit, i) => (
                 <div key={i} className="bg-white rounded border border-gray-200 p-2 text-xs">
@@ -506,25 +617,49 @@ function ModuleRunCard({ run }) {
                       {hit.level}
                     </span>
                     <span className="font-medium text-brand-text">{hit.rule_title}</span>
+                    {hit.filename && (
+                      <span className="text-[10px] text-gray-400 font-mono">{hit.filename}</span>
+                    )}
                   </div>
                   <div className="flex gap-3 text-[10px] text-gray-400 font-mono flex-wrap">
                     {hit.computer  && <span>{hit.computer}</span>}
+                    {hit.channel   && <span className="text-blue-400">{hit.channel}</span>}
+                    {hit.event_id  && <span className="text-purple-400">EID:{hit.event_id}</span>}
                     {hit.timestamp && <span>{hit.timestamp}</span>}
                   </div>
                   {hit.details_raw && (
-                    <p className="text-[10px] text-gray-500 mt-1 break-all line-clamp-2"
+                    <p className="text-[10px] text-gray-500 mt-1 break-all line-clamp-3"
                        title={hit.details_raw}>
                       {hit.details_raw}
                     </p>
                   )}
                 </div>
               ))}
-              {preview.length > 50 && (
+              {run.total_hits > 50 && (
                 <p className="text-[10px] text-gray-400 text-center pt-1">
                   Showing first 50 of {run.total_hits.toLocaleString()} hits
                 </p>
               )}
             </>
+          )}
+
+          {/* ── Tool output (stdout/log) ──────────────────────── */}
+          {(hasOutput || run.status === 'FAILED') && (
+            <div>
+              <button
+                onClick={() => setShowOutput(v => !v)}
+                className="w-full flex items-center gap-1.5 text-[10px] text-gray-400 hover:text-gray-600 transition-colors py-1"
+              >
+                <Terminal size={10} />
+                Tool output
+                <ChevronDown size={9} className={`transition-transform ${showOutput ? 'rotate-180' : ''}`} />
+              </button>
+              {showOutput && (
+                <pre className="mt-1 bg-gray-950 text-green-300 rounded-lg p-3 text-[10px] font-mono overflow-x-auto max-h-64 leading-relaxed whitespace-pre-wrap break-all">
+                  {toolOutput || run.error || '(no output)'}
+                </pre>
+              )}
+            </div>
           )}
         </div>
       )}
