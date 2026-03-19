@@ -79,9 +79,12 @@ export const api = {
     // Global library
     listLibrary: () => request('GET', '/alert-rules/library'),
     createLibraryRule: (data) => request('POST', '/alert-rules/library', data),
+    updateLibraryRule: (id, data) => request('PUT', `/alert-rules/library/${id}`, data),
     deleteLibraryRule: (id) => request('DELETE', `/alert-rules/library/${id}`),
-    // Run global library against a specific case
+    // Run global library (all rules) against a specific case
     runLibrary: (caseId) => request('POST', `/cases/${caseId}/alert-rules/run-library`),
+    // Run a single rule against a specific case
+    runSingleRule: (caseId, ruleId) => request('POST', `/cases/${caseId}/alert-rules/library/${ruleId}/run`),
   },
 
   export: {

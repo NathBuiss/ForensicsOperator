@@ -1,8 +1,8 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import { useState, useEffect } from 'react'
 import {
-  Shield, LayoutDashboard, Puzzle, FolderOpen,
-  Plus, X, ExternalLink, ChevronRight, GitCompare, Bell,
+  LayoutDashboard, Puzzle, FolderOpen,
+  Plus, X, ChevronRight, Bell, Sun, Moon,
 } from 'lucide-react'
 import { api } from '../../api/client'
 
@@ -12,10 +12,32 @@ const STATUS_DOT = {
   closed:   'status-dot-closed',
 }
 
+function useTheme() {
+  const [dark, setDark] = useState(() => {
+    if (typeof window === 'undefined') return false
+    const saved = localStorage.getItem('fo-theme')
+    if (saved) return saved === 'dark'
+    return window.matchMedia('(prefers-color-scheme: dark)').matches
+  })
+
+  useEffect(() => {
+    const root = document.documentElement
+    if (dark) {
+      root.classList.add('dark')
+    } else {
+      root.classList.remove('dark')
+    }
+    localStorage.setItem('fo-theme', dark ? 'dark' : 'light')
+  }, [dark])
+
+  return [dark, setDark]
+}
+
 export default function Layout() {
-  const [cases, setCases]            = useState([])
+  const [cases, setCases]             = useState([])
   const [showNewCase, setShowNewCase] = useState(false)
   const [newCaseName, setNewCaseName] = useState('')
+  const [dark, setDark]               = useTheme()
   const navigate = useNavigate()
 
   const refreshCases = () =>
@@ -44,16 +66,24 @@ export default function Layout() {
       <aside className="w-56 flex-shrink-0 flex flex-col bg-brand-sidebar">
 
         {/* Logo */}
-        <div className="px-4 py-4 border-b border-white/10">
-          <NavLink to="/" className="flex items-center gap-2.5 group">
-            <div className="w-7 h-7 rounded-lg bg-brand-accent/20 border border-brand-accent/30
-                            flex items-center justify-center flex-shrink-0">
-              <Shield size={14} className="text-brand-accent" />
+        <div className="px-4 py-4 border-b border-white/10 flex items-center justify-between">
+          <NavLink to="/" className="flex items-center gap-2 group min-w-0">
+            <div className="w-7 h-7 rounded-lg bg-brand-accent flex items-center justify-center flex-shrink-0">
+              <span className="text-white font-bold text-xs leading-none">FO</span>
             </div>
-            <span className="text-sm font-bold text-white tracking-wide leading-tight">
+            <span className="text-sm font-bold text-white tracking-wide leading-tight truncate">
               Forensics Operator
             </span>
           </NavLink>
+
+          {/* Theme toggle */}
+          <button
+            onClick={() => setDark(d => !d)}
+            className="w-6 h-6 flex items-center justify-center rounded text-brand-sidebarmuted hover:text-white hover:bg-white/10 transition-colors flex-shrink-0 ml-1"
+            title={dark ? 'Switch to light mode' : 'Switch to dark mode'}
+          >
+            {dark ? <Sun size={13} /> : <Moon size={13} />}
+          </button>
         </div>
 
         <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-0.5 scrollbar-thin">
@@ -79,12 +109,6 @@ export default function Layout() {
             isActive ? 'nav-item-active' : 'nav-item-inactive'}>
             <Puzzle size={15} />
             Plugins
-          </NavLink>
-
-          <NavLink to="/compare" className={({ isActive }) =>
-            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
-            <GitCompare size={15} />
-            Compare
           </NavLink>
 
           {/* Cases section */}
@@ -155,16 +179,6 @@ export default function Layout() {
             </div>
           </div>
         </nav>
-
-        {/* Footer */}
-        <div className="p-3 border-t border-white/10">
-          <a href="/kibana" target="_blank" rel="noreferrer"
-            className="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs
-                       text-brand-sidebarmuted hover:text-white hover:bg-white/10 transition-colors">
-            <ExternalLink size={12} />
-            Open Kibana
-          </a>
-        </div>
       </aside>
 
       {/* ── Main content ─────────────────────────────────────────────────── */}

@@ -20,7 +20,7 @@ def get_loader():
         if parent not in sys.path:
             sys.path.insert(0, parent)
 
-        from processor.plugin_loader import PluginLoader
+        from plugin_loader import PluginLoader
         _loader = PluginLoader(plugins_path)
         _loader.load()
     return _loader

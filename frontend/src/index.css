@@ -154,6 +154,13 @@
            flex flex-col overflow-hidden;
     box-shadow: -4px 0 24px rgba(0,0,0,0.10);
   }
+
+  /* ─ Kbd shortcut ─ */
+  .kbd {
+    @apply inline-flex items-center justify-center min-w-[1.4rem] h-5 px-1
+           bg-gray-100 border border-gray-300 rounded text-[10px] font-mono
+           text-gray-600 leading-none;
+  }
 }
 
 /* ── Utilities ────────────────────────────────────────────────────────────── */
@@ -161,3 +168,170 @@
 @layer utilities {
   .scrollbar-thin { scrollbar-width: thin; }
 }
+
+/* ── Dark Mode ────────────────────────────────────────────────────────────── */
+
+.dark body {
+  background-color: #0F1117;
+  color: #D1D5DB;
+}
+
+.dark ::-webkit-scrollbar-thumb { background: #374151; }
+.dark ::-webkit-scrollbar-thumb:hover { background: #4B5563; }
+
+/* Cards */
+.dark .card,
+.dark .card-hover {
+  background-color: #1A1D2E;
+  border-color: #2D3147;
+  box-shadow: 0 1px 3px 0 rgba(0,0,0,0.3);
+}
+.dark .card-hover:hover {
+  border-color: rgba(0, 119, 204, 0.5);
+}
+
+/* Buttons */
+.dark .btn-ghost {
+  color: #9CA3AF;
+}
+.dark .btn-ghost:hover {
+  background-color: #252836;
+  color: #E5E7EB;
+}
+.dark .btn-outline {
+  background-color: #1A1D2E;
+  border-color: #374151;
+  color: #D1D5DB;
+}
+.dark .btn-outline:hover {
+  background-color: #252836;
+}
+.dark .btn-danger {
+  background-color: rgba(220, 38, 38, 0.15);
+  border-color: rgba(220, 38, 38, 0.3);
+}
+.dark .btn-danger:hover {
+  background-color: rgba(220, 38, 38, 0.25);
+}
+.dark .btn-success {
+  background-color: rgba(22, 163, 74, 0.15);
+  border-color: rgba(22, 163, 74, 0.3);
+  color: #4ade80;
+}
+
+/* Inputs */
+.dark .input,
+.dark .input-lg {
+  background-color: #252836;
+  border-color: #374151;
+  color: #E5E7EB;
+}
+.dark .input::placeholder,
+.dark .input-lg::placeholder {
+  color: #6B7280;
+}
+.dark .input:focus,
+.dark .input-lg:focus {
+  border-color: #3B9EDD;
+}
+
+/* Skeleton */
+.dark .skeleton { background-color: #252836; }
+
+/* Drop zones */
+.dark .drop-zone-inactive {
+  border-color: #374151;
+  background-color: #1A1D2E;
+}
+.dark .drop-zone-inactive:hover {
+  border-color: rgba(59, 158, 221, 0.6);
+  background-color: rgba(59, 158, 221, 0.05);
+}
+.dark .drop-zone-active {
+  border-color: #3B9EDD;
+  background-color: rgba(59, 158, 221, 0.1);
+}
+
+/* Kbd */
+.dark .kbd {
+  background-color: #252836;
+  border-color: #374151;
+  color: #9CA3AF;
+}
+
+/* Badges — artifact types stay the same (colored), generic gets darker */
+.dark .badge-generic { background-color: #252836; color: #9CA3AF; }
+.dark .badge-informational { background-color: #1F2937; color: #9CA3AF; }
+
+/* Section title */
+.dark .section-title { color: #6B7280; }
+
+/* Panel/Modal */
+.dark .panel-backdrop { background: rgba(0,0,0,0.6); }
+.dark .panel-slide {
+  background-color: #1A1D2E;
+  border-color: #2D3147;
+}
+
+/* White/gray backgrounds in page content */
+.dark main {
+  background-color: #0F1117;
+}
+
+/* Tables */
+.dark thead tr {
+  background-color: #141620 !important;
+  border-color: #2D3147 !important;
+}
+.dark thead th {
+  color: #6B7280 !important;
+}
+.dark tbody tr {
+  border-color: #1F2430 !important;
+}
+.dark tbody tr:hover {
+  background-color: #1E2132 !important;
+}
+.dark tbody td {
+  color: #D1D5DB;
+}
+
+/* Text overrides for dark mode — key brand colors */
+.dark .text-brand-text,
+.dark h1, .dark h2, .dark h3, .dark h4 {
+  color: #E5E7EB;
+}
+.dark .text-gray-500 { color: #6B7280; }
+.dark .text-gray-600 { color: #9CA3AF; }
+.dark .text-gray-400 { color: #6B7280; }
+.dark .text-gray-700 { color: #D1D5DB; }
+
+/* Border overrides */
+.dark .border-gray-200 { border-color: #2D3147; }
+.dark .border-gray-100 { border-color: #1F2430; }
+
+/* Background overrides */
+.dark .bg-white        { background-color: #1A1D2E; }
+.dark .bg-gray-50      { background-color: #141620; }
+.dark .bg-gray-100     { background-color: #1F2430; }
+.dark .bg-gray-200     { background-color: #252836; }
+
+/* Accent light in dark mode */
+.dark .bg-brand-accentlight { background-color: rgba(59, 158, 221, 0.1); }
+.dark .text-brand-accent    { color: #3B9EDD; }
+.dark .border-brand-accent  { border-color: #3B9EDD; }
+
+/* Form elements: select options */
+.dark select option { background-color: #1A1D2E; color: #E5E7EB; }
+
+/* Inline code in dark mode */
+.dark code:not(.code-block code) {
+  background-color: #252836;
+  color: #3B9EDD;
+}
+
+/* Filter/sidebar panels */
+.dark .border-r { border-color: #2D3147; }
+.dark .border-b { border-color: #2D3147; }
+.dark .border-t { border-color: #2D3147; }
+.dark .border-l { border-color: #2D3147; }

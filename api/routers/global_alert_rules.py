@@ -35,6 +35,14 @@ class AlertRuleIn(BaseModel):
     threshold: int = 1
 
 
+class AlertRuleUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    artifact_type: str | None = None
+    query: str | None = None
+    threshold: int | None = None
+
+
 # ── Library CRUD ──────────────────────────────────────────────────────────────
 
 @router.get("/alert-rules/library")
@@ -57,6 +65,25 @@ def create_library_rule(body: AlertRuleIn):
     rules.append(new_rule)
     r.set(GLOBAL_KEY, json.dumps(rules))
     return new_rule
+
+
+@router.put("/alert-rules/library/{rule_id}")
+def update_library_rule(rule_id: str, body: AlertRuleUpdate):
+    """Update an existing rule in the global library."""
+    r = _redis()
+    rules: list[dict] = json.loads(r.get(GLOBAL_KEY) or "[]")
+    updated = None
+    for rl in rules:
+        if rl["id"] == rule_id:
+            patch = body.dict(exclude_none=True)
+            rl.update(patch)
+            updated = rl
+            break
+    if updated is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Rule not found")
+    r.set(GLOBAL_KEY, json.dumps(rules))
+    return updated
 
 
 @router.delete("/alert-rules/library/{rule_id}", status_code=204)
@@ -119,3 +146,53 @@ def run_library_against_case(case_id: str):
             pass
 
     return {"matches": matches, "rules_checked": len(rules)}
+
+
+@router.post("/cases/{case_id}/alert-rules/library/{rule_id}/run")
+def run_single_rule_against_case(case_id: str, rule_id: str):
+    """
+    Execute a single rule from the global library against the given case.
+    """
+    r = _redis()
+    rules: list[dict] = json.loads(r.get(GLOBAL_KEY) or "[]")
+    rule = next((rl for rl in rules if rl["id"] == rule_id), None)
+    if rule is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    artifact_type = rule.get("artifact_type", "").strip()
+    index = (
+        f"fo-case-{case_id}-{artifact_type}"
+        if artifact_type
+        else f"fo-case-{case_id}-*"
+    )
+
+    body = {
+        "query": {
+            "query_string": {
+                "query": rule["query"],
+                "default_operator": "AND",
+            }
+        },
+        "size": 5,
+        "_source": ["timestamp", "message", "host", "user", "fo_id", "artifact_type"],
+        "sort": [{"timestamp": {"order": "desc"}}],
+    }
+
+    try:
+        resp = es_req("POST", f"/{index}/_search", body)
+        count = resp["hits"]["total"]["value"]
+        match = {
+            "rule": rule,
+            "match_count": count,
+            "sample_events": [h["_source"] for h in resp["hits"]["hits"]],
+        } if count >= int(rule.get("threshold", 1)) else None
+    except Exception as exc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return {
+        "match": match,
+        "rules_checked": 1,
+        "fired": match is not None,
+    }

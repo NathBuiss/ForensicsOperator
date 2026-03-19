@@ -5,7 +5,6 @@ import CaseTimeline from './pages/CaseTimeline'
 import Search from './pages/Search'
 import AlertLibrary from './pages/AlertLibrary'
 import Plugins from './pages/Plugins'
-import Compare from './pages/Compare'
 
 export default function App() {
   return (
@@ -17,7 +16,6 @@ export default function App() {
           <Route path="cases/:caseId/search" element={<Search />} />
           <Route path="alert-rules" element={<AlertLibrary />} />
           <Route path="plugins" element={<Plugins />} />
-          <Route path="compare" element={<Compare />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
