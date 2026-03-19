@@ -98,21 +98,6 @@ MODULES: list[dict] = [
         "unavailable_reason":  "Coming soon.",
     },
     {
-        "id":               "log2timeline",
-        "name":             "log2timeline → Plaso",
-        "description":      "Run log2timeline to build a Plaso supertimeline from uploaded artifacts, "
-                            "then auto-import the resulting .plaso file into the case",
-        "input_extensions": [
-            ".evtx", ".lnk", ".pf", ".dat", ".hive",
-            ".sqlite", ".db", ".csv", ".log", ".json",
-        ],
-        "input_filenames":  [
-            "NTUSER.DAT", "SYSTEM", "SOFTWARE", "SAM", "SECURITY",
-            "$MFT", "places.sqlite", "History",
-        ],
-        "available":        True,
-    },
-    {
         "id":               "yara",
         "name":             "YARA Scanner",
         "description":      "Scan files with a built-in ruleset of common malware, packer, "

@@ -103,7 +103,6 @@ def run_module(
             "hindsight":   _run_hindsight,
             "regripper":   _run_regripper,
             "wintriage":   _run_wintriage,
-            "log2timeline": _run_log2timeline,
             "yara":        _run_yara,
             "exiftool":    _run_exiftool,
         }
@@ -156,6 +155,9 @@ def run_module(
 # Hayabusa
 # ─────────────────────────────────────────────────────────────────────────────
 
+_HAYABUSA_RULES_DIR = Path("/opt/hayabusa/rules")
+
+
 def _run_hayabusa(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
     hayabusa_bin = shutil.which("hayabusa")
     if not hayabusa_bin:
@@ -163,26 +165,49 @@ def _run_hayabusa(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
             "Hayabusa binary not found. Ensure the processor image was built with the Hayabusa step."
         )
 
+    if not _HAYABUSA_RULES_DIR.is_dir():
+        raise RuntimeError(
+            f"Hayabusa rules directory not found at {_HAYABUSA_RULES_DIR}. "
+            "Rebuild the processor image — the full Hayabusa distribution must be "
+            "kept at /opt/hayabusa/ (not just the binary)."
+        )
+
     output_jsonl = work_dir / "hayabusa_output.jsonl"
     cmd = [
         hayabusa_bin, "json-timeline",
         "-d", str(sources_dir),
+        "-r", str(_HAYABUSA_RULES_DIR),
         "-o", str(output_jsonl),
-        "--no-wizard", "--no-color", "-q",
+        "--no-color",
+        "--quiet",               # suppress progress bars (3.x flag, replaces -q)
+        "--min-level", "informational",  # capture ALL severity levels
     ]
 
     logger.info("[%s] Running: %s", run_id, " ".join(cmd))
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,  # prevent any interactive prompts
+            timeout=3600,
+        )
     except subprocess.TimeoutExpired:
         raise RuntimeError("Hayabusa timed out after 1 hour")
 
+    # Log output for diagnosability (visible in Celery worker logs)
+    if proc.stdout:
+        logger.info("[%s] Hayabusa stdout: %s", run_id, proc.stdout[:1000])
+    if proc.stderr:
+        logger.info("[%s] Hayabusa stderr: %s", run_id, proc.stderr[:1000])
+
     if proc.returncode not in (0, 1):
         raise RuntimeError(
-            f"Hayabusa exited {proc.returncode}: {(proc.stderr or '')[:500]}"
+            f"Hayabusa exited {proc.returncode}: {(proc.stderr or proc.stdout or '')[:500]}"
         )
 
-    if not output_jsonl.exists():
+    if not output_jsonl.exists() or output_jsonl.stat().st_size == 0:
+        logger.warning("[%s] Hayabusa produced no output file (or empty)", run_id)
         return []
 
     return _parse_hayabusa_jsonl(output_jsonl)
@@ -207,22 +232,33 @@ def _parse_hayabusa_jsonl(path: Path) -> list[dict]:
 
 def _hayabusa_row_to_hit(row: dict) -> dict | None:
     timestamp_raw = row.get("Timestamp") or row.get("timestamp") or ""
-    rule_title    = str(row.get("RuleTitle") or row.get("ruleTitle") or "")
+    rule_title    = str(row.get("RuleTitle") or row.get("RuleTitle") or row.get("ruleTitle") or "")
     level         = str(row.get("Level")     or row.get("level")     or "informational").lower()
     computer      = str(row.get("Computer")  or row.get("computer")  or "")
     channel       = str(row.get("Channel")   or row.get("channel")   or "")
     event_id_raw  = str(row.get("EventID")   or row.get("eventId")   or "")
-    details_raw   = str(row.get("Details")   or row.get("details")   or "")
     rule_file     = str(row.get("RuleFile")  or row.get("ruleFile")  or "")
     evtx_file     = str(row.get("EvtxFile")  or row.get("evtxFile")  or "")
 
     if not rule_title and not timestamp_raw:
         return None
 
+    # Details can be a dict (Hayabusa 3.x) or a plain string (2.x)
+    raw_details = row.get("Details") or row.get("details") or ""
+    if isinstance(raw_details, dict):
+        # Flatten key: value pairs into a readable string
+        details_raw = " | ".join(f"{k}: {v}" for k, v in raw_details.items() if v not in (None, "", "-"))
+    else:
+        details_raw = str(raw_details)
+
     try:
         event_id: int | None = int(event_id_raw) if event_id_raw else None
     except (ValueError, TypeError):
         event_id = None
+
+    # Normalise level names: Hayabusa 3.x uses "info" instead of "informational"
+    level_map = {"info": "informational", "crit": "critical", "warn": "medium"}
+    level = level_map.get(level, level)
 
     return {
         "id":          str(uuid.uuid4()),
@@ -233,7 +269,7 @@ def _hayabusa_row_to_hit(row: dict) -> dict | None:
         "computer":    computer,
         "channel":     channel,
         "event_id":    event_id,
-        "details_raw": details_raw,
+        "details_raw": details_raw[:2000],
         "rule_file":   rule_file,
         "evtx_file":   evtx_file,
     }
@@ -982,139 +1018,6 @@ def _run_wintriage(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]
         results.extend(hits)
 
     return results
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# log2timeline → Plaso
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _run_log2timeline(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
-    """
-    Run log2timeline.py on the sources directory to produce a .plaso supertimeline,
-    then parse the .plaso file using the existing Plaso ingester plugin.
-    """
-    l2t_bin = shutil.which("log2timeline.py") or shutil.which("log2timeline")
-    psort_bin = shutil.which("psort.py") or shutil.which("psort")
-
-    if not l2t_bin:
-        raise RuntimeError(
-            "log2timeline not found. Ensure plaso is installed in the processor image "
-            "(pip install plaso or install via system package)."
-        )
-
-    plaso_out = work_dir / "timeline.plaso"
-    cmd = [
-        l2t_bin,
-        "--status_view", "none",
-        "-z", "UTC",
-        str(plaso_out),
-        str(sources_dir),
-    ]
-
-    logger.info("[%s] Running: %s", run_id, " ".join(cmd))
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("log2timeline timed out after 2 hours")
-
-    if not plaso_out.exists() or plaso_out.stat().st_size == 0:
-        raise RuntimeError(
-            f"log2timeline produced no output (code {proc.returncode}): "
-            f"{(proc.stderr or proc.stdout or '')[:500]}"
-        )
-
-    logger.info("[%s] .plaso file: %d bytes", run_id, plaso_out.stat().st_size)
-
-    # Export to JSONL via psort for easy parsing
-    if psort_bin:
-        jsonl_out = work_dir / "timeline.jsonl"
-        psort_cmd = [
-            psort_bin,
-            "--status_view", "none",
-            "-z", "UTC",
-            "-o", "json_line",
-            "-w", str(jsonl_out),
-            str(plaso_out),
-        ]
-        logger.info("[%s] Running psort: %s", run_id, " ".join(psort_cmd))
-        try:
-            subprocess.run(psort_cmd, capture_output=True, text=True, timeout=3600)
-        except subprocess.TimeoutExpired:
-            logger.warning("[%s] psort timed out, falling back to .plaso plugin", run_id)
-            jsonl_out = None
-
-        if jsonl_out and jsonl_out.exists():
-            return _parse_plaso_jsonl(jsonl_out)
-
-    # Fallback: use the Plaso plugin to read the .plaso file directly
-    return _parse_plaso_file_direct(run_id, plaso_out)
-
-
-def _parse_plaso_jsonl(jsonl_path: Path) -> list[dict]:
-    """Parse psort JSON lines output into module hits."""
-    results: list[dict] = []
-    try:
-        with open(jsonl_path, "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    ts  = obj.get("datetime", obj.get("timestamp", ""))
-                    msg = obj.get("message", obj.get("description", ""))
-                    src = obj.get("source", obj.get("source_short", ""))
-                    host = obj.get("hostname", obj.get("computer_name", ""))
-                    results.append({
-                        "id":          str(uuid.uuid4()),
-                        "timestamp":   ts,
-                        "level":       "informational",
-                        "level_int":   1,
-                        "rule_title":  src or "Plaso Event",
-                        "computer":    host,
-                        "details_raw": msg[:500] if msg else "",
-                    })
-                except Exception:
-                    continue
-    except OSError as exc:
-        logger.warning("Cannot read psort output: %s", exc)
-    return results
-
-
-def _parse_plaso_file_direct(run_id: str, plaso_path: Path) -> list[dict]:
-    """Use the Plaso ingester plugin to read the .plaso file directly."""
-    sys_plugins_dir = Path("/app/plugins")
-    if str(sys_plugins_dir.parent) not in __import__("sys").path:
-        __import__("sys").path.insert(0, str(sys_plugins_dir.parent))
-
-    try:
-        from plugins.plaso.plaso_plugin import PlasoPlugin
-        from plugins.base_plugin import PluginContext
-
-        ctx = PluginContext(
-            case_id="module",
-            job_id=run_id,
-            source_file_path=plaso_path,
-            source_minio_url="",
-        )
-        plugin = PlasoPlugin(ctx)
-        plugin.setup()
-        results: list[dict] = []
-        for ev in plugin.parse():
-            results.append({
-                "id":          ev.get("fo_id", str(uuid.uuid4())),
-                "timestamp":   ev.get("timestamp", ""),
-                "level":       "informational",
-                "level_int":   1,
-                "rule_title":  ev.get("artifact_type", "plaso"),
-                "computer":    ev.get("host", {}).get("hostname", "") if isinstance(ev.get("host"), dict) else "",
-                "details_raw": ev.get("message", "")[:500],
-            })
-        plugin.teardown()
-        return results
-    except Exception as exc:
-        logger.warning("[%s] Direct Plaso parse failed: %s", run_id, exc)
-        return []
 
 
 # ─────────────────────────────────────────────────────────────────────────────

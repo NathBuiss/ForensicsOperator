@@ -16,14 +16,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Hayabusa DFIR binary (Sigma-based EVTX threat hunting) ────────────────────
+# ── Hayabusa DFIR binary + rules (Sigma-based EVTX threat hunting) ───────────
+# The entire distribution is kept at /opt/hayabusa so that the rules/ and
+# config/ directories are available alongside the binary.  The binary is
+# symlinked into PATH; Hayabusa resolves its real path via current_exe() and
+# auto-discovers rules/ relative to the binary's actual location.
 ARG HAYABUSA_VERSION=3.2.0
 RUN wget -q -O /tmp/hayabusa.zip \
          "https://github.com/Yamato-Security/hayabusa/releases/download/v${HAYABUSA_VERSION}/hayabusa-${HAYABUSA_VERSION}-lin-x64-musl.zip" \
-    && unzip -q /tmp/hayabusa.zip -d /tmp/hayabusa_dir \
-    && find /tmp/hayabusa_dir -maxdepth 3 -name "hayabusa-*-lin-x64-musl" -type f \
-         -exec install -m 755 {} /usr/local/bin/hayabusa \; \
-    && rm -rf /tmp/hayabusa.zip /tmp/hayabusa_dir
+    && unzip -q /tmp/hayabusa.zip -d /opt/hayabusa \
+    && find /opt/hayabusa -maxdepth 2 -name "hayabusa-*-lin-x64-musl" -type f \
+         -exec chmod +x {} \; \
+         -exec ln -sf {} /usr/local/bin/hayabusa \; \
+    && rm /tmp/hayabusa.zip
 
 # ── RegRipper (deep Windows registry analysis, Perl) ─────────────────────────
 RUN wget -q -O /tmp/regripper.zip \

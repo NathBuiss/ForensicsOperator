@@ -67,6 +67,15 @@ const BUILTIN_INGESTERS = [
     category: 'Timeline',
   },
   {
+    name: 'log2timeline',
+    label: 'log2timeline',
+    description: 'Universal artifact ingester — passes raw files through log2timeline/plaso to extract timeline events from EVTX, Registry, Prefetch, LNK, MFT, plist, pcap, ESE databases, and 180+ other formats',
+    extensions: ['.evt', '.plist', '.asl', '.utmpx', '.utmp', '.wtmp', '.pcap', '.pcapng', '.esedb', '.edb'],
+    filenames: ['$MFT', 'NTUSER.DAT', 'SYSTEM', 'SOFTWARE', 'SAM', 'SECURITY'],
+    available: true,
+    category: 'Timeline',
+  },
+  {
     name: 'hayabusa',
     label: 'Hayabusa Output',
     description: 'Hayabusa JSONL / CSV output — import pre-generated Sigma detection results',

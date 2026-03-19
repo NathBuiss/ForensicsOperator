@@ -4,16 +4,19 @@ GET  /collector/download        — return configured collect.py
 GET  /network/interfaces        — discover candidate upload URLs
 POST /collector/ingress         — create a K8s LoadBalancer service for external access
 GET  /collector/ingress         — query status / external IP of the LB service
+DELETE /collector/ingress       — remove the K8s LoadBalancer service
 """
 from __future__ import annotations
 
 import json
 import os
 import re
-import shutil
 import socket
+import ssl
 import logging
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -202,54 +205,110 @@ def _only_docker_ips(candidates: list[dict]) -> bool:
 
 
 def _is_kubernetes() -> bool:
+    """Return True when running inside a Kubernetes pod (service account is mounted)."""
+    return os.path.isfile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+
+
+# ── Kubernetes LoadBalancer service settings (used by helpers + endpoints) ────
+
+_LB_SVC_NAME    = os.getenv("FO_LB_SERVICE_NAME", "fo-collector-lb")
+_LB_NAMESPACE   = os.getenv("FO_NAMESPACE", "default")
+_LB_TARGET_PORT = int(os.getenv("FO_API_PORT", "8000"))
+_LB_APP_LABEL   = os.getenv("FO_APP_LABEL", "fo-api")
+
+
+# ── Kubernetes in-cluster API helpers ─────────────────────────────────────────
+
+_K8S_HOST      = "https://kubernetes.default.svc"
+_K8S_TOKEN_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
+_K8S_CA_PATH    = Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
+_K8S_NS_PATH    = Path("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+
+
+def _k8s_namespace() -> str:
+    """Read the pod's namespace from the mounted service account files."""
+    try:
+        return _K8S_NS_PATH.read_text().strip() or _LB_NAMESPACE
+    except Exception:
+        return _LB_NAMESPACE
+
+
+def _k8s_request(
+    method: str,
+    path: str,
+    body: Optional[dict] = None,
+) -> tuple[int, dict]:
     """
-    Return True only when running inside a Kubernetes pod AND kubectl is
-    available in PATH (so the ingress management endpoints are actually usable).
-    The service-account token check catches pod deployments; the kubectl check
-    prevents showing the LB panel when the binary is absent (e.g. Docker Desktop
-    with Kubernetes enabled but no kubectl sidecar in the API container).
+    Make an authenticated request to the Kubernetes API server using the
+    in-cluster service account token.  No kubectl needed.
+    Returns (http_status_code, parsed_json_response).
     """
-    return (
-        os.path.isfile("/var/run/secrets/kubernetes.io/serviceaccount/token")
-        and shutil.which("kubectl") is not None
-    )
+    try:
+        token = _K8S_TOKEN_PATH.read_text().strip()
+    except Exception as exc:
+        logger.error("Cannot read K8s service account token: %s", exc)
+        return 0, {"error": "cannot read service account token"}
+
+    url  = f"{_K8S_HOST}{path}"
+    data = json.dumps(body).encode() if body is not None else None
+    req  = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Accept", "application/json")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+
+    ssl_ctx = ssl.create_default_context()
+    if _K8S_CA_PATH.is_file():
+        ssl_ctx.load_verify_locations(str(_K8S_CA_PATH))
+    else:
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode    = ssl.CERT_NONE
+
+    try:
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as resp:
+            raw = resp.read()
+            return resp.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        try:
+            return exc.code, json.loads(raw)
+        except Exception:
+            return exc.code, {"message": raw.decode(errors="replace")[:500]}
+    except Exception as exc:
+        logger.error("K8s API request failed [%s %s]: %s", method, path, exc)
+        return 0, {"error": str(exc)}
 
 
 def _get_k8s_service_ips() -> list[dict]:
-    """Query kubectl for LoadBalancer / NodePort services and return their IPs."""
+    """Query the K8s API for LoadBalancer / NodePort services and return their IPs."""
+    status, data = _k8s_request("GET", "/api/v1/services")
+    if status != 200:
+        return []
     results = []
-    try:
-        out = subprocess.check_output(
-            ["kubectl", "get", "svc", "--all-namespaces", "-o", "json"],
-            text=True, timeout=8,
-        )
-        data = json.loads(out)
-        for item in data.get("items", []):
-            svc_name = item.get("metadata", {}).get("name", "")
-            ns       = item.get("metadata", {}).get("namespace", "default")
-            svc_type = item.get("spec", {}).get("type", "")
-            # LoadBalancer external IPs
-            for ing in item.get("status", {}).get("loadBalancer", {}).get("ingress", []):
-                addr = ing.get("ip") or ing.get("hostname")
-                if addr:
-                    results.append({
-                        "ip":    addr,
-                        "iface": f"k8s/{ns}/{svc_name}",
-                        "label": f"LoadBalancer ({svc_name})",
-                        "k8s":   True,
-                    })
-            # NodePort — include cluster IP as candidate
-            if svc_type == "NodePort":
-                cluster_ip = item.get("spec", {}).get("clusterIP", "")
-                if cluster_ip and cluster_ip != "None":
-                    results.append({
-                        "ip":    cluster_ip,
-                        "iface": f"k8s/{ns}/{svc_name}",
-                        "label": f"NodePort ({svc_name})",
-                        "k8s":   True,
-                    })
-    except Exception:
-        pass
+    for item in data.get("items", []):
+        svc_name = item.get("metadata", {}).get("name", "")
+        ns       = item.get("metadata", {}).get("namespace", "default")
+        svc_type = item.get("spec", {}).get("type", "")
+        # LoadBalancer external IPs
+        for ing in item.get("status", {}).get("loadBalancer", {}).get("ingress", []):
+            addr = ing.get("ip") or ing.get("hostname")
+            if addr:
+                results.append({
+                    "ip":    addr,
+                    "iface": f"k8s/{ns}/{svc_name}",
+                    "label": f"LoadBalancer ({svc_name})",
+                    "k8s":   True,
+                })
+        # NodePort — include cluster IP as a reachable candidate
+        if svc_type == "NodePort":
+            cluster_ip = item.get("spec", {}).get("clusterIP", "")
+            if cluster_ip and cluster_ip != "None":
+                results.append({
+                    "ip":    cluster_ip,
+                    "iface": f"k8s/{ns}/{svc_name}",
+                    "label": f"NodePort ({svc_name})",
+                    "k8s":   True,
+                })
     return results
 
 
@@ -321,38 +380,50 @@ def get_network_interfaces():
 
 
 # ── Kubernetes LoadBalancer ingress management ────────────────────────────────
+# The pod's service account needs the following RBAC permissions.
+# Apply once to your cluster before using these endpoints:
+#
+#   kubectl apply -f - <<'EOF'
+#   apiVersion: rbac.authorization.k8s.io/v1
+#   kind: Role
+#   metadata:
+#     name: fo-service-manager
+#     namespace: <your-namespace>
+#   rules:
+#   - apiGroups: [""]
+#     resources: ["services"]
+#     verbs: ["get", "list", "create", "delete"]
+#   ---
+#   apiVersion: rbac.authorization.k8s.io/v1
+#   kind: RoleBinding
+#   metadata:
+#     name: fo-service-manager
+#     namespace: <your-namespace>
+#   subjects:
+#   - kind: ServiceAccount
+#     name: default          # or your custom SA name
+#     namespace: <your-namespace>
+#   roleRef:
+#     kind: Role
+#     name: fo-service-manager
+#     apiGroup: rbac.authorization.k8s.io
+#   EOF
 
-_LB_SVC_NAME      = os.getenv("FO_LB_SERVICE_NAME", "fo-collector-lb")
-_LB_NAMESPACE     = os.getenv("FO_NAMESPACE", "default")
-_LB_TARGET_PORT   = int(os.getenv("FO_API_PORT", "8000"))
-_LB_APP_LABEL     = os.getenv("FO_APP_LABEL", "fo-api")
-
-_LB_MANIFEST = {
-    "apiVersion": "v1",
-    "kind":       "Service",
-    "metadata": {
-        "name":      _LB_SVC_NAME,
-        "namespace": _LB_NAMESPACE,
-        "labels":    {"managed-by": "forensicsoperator"},
-    },
-    "spec": {
-        "type":     "LoadBalancer",
-        "selector": {"app": _LB_APP_LABEL},
-        "ports":    [{"port": _LB_TARGET_PORT, "targetPort": _LB_TARGET_PORT, "protocol": "TCP"}],
-    },
-}
-
-
-def _kubectl(*args: str, input_data: Optional[str] = None) -> tuple[int, str, str]:
-    """Run a kubectl command, return (returncode, stdout, stderr)."""
-    cmd = ["kubectl"] + list(args)
-    try:
-        r = subprocess.run(cmd, input=input_data, capture_output=True, text=True, timeout=15)
-        return r.returncode, r.stdout, r.stderr
-    except FileNotFoundError:
-        return 127, "", "kubectl not found"
-    except subprocess.TimeoutExpired:
-        return 1, "", "kubectl timed out"
+def _build_lb_manifest(namespace: str) -> dict:
+    return {
+        "apiVersion": "v1",
+        "kind":       "Service",
+        "metadata": {
+            "name":      _LB_SVC_NAME,
+            "namespace": namespace,
+            "labels":    {"managed-by": "forensicsoperator"},
+        },
+        "spec": {
+            "type":     "LoadBalancer",
+            "selector": {"app": _LB_APP_LABEL},
+            "ports":    [{"port": _LB_TARGET_PORT, "targetPort": _LB_TARGET_PORT, "protocol": "TCP"}],
+        },
+    }
 
 
 @router.post("/collector/ingress", status_code=201)
@@ -360,20 +431,26 @@ def create_collector_ingress():
     """
     Create a Kubernetes LoadBalancer Service that exposes the API externally
     so remote collectors can upload artifacts.
-    Requires: kubectl in PATH + RBAC permission to create Services.
+    Uses the pod's in-cluster service account — no kubectl required.
+    The service account needs RBAC: create/get/delete on services in its namespace.
     """
     if not _is_kubernetes():
         raise HTTPException(
             status_code=400,
             detail="Not running in Kubernetes — use the FO_PUBLIC_URL env var to set the external URL manually.",
         )
-    manifest_json = json.dumps(_LB_MANIFEST)
-    rc, out, err = _kubectl("apply", "-f", "-", input_data=manifest_json)
-    if rc != 0:
-        logger.error("kubectl apply failed: %s", err)
-        raise HTTPException(status_code=500, detail=f"kubectl apply failed: {err.strip()}")
+    ns       = _k8s_namespace()
+    manifest = _build_lb_manifest(ns)
+    status, body = _k8s_request("POST", f"/api/v1/namespaces/{ns}/services", body=manifest)
 
-    # Immediately query status
+    if status == 409:
+        # Service already exists — return current status
+        logger.info("LoadBalancer service %s already exists", _LB_SVC_NAME)
+    elif status not in (200, 201):
+        msg = body.get("message", str(body))[:300]
+        logger.error("K8s API error creating service (%d): %s", status, msg)
+        raise HTTPException(status_code=500, detail=f"Kubernetes API error ({status}): {msg}")
+
     return _get_lb_status()
 
 
@@ -381,10 +458,7 @@ def create_collector_ingress():
 def get_collector_ingress():
     """Query the status and external IP of the collector LoadBalancer service."""
     if not _is_kubernetes():
-        raise HTTPException(
-            status_code=400,
-            detail="Not running in Kubernetes.",
-        )
+        raise HTTPException(status_code=400, detail="Not running in Kubernetes.")
     return _get_lb_status()
 
 
@@ -393,34 +467,36 @@ def delete_collector_ingress():
     """Remove the collector LoadBalancer service."""
     if not _is_kubernetes():
         raise HTTPException(status_code=400, detail="Not running in Kubernetes.")
-    rc, _, err = _kubectl(
-        "delete", "svc", _LB_SVC_NAME, "-n", _LB_NAMESPACE, "--ignore-not-found",
+    ns = _k8s_namespace()
+    status, body = _k8s_request(
+        "DELETE", f"/api/v1/namespaces/{ns}/services/{_LB_SVC_NAME}",
     )
-    if rc != 0:
-        raise HTTPException(status_code=500, detail=f"kubectl delete failed: {err.strip()}")
+    if status not in (200, 202, 404):
+        msg = body.get("message", str(body))[:300]
+        raise HTTPException(status_code=500, detail=f"Kubernetes API error ({status}): {msg}")
 
 
 def _get_lb_status() -> dict:
-    rc, out, err = _kubectl(
-        "get", "svc", _LB_SVC_NAME,
-        "-n", _LB_NAMESPACE,
-        "-o", "json",
+    ns = _k8s_namespace()
+    status, data = _k8s_request(
+        "GET", f"/api/v1/namespaces/{ns}/services/{_LB_SVC_NAME}",
     )
-    if rc != 0:
+    if status == 404:
         return {"name": _LB_SVC_NAME, "status": "not_found", "external_ip": None, "external_url": None}
-
-    try:
-        svc   = json.loads(out)
-        ingresses = svc.get("status", {}).get("loadBalancer", {}).get("ingress", [])
-        ip    = ingresses[0].get("ip") if ingresses else None
-        host  = ingresses[0].get("hostname") if ingresses else None
-        addr  = ip or host
+    if status != 200:
         return {
-            "name":         _LB_SVC_NAME,
-            "namespace":    _LB_NAMESPACE,
-            "status":       "ready" if addr else "pending",
-            "external_ip":  addr,
-            "external_url": f"http://{addr}:{_LB_TARGET_PORT}/api/v1" if addr else None,
+            "name": _LB_SVC_NAME, "status": "error",
+            "external_ip": None, "external_url": None,
+            "error": data.get("message", "")[:200],
         }
-    except Exception as exc:
-        return {"name": _LB_SVC_NAME, "status": "error", "external_ip": None, "external_url": None, "error": str(exc)}
+    ingresses = data.get("status", {}).get("loadBalancer", {}).get("ingress", [])
+    ip   = ingresses[0].get("ip")       if ingresses else None
+    host = ingresses[0].get("hostname") if ingresses else None
+    addr = ip or host
+    return {
+        "name":         _LB_SVC_NAME,
+        "namespace":    ns,
+        "status":       "ready" if addr else "pending",
+        "external_ip":  addr,
+        "external_url": f"http://{addr}:{_LB_TARGET_PORT}/api/v1" if addr else None,
+    }
