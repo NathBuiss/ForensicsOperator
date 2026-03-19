@@ -1,53 +1,54 @@
 import { useState, useEffect } from 'react'
-import { X, Monitor, Terminal, FileCode, Download, ChevronRight, ChevronLeft, Check } from 'lucide-react'
+import {
+  X, Monitor, Terminal, FileCode, Download,
+  ChevronRight, ChevronLeft, Check, Wifi, RefreshCw,
+} from 'lucide-react'
 import { api } from '../api/client'
 
 // ── Artifact definitions ─────────────────────────────────────────────────────
 
 const WINDOWS_ARTIFACTS = [
-  { key: 'evtx',     label: 'Event Logs (EVTX)',      desc: 'Security, System, Application, PowerShell, Sysmon and more' },
-  { key: 'registry', label: 'Registry Hives',          desc: 'SYSTEM, SOFTWARE, SAM, SECURITY, NTUSER.DAT, UsrClass.dat' },
-  { key: 'prefetch', label: 'Prefetch Files',           desc: 'Program execution evidence (up to 500 .pf files)' },
-  { key: 'lnk',      label: 'LNK / Recent Items',       desc: 'Shell link files from all user Recent folders' },
-  { key: 'browser',  label: 'Browser Artifacts',        desc: 'Chrome, Edge, Firefox — history, cookies, login data' },
-  { key: 'tasks',    label: 'Scheduled Tasks',          desc: 'Windows Task Scheduler XML files from System32\\Tasks' },
-  { key: 'triage',   label: 'Live System Triage',       desc: 'systeminfo, netstat, tasklist, services, installed software' },
+  { key: 'evtx',     label: 'Event Logs (EVTX)',   desc: 'Security, System, Application, PowerShell, Sysmon and more' },
+  { key: 'registry', label: 'Registry Hives',       desc: 'SYSTEM, SOFTWARE, SAM, SECURITY, NTUSER.DAT, UsrClass.dat' },
+  { key: 'prefetch', label: 'Prefetch Files',        desc: 'Program execution evidence (up to 500 .pf files)' },
+  { key: 'lnk',      label: 'LNK / Recent Items',   desc: 'Shell link files from all user Recent folders' },
+  { key: 'browser',  label: 'Browser Artifacts',    desc: 'Chrome, Edge, Firefox — history, cookies, login data' },
+  { key: 'tasks',    label: 'Scheduled Tasks',      desc: 'Windows Task Scheduler XML files from System32\\Tasks' },
+  { key: 'triage',   label: 'Live System Triage',   desc: 'systeminfo, netstat, tasklist, services, installed software' },
 ]
 
 const LINUX_ARTIFACTS = [
-  { key: 'logs',     label: 'System Logs',             desc: '/var/log — auth.log, syslog, audit, journalctl export' },
-  { key: 'history',  label: 'Shell Histories',         desc: '.bash_history, .zsh_history for root and all users' },
-  { key: 'config',   label: 'System Configuration',    desc: '/etc/passwd, sudoers, hosts, ssh/sshd_config and more' },
-  { key: 'cron',     label: 'Cron Jobs',               desc: 'cron.d, cron.daily, crontabs, systemd timers' },
-  { key: 'ssh',      label: 'SSH Artifacts',           desc: 'known_hosts, authorized_keys, config (no private keys)' },
-  { key: 'triage',   label: 'Live System Triage',      desc: 'ps, ss, ip, last, lsmod, services, installed packages' },
+  { key: 'logs',    label: 'System Logs',           desc: '/var/log — auth.log, syslog, audit, journalctl export' },
+  { key: 'history', label: 'Shell Histories',       desc: '.bash_history, .zsh_history for root and all users' },
+  { key: 'config',  label: 'System Configuration',  desc: '/etc/passwd, sudoers, hosts, ssh/sshd_config and more' },
+  { key: 'cron',    label: 'Cron Jobs',             desc: 'cron.d, cron.daily, crontabs, systemd timers' },
+  { key: 'ssh',     label: 'SSH Artifacts',         desc: 'known_hosts, authorized_keys, config (no private keys)' },
+  { key: 'triage',  label: 'Live System Triage',    desc: 'ps, ss, ip, last, lsmod, services, installed packages' },
 ]
-
-// ── Platform cards ────────────────────────────────────────────────────────────
 
 const PLATFORMS = [
   {
     id: 'win',
     label: 'Windows',
-    icon: Monitor,
+    Icon: Monitor,
     desc: 'Self-contained Python script — run as Administrator',
-    tip: 'Requires Python 3.8+ on target. For a zero-dependency EXE, build with PyInstaller.',
+    tip: 'Requires Python 3.8+ on target. Build a zero-dependency EXE with: build.bat',
     artifacts: WINDOWS_ARTIFACTS,
   },
   {
     id: 'linux',
     label: 'Linux / macOS',
-    icon: Terminal,
+    Icon: Terminal,
     desc: 'Self-contained Python script — run as root',
-    tip: 'Requires Python 3.8+ on target. For a zero-dependency ELF, build with PyInstaller.',
+    tip: 'Requires Python 3.8+ on target. Build a zero-dependency ELF with: ./build.sh',
     artifacts: LINUX_ARTIFACTS,
   },
   {
     id: 'py',
     label: 'Python Script',
-    icon: FileCode,
-    desc: 'Platform-agnostic — runs on Windows, Linux & macOS',
-    tip: 'Auto-detects the OS at runtime. Identical to the platform-specific scripts.',
+    Icon: FileCode,
+    desc: 'Platform-agnostic — auto-detects OS at runtime',
+    tip: 'Works on Windows, Linux & macOS. Use this when the target already has Python 3.8+.',
     artifacts: [...WINDOWS_ARTIFACTS, ...LINUX_ARTIFACTS],
   },
 ]
@@ -55,38 +56,46 @@ const PLATFORMS = [
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function CollectorModal({ onClose, caseId, apiUrl: propApiUrl }) {
-  const [step, setStep] = useState(1)            // 1=platform, 2=artifacts, 3=config+download
-  const [platform, setPlatform] = useState(null)
-  const [selected, setSelected] = useState(new Set())
-  const [apiUrl, setApiUrl] = useState(propApiUrl || window.location.origin)
+  const [step, setStep]           = useState(1)
+  const [platform, setPlatform]   = useState(null)
+  const [selected, setSelected]   = useState(new Set())
+  const [apiUrl, setApiUrl]       = useState(propApiUrl || '')
+  const [netIps, setNetIps]       = useState([])
+  const [netLoading, setNetLoading] = useState(false)
   const [downloading, setDownloading] = useState(false)
 
-  // Derive artifact list from selected platform
   const platformDef = PLATFORMS.find(p => p.id === platform)
-  const artifacts = platformDef?.artifacts || []
+  const artifacts   = platformDef?.artifacts || []
 
-  // Pre-select all artifacts when platform is chosen
+  // Pre-select all artifacts when platform chosen
   useEffect(() => {
-    if (platformDef) {
-      setSelected(new Set(platformDef.artifacts.map(a => a.key)))
-    }
+    if (platformDef) setSelected(new Set(platformDef.artifacts.map(a => a.key)))
   }, [platform])
+
+  // Fetch detected IPs on step 3
+  useEffect(() => {
+    if (step !== 3) return
+    if (!caseId && !propApiUrl) return   // only useful when upload is intended
+    setNetLoading(true)
+    api.collector.networkInterfaces()
+      .then(r => setNetIps(r.candidates || []))
+      .catch(() => {})
+      .finally(() => setNetLoading(false))
+  }, [step])
 
   function toggleArtifact(key) {
     setSelected(prev => {
       const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
+      next.has(key) ? next.delete(key) : next.add(key)
       return next
     })
   }
 
   function toggleAll() {
-    if (selected.size === artifacts.length) {
-      setSelected(new Set())
-    } else {
-      setSelected(new Set(artifacts.map(a => a.key)))
-    }
+    setSelected(selected.size === artifacts.length
+      ? new Set()
+      : new Set(artifacts.map(a => a.key))
+    )
   }
 
   function handleDownload() {
@@ -94,7 +103,7 @@ export default function CollectorModal({ onClose, caseId, apiUrl: propApiUrl }) 
     const url = api.collector.downloadUrl({
       platform,
       caseId: caseId || undefined,
-      apiUrl: (apiUrl && (caseId || propApiUrl)) ? apiUrl : undefined,
+      apiUrl: (apiUrl && caseId) ? apiUrl : undefined,
       collect: selected.size > 0 ? [...selected] : undefined,
     })
     const a = document.createElement('a')
@@ -106,260 +115,276 @@ export default function CollectorModal({ onClose, caseId, apiUrl: propApiUrl }) 
     setTimeout(() => setDownloading(false), 1500)
   }
 
-  // ── Render ────────────────────────────────────────────────────────────────
-
   return (
     <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="modal-box" style={{ maxWidth: 640, width: '95vw' }}>
+      <div className="modal-box" style={{ maxWidth: 580 }}>
 
-        {/* Header */}
+        {/* ── Header ───────────────────────────────────────────────────────── */}
         <div className="modal-header">
           <div>
-            <h2 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>
+            <h2 className="text-sm font-semibold text-brand-text">
               Download Artifact Collector
             </h2>
-            <p style={{ margin: '2px 0 0', fontSize: 12, color: 'var(--text-muted)' }}>
+            <p className="text-xs text-gray-500 mt-0.5">
               {caseId
-                ? `Configured for case ${caseId} — auto-uploads on completion`
-                : 'Standalone collector — upload manually or configure a case below'}
+                ? `Case ${caseId} — auto-uploads on completion`
+                : 'Standalone — configure upload target in step 3'}
             </p>
           </div>
-          <button className="icon-btn" onClick={onClose}><X size={16} /></button>
+          <button className="icon-btn ml-3" onClick={onClose}><X size={15} /></button>
         </div>
 
-        {/* Step indicator */}
-        <div style={{
-          display: 'flex', gap: 8, padding: '12px 20px',
-          borderBottom: '1px solid var(--border)',
-          background: 'var(--bg-secondary)',
-        }}>
+        {/* ── Step bar ─────────────────────────────────────────────────────── */}
+        <div className="flex items-center gap-2 px-5 py-3 bg-gray-50 border-b border-gray-200 flex-shrink-0">
           {['Platform', 'Artifacts', 'Download'].map((label, i) => {
-            const num = i + 1
+            const num    = i + 1
             const active = step === num
             const done   = step > num
             return (
-              <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                {i > 0 && <span style={{ color: 'var(--border)', fontSize: 12 }}>›</span>}
-                <div style={{
-                  display: 'flex', alignItems: 'center', gap: 5,
-                  color: active ? 'var(--accent)' : done ? 'var(--text-muted)' : 'var(--text-muted)',
-                  fontWeight: active ? 600 : 400,
-                  fontSize: 12,
-                  cursor: done ? 'pointer' : 'default',
-                }} onClick={() => done && setStep(num)}>
-                  <div style={{
-                    width: 20, height: 20, borderRadius: '50%',
-                    background: active ? 'var(--accent)' : done ? 'var(--success, #22c55e)' : 'var(--border)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    color: (active || done) ? '#fff' : 'var(--text-muted)',
-                    fontSize: 10, fontWeight: 700, flexShrink: 0,
-                  }}>
-                    {done ? <Check size={11} /> : num}
-                  </div>
+              <div key={label} className="flex items-center gap-2">
+                {i > 0 && <span className="text-gray-300 text-xs">›</span>}
+                <button
+                  disabled={!done}
+                  onClick={() => done && setStep(num)}
+                  className={`flex items-center gap-1.5 text-xs font-medium transition-colors ${
+                    active ? 'text-brand-accent' :
+                    done   ? 'text-gray-400 hover:text-brand-accent cursor-pointer' :
+                             'text-gray-300 cursor-default'
+                  }`}
+                >
+                  <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 ${
+                    active ? 'bg-brand-accent text-white' :
+                    done   ? 'bg-green-500 text-white' :
+                             'bg-gray-200 text-gray-400'
+                  }`}>
+                    {done ? <Check size={10} /> : num}
+                  </span>
                   {label}
-                </div>
+                </button>
               </div>
             )
           })}
         </div>
 
-        {/* Step 1 — Platform */}
-        {step === 1 && (
-          <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {PLATFORMS.map(p => {
-              const Icon = p.icon
-              const isSelected = platform === p.id
-              return (
-                <div
-                  key={p.id}
-                  onClick={() => setPlatform(p.id)}
-                  style={{
-                    display: 'flex', alignItems: 'flex-start', gap: 14,
-                    padding: '14px 16px',
-                    border: `2px solid ${isSelected ? 'var(--accent)' : 'var(--border)'}`,
-                    borderRadius: 8,
-                    cursor: 'pointer',
-                    background: isSelected ? 'var(--accent-subtle, rgba(99,102,241,.08))' : 'var(--bg-secondary)',
-                    transition: 'border-color .15s, background .15s',
-                  }}
-                >
-                  <div style={{
-                    width: 38, height: 38, borderRadius: 8,
-                    background: isSelected ? 'var(--accent)' : 'var(--border)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    color: isSelected ? '#fff' : 'var(--text-muted)',
-                    flexShrink: 0,
-                  }}>
-                    <Icon size={18} />
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 2 }}>{p.label}</div>
-                    <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{p.desc}</div>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, opacity: .7 }}>{p.tip}</div>
-                  </div>
-                  {isSelected && (
-                    <Check size={16} style={{ color: 'var(--accent)', flexShrink: 0, marginTop: 2 }} />
-                  )}
-                </div>
-              )
-            })}
-          </div>
-        )}
+        {/* ── Step content ─────────────────────────────────────────────────── */}
+        <div className="flex-1 overflow-y-auto">
 
-        {/* Step 2 — Artifacts */}
-        {step === 2 && platformDef && (
-          <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {/* Select-all row */}
-            <div style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              marginBottom: 4,
-            }}>
-              <span style={{ fontSize: 13, fontWeight: 600 }}>
-                {platformDef.label} artifacts ({selected.size}/{artifacts.length} selected)
-              </span>
-              <button
-                className="btn-ghost"
-                style={{ fontSize: 12 }}
-                onClick={toggleAll}
-              >
-                {selected.size === artifacts.length ? 'Deselect all' : 'Select all'}
-              </button>
+          {/* Step 1 — Platform */}
+          {step === 1 && (
+            <div className="p-5 space-y-3">
+              {PLATFORMS.map(({ id, label, Icon, desc, tip }) => {
+                const active = platform === id
+                return (
+                  <button
+                    key={id}
+                    onClick={() => setPlatform(id)}
+                    className={`w-full flex items-start gap-3 p-4 rounded-xl border-2 text-left transition-all ${
+                      active
+                        ? 'border-brand-accent bg-brand-accentlight'
+                        : 'border-gray-200 bg-white hover:border-gray-300'
+                    }`}
+                  >
+                    <div className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 ${
+                      active ? 'bg-brand-accent text-white' : 'bg-gray-100 text-gray-500'
+                    }`}>
+                      <Icon size={17} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-semibold text-brand-text mb-0.5">{label}</div>
+                      <div className="text-xs text-gray-500 mb-1">{desc}</div>
+                      <div className="text-[11px] text-gray-400">{tip}</div>
+                    </div>
+                    {active && <Check size={15} className="text-brand-accent flex-shrink-0 mt-1" />}
+                  </button>
+                )
+              })}
             </div>
+          )}
 
-            {artifacts.map(a => {
-              const checked = selected.has(a.key)
-              return (
-                <label
-                  key={a.key}
-                  style={{
-                    display: 'flex', alignItems: 'flex-start', gap: 12,
-                    padding: '10px 14px',
-                    border: `1px solid ${checked ? 'var(--accent)' : 'var(--border)'}`,
-                    borderRadius: 7,
-                    cursor: 'pointer',
-                    background: checked ? 'var(--accent-subtle, rgba(99,102,241,.06))' : 'var(--bg-secondary)',
-                    transition: 'border-color .12s, background .12s',
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => toggleArtifact(a.key)}
-                    style={{ marginTop: 2, accentColor: 'var(--accent)', cursor: 'pointer' }}
-                  />
-                  <div>
-                    <div style={{ fontWeight: 500, fontSize: 13, marginBottom: 2 }}>{a.label}</div>
-                    <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{a.desc}</div>
-                  </div>
-                </label>
-              )
-            })}
-          </div>
-        )}
-
-        {/* Step 3 — Config + Download */}
-        {step === 3 && (
-          <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
-
-            {/* Summary */}
-            <div style={{
-              padding: '12px 14px',
-              background: 'var(--bg-secondary)',
-              borderRadius: 8,
-              border: '1px solid var(--border)',
-              display: 'flex', flexDirection: 'column', gap: 6,
-            }}>
-              <Row label="Platform"  value={platformDef?.label} />
-              <Row label="Artifacts" value={[...selected].join(', ') || 'none'} />
-              {caseId && <Row label="Case ID"   value={caseId} mono />}
-            </div>
-
-            {/* API URL (only relevant when a case is configured) */}
-            {caseId && (
-              <div>
-                <label style={{ fontSize: 12, fontWeight: 500, display: 'block', marginBottom: 6 }}>
-                  ForensicsOperator API URL
-                  <span style={{ color: 'var(--text-muted)', fontWeight: 400, marginLeft: 6 }}>
-                    — embedded in the script for direct upload
+          {/* Step 2 — Artifacts */}
+          {step === 2 && platformDef && (
+            <div className="p-5">
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-xs font-semibold text-gray-600">
+                  {platformDef.label} artifacts
+                  <span className="ml-1.5 text-gray-400 font-normal">
+                    ({selected.size}/{artifacts.length} selected)
                   </span>
-                </label>
+                </span>
+                <button className="btn-ghost text-xs py-1" onClick={toggleAll}>
+                  {selected.size === artifacts.length ? 'Deselect all' : 'Select all'}
+                </button>
+              </div>
+              <div className="space-y-2">
+                {artifacts.map(a => {
+                  const checked = selected.has(a.key)
+                  return (
+                    <label
+                      key={a.key}
+                      className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${
+                        checked
+                          ? 'border-brand-accent/50 bg-brand-accentlight'
+                          : 'border-gray-200 bg-white hover:border-gray-300'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleArtifact(a.key)}
+                        className="mt-0.5 accent-brand-accent cursor-pointer flex-shrink-0"
+                      />
+                      <div>
+                        <div className="text-sm font-medium text-brand-text">{a.label}</div>
+                        <div className="text-xs text-gray-500 mt-0.5">{a.desc}</div>
+                      </div>
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Step 3 — Config + Download */}
+          {step === 3 && (
+            <div className="p-5 space-y-4">
+
+              {/* Summary card */}
+              <div className="bg-gray-50 rounded-xl border border-gray-200 p-4 space-y-2">
+                <SummaryRow label="Platform"  value={platformDef?.label} />
+                <SummaryRow label="Artifacts" value={[...selected].join(', ') || '(none)'} />
+                {caseId && <SummaryRow label="Case ID" value={caseId} mono />}
+              </div>
+
+              {/* Upload endpoint — shown when there's a case or the user wants to configure it */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-medium text-gray-600">
+                    API upload URL
+                    <span className="ml-1 text-gray-400 font-normal">
+                      — embedded for direct upload on run
+                    </span>
+                  </label>
+
+                  {/* IP auto-detect */}
+                  <button
+                    className="btn-ghost text-xs py-1 gap-1.5"
+                    onClick={() => {
+                      setNetLoading(true)
+                      api.collector.networkInterfaces()
+                        .then(r => setNetIps(r.candidates || []))
+                        .catch(() => {})
+                        .finally(() => setNetLoading(false))
+                    }}
+                  >
+                    {netLoading
+                      ? <RefreshCw size={11} className="animate-spin" />
+                      : <Wifi size={11} />}
+                    Detect IPs
+                  </button>
+                </div>
+
                 <input
                   type="text"
-                  className="input"
+                  className="input text-xs font-mono"
                   value={apiUrl}
                   onChange={e => setApiUrl(e.target.value)}
-                  placeholder="http://fo-api:8000/api/v1"
-                  style={{ width: '100%', fontFamily: 'monospace', fontSize: 12 }}
+                  placeholder="http://192.168.1.x:8000/api/v1"
                 />
+
+                {/* Detected IP suggestions */}
+                {netIps.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {netIps.map(c => (
+                      <button
+                        key={c.url}
+                        onClick={() => setApiUrl(c.url)}
+                        title={c.iface}
+                        className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border text-[11px] font-mono transition-colors ${
+                          apiUrl === c.url
+                            ? 'border-brand-accent bg-brand-accentlight text-brand-accent'
+                            : 'border-gray-200 bg-white text-gray-600 hover:border-brand-accent/50'
+                        }`}
+                      >
+                        <Wifi size={10} />
+                        {c.ip}
+                        {c.label && <span className="text-gray-400 font-sans">({c.label})</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {!apiUrl && caseId && (
+                  <p className="text-[11px] text-amber-600 mt-1.5 flex items-center gap-1">
+                    <span>⚠</span> Without an API URL the collector will save the ZIP locally only.
+                  </p>
+                )}
               </div>
-            )}
 
-            {/* Download button */}
-            <button
-              className="btn-primary"
-              onClick={handleDownload}
-              disabled={selected.size === 0 || downloading}
-              style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, height: 40 }}
-            >
-              {downloading
-                ? 'Downloading…'
-                : <><Download size={15} /> Download fo-collector.py</>}
-            </button>
+              {/* Download button */}
+              <button
+                className="btn-primary w-full justify-center h-10 gap-2"
+                onClick={handleDownload}
+                disabled={selected.size === 0 || downloading}
+              >
+                {downloading
+                  ? 'Downloading…'
+                  : <><Download size={14} /> Download fo-collector.py</>}
+              </button>
 
-            {/* Usage hint */}
-            <div style={{
-              fontSize: 11, color: 'var(--text-muted)',
-              background: 'var(--bg-secondary)',
-              borderRadius: 7,
-              padding: '10px 12px',
-              fontFamily: 'monospace',
-              lineHeight: 1.6,
-            }}>
-              {platform === 'win'
-                ? <>Run as Administrator:<br /><code>python fo-collector.py</code><br />or build EXE: <code>build.bat</code></>
-                : <>Run as root:<br /><code>python3 fo-collector.py</code><br />or build ELF: <code>./build.sh</code></>}
-              {caseId && (
-                <><br /><br />Artifacts will upload automatically to case <strong>{caseId}</strong>.</>
-              )}
+              {/* Run hint */}
+              <div className="bg-gray-950 rounded-lg p-3 text-[11px] font-mono text-gray-300 leading-relaxed">
+                {platform === 'win'
+                  ? <>
+                      <span className="text-gray-500"># Run as Administrator</span>{'\n'}
+                      python fo-collector.py
+                    </>
+                  : <>
+                      <span className="text-gray-500"># Run as root</span>{'\n'}
+                      python3 fo-collector.py
+                    </>
+                }
+                {caseId && apiUrl && (
+                  <>
+                    {'\n\n'}
+                    <span className="text-gray-500"># Artifacts upload to case </span>
+                    <span className="text-brand-accent">{caseId}</span>
+                  </>
+                )}
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
 
-        {/* Footer nav */}
-        <div style={{
-          display: 'flex', justifyContent: 'space-between',
-          padding: '12px 20px',
-          borderTop: '1px solid var(--border)',
-        }}>
+        {/* ── Footer nav ───────────────────────────────────────────────────── */}
+        <div className="flex items-center justify-between px-5 py-3 border-t border-gray-200 flex-shrink-0 bg-white">
           <button
-            className="btn-ghost"
+            className="btn-ghost gap-1"
             onClick={() => step > 1 ? setStep(s => s - 1) : onClose()}
-            style={{ display: 'flex', alignItems: 'center', gap: 4 }}
           >
-            {step > 1 ? <><ChevronLeft size={14} /> Back</> : 'Cancel'}
+            <ChevronLeft size={13} />
+            {step > 1 ? 'Back' : 'Cancel'}
           </button>
           {step < 3 && (
             <button
-              className="btn-primary"
+              className="btn-primary gap-1"
               onClick={() => setStep(s => s + 1)}
               disabled={step === 1 && !platform}
-              style={{ display: 'flex', alignItems: 'center', gap: 4 }}
             >
-              Next <ChevronRight size={14} />
+              Next <ChevronRight size={13} />
             </button>
           )}
         </div>
+
       </div>
     </div>
   )
 }
 
-// Small helper
-function Row({ label, value, mono }) {
+function SummaryRow({ label, value, mono }) {
   return (
-    <div style={{ display: 'flex', gap: 8, fontSize: 12 }}>
-      <span style={{ color: 'var(--text-muted)', minWidth: 70 }}>{label}</span>
-      <span style={{ fontFamily: mono ? 'monospace' : undefined, wordBreak: 'break-all' }}>{value}</span>
+    <div className="flex gap-3 text-xs">
+      <span className="text-gray-400 w-16 flex-shrink-0">{label}</span>
+      <span className={`text-brand-text break-all ${mono ? 'font-mono' : ''}`}>{value}</span>
     </div>
   )
 }

@@ -6,6 +6,7 @@ import Search from './pages/Search'
 import AlertLibrary from './pages/AlertLibrary'
 import Ingesters from './pages/Ingesters'
 import Modules from './pages/Modules'
+import Collector from './pages/Collector'
 
 export default function App() {
   return (
@@ -18,6 +19,7 @@ export default function App() {
           <Route path="alert-rules" element={<AlertLibrary />} />
           <Route path="ingesters" element={<Ingesters />} />
           <Route path="modules" element={<Modules />} />
+          <Route path="collector" element={<Collector />} />
           {/* Legacy redirect — keep old /plugins links working */}
           <Route path="plugins" element={<Navigate to="/ingesters" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />

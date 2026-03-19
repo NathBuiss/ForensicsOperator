@@ -7,13 +7,20 @@ GET /collector/download
     api_url   : str  (optional — embedded in the script)
     collect   : str  (optional — comma-separated artifact types, e.g. "evtx,registry")
 
+GET /network/interfaces
+  Returns candidate API URLs derived from the server's network interfaces so the
+  frontend can offer "Detect IPs" suggestions in the collector config step.
+
 Returns the configured collect.py script as a file download with EMBEDDED_CONFIG
 injected so it works out-of-the-box on the target system.
 """
 from __future__ import annotations
 
+import os
 import re
+import socket
 import logging
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -106,3 +113,90 @@ def download_collector(
             "Cache-Control": "no-store",
         },
     )
+
+
+# ── Network interface discovery ───────────────────────────────────────────────
+
+def _detect_outbound_ip() -> Optional[str]:
+    """Return the primary outbound IPv4 address (no packet sent)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return None
+
+
+def _detect_gateway_ip() -> Optional[str]:
+    """On Linux containers, the default gateway is usually the host machine."""
+    try:
+        out = subprocess.check_output(
+            ["ip", "route", "show", "default"],
+            text=True, timeout=3,
+        )
+        # "default via 172.17.0.1 dev eth0 ..."
+        parts = out.split()
+        via_idx = parts.index("via") if "via" in parts else -1
+        if via_idx >= 0 and via_idx + 1 < len(parts):
+            return parts[via_idx + 1]
+    except Exception:
+        pass
+    return None
+
+
+@router.get("/network/interfaces")
+def get_network_interfaces():
+    """
+    Return candidate API endpoint URLs for use in the collector config wizard.
+    Priority: FO_PUBLIC_URL env var → host gateway → outbound IP.
+    The frontend presents these as one-click suggestions in the 'Detect IPs' step.
+    """
+    api_port = os.getenv("FO_PUBLIC_PORT", "8000")
+    candidates: list[dict] = []
+    seen_ips: set[str] = set()
+
+    def _add(ip: str, label: str, iface: str = "") -> None:
+        if ip and ip not in seen_ips and not ip.startswith("127."):
+            seen_ips.add(ip)
+            candidates.append({
+                "ip":    ip,
+                "url":   f"http://{ip}:{api_port}/api/v1",
+                "label": label,
+                "iface": iface,
+            })
+
+    # 1. Explicit public URL configured by operator
+    public_url = os.getenv("FO_PUBLIC_URL", "").strip().rstrip("/")
+    if public_url:
+        # Extract just the host portion if it's a full URL
+        try:
+            host = public_url.split("//")[-1].split("/")[0].split(":")[0]
+            candidates.append({
+                "ip":    host,
+                "url":   public_url if "/api/v1" in public_url else f"{public_url}/api/v1",
+                "label": "configured",
+                "iface": "FO_PUBLIC_URL",
+            })
+            seen_ips.add(host)
+        except Exception:
+            pass
+
+    # 2. Docker host (default gateway — usually the bare-metal / VM running Docker)
+    gw = _detect_gateway_ip()
+    _add(gw, "docker host", "gateway")
+
+    # 3. Container's own outbound IP
+    outbound = _detect_outbound_ip()
+    _add(outbound, "this container", "outbound")
+
+    # 4. Hostname resolution
+    try:
+        hostname = socket.gethostname()
+        host_ip  = socket.gethostbyname(hostname)
+        _add(host_ip, "hostname", hostname)
+    except Exception:
+        pass
+
+    return {"candidates": candidates, "port": int(api_port)}

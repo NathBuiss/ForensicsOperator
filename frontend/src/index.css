@@ -154,6 +154,22 @@
            flex flex-col overflow-hidden;
     box-shadow: -4px 0 24px rgba(0,0,0,0.10);
   }
+  .modal-overlay {
+    @apply fixed inset-0 bg-black/40 backdrop-blur-sm z-50
+           flex items-center justify-center p-4;
+  }
+  .modal-box {
+    @apply bg-white rounded-2xl flex flex-col overflow-hidden w-full;
+    max-height: 90vh;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.18), 0 4px 16px rgba(0,0,0,0.10);
+  }
+  .modal-header {
+    @apply flex items-start justify-between px-5 py-4 border-b border-gray-200 flex-shrink-0;
+  }
+  .icon-btn {
+    @apply w-7 h-7 flex items-center justify-center rounded-lg text-gray-400
+           hover:text-gray-600 hover:bg-gray-100 transition-colors flex-shrink-0;
+  }
 
   /* ─ Kbd shortcut ─ */
   .kbd {
@@ -272,6 +288,14 @@
   background-color: #1A1D2E;
   border-color: #2D3147;
 }
+.dark .modal-overlay { background: rgba(0,0,0,0.65); }
+.dark .modal-box {
+  background-color: #1A1D2E;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+}
+.dark .modal-header { border-color: #2D3147; }
+.dark .icon-btn { color: #6B7280; }
+.dark .icon-btn:hover { background-color: #252836; color: #D1D5DB; }
 
 /* White/gray backgrounds in page content */
 .dark main {

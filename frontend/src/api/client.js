@@ -105,8 +105,7 @@ export const api = {
   collector: {
     /**
      * Returns the download URL for the configured collector script.
-     * Trigger with window.location.href = api.collector.downloadUrl(...)
-     * or use with an <a href> tag.
+     * Use with an <a href> or trigger via document.createElement('a').
      */
     downloadUrl: ({ platform = 'py', caseId, apiUrl, collect } = {}) => {
       const params = new URLSearchParams({ platform })
@@ -115,5 +114,7 @@ export const api = {
       if (collect && collect.length > 0) params.set('collect', collect.join(','))
       return `/api/v1/collector/download?${params.toString()}`
     },
+    /** Detect candidate API URLs from server network interfaces. */
+    networkInterfaces: () => request('GET', '/network/interfaces'),
   },
 }

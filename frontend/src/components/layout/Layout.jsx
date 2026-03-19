@@ -2,7 +2,7 @@ import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import { useState, useEffect } from 'react'
 import {
   LayoutDashboard, Puzzle, FolderOpen,
-  Plus, X, ChevronRight, Bell, Sun, Moon, Cpu,
+  Plus, X, ChevronRight, Bell, Sun, Moon, Cpu, PackageOpen,
 } from 'lucide-react'
 import { api } from '../../api/client'
 
@@ -112,6 +112,12 @@ export default function Layout() {
             isActive ? 'nav-item-active' : 'nav-item-inactive'}>
             <Cpu size={15} />
             Modules
+          </NavLink>
+
+          <NavLink to="/collector" className={({ isActive }) =>
+            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
+            <PackageOpen size={15} />
+            Collector
           </NavLink>
 
           {/* Cases section */}
