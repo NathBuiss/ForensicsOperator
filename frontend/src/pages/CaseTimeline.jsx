@@ -31,9 +31,13 @@ const LEVEL_BADGE = {
 }
 
 const MODULE_NAMES = {
-  hayabusa:  'Hayabusa',
-  chainsaw:  'Chainsaw',
-  evtxecmd:  'EvtxECmd',
+  hayabusa:   'Hayabusa',
+  hindsight:  'Hindsight',
+  strings:    'Strings',
+  regripper:  'RegRipper',
+  chainsaw:   'Chainsaw',
+  evtxecmd:   'EvtxECmd',
+  volatility3: 'Volatility 3',
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -168,13 +172,14 @@ function AlertMatchCard({ match }) {
 // ModuleLaunchModal
 // ─────────────────────────────────────────────────────────────────────────────
 function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
-  const [modules, setModules]           = useState([])
-  const [sources, setSources]           = useState([])
+  const [modules, setModules]               = useState([])
+  const [sources, setSources]               = useState([])
   const [selectedModule, setSelectedModule] = useState(null)
-  const [selectedJobs, setSelectedJobs] = useState(new Set())
-  const [loading, setLoading]           = useState(true)
-  const [running, setRunning]           = useState(false)
-  const [error, setError]               = useState(null)
+  const [selectedJobs, setSelectedJobs]     = useState(new Set())
+  const [sourceSearch, setSourceSearch]     = useState('')
+  const [loading, setLoading]               = useState(true)
+  const [running, setRunning]               = useState(false)
+  const [error, setError]                   = useState(null)
 
   useEffect(() => {
     Promise.all([api.modules.list(), api.modules.listSources(caseId)])
@@ -186,13 +191,26 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
       .catch(err => { setError(err.message); setLoading(false) })
   }, [caseId])
 
+  // Filter sources by extension OR exact basename (case-insensitive).
+  // Empty both lists → module accepts all files (e.g. "strings").
   const compatibleSources = selectedModule
-    ? sources.filter(s =>
-        selectedModule.input_extensions.some(ext =>
-          (s.original_filename || '').toLowerCase().endsWith(ext)
-        )
-      )
+    ? sources.filter(s => {
+        const fnameLower = (s.original_filename || '').toLowerCase()
+        const extList  = selectedModule.input_extensions || []
+        const nameList = selectedModule.input_filenames  || []
+        if (extList.length === 0 && nameList.length === 0) return true
+        const extMatch  = extList.some(ext => fnameLower.endsWith(ext.toLowerCase()))
+        const basename  = fnameLower.split('/').pop().split('\\').pop()
+        const nameMatch = nameList.some(fn => basename === fn.toLowerCase())
+        return extMatch || nameMatch
+      })
     : []
+
+  const visibleSources = sourceSearch.trim()
+    ? compatibleSources.filter(s =>
+        (s.original_filename || '').toLowerCase().includes(sourceSearch.toLowerCase())
+      )
+    : compatibleSources
 
   function toggleJob(jobId) {
     setSelectedJobs(prev => {
@@ -297,7 +315,14 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
               {selectedModule && (
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <p className="section-title">Source Files</p>
+                    <p className="section-title">
+                      Source Files
+                      {compatibleSources.length > 0 && (
+                        <span className="ml-1.5 font-normal text-gray-400">
+                          ({compatibleSources.length})
+                        </span>
+                      )}
+                    </p>
                     {compatibleSources.length > 0 && (
                       <button
                         onClick={() => setSelectedJobs(new Set(compatibleSources.map(s => s.job_id)))}
@@ -311,33 +336,54 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
                   {compatibleSources.length === 0 ? (
                     <p className="text-xs text-gray-400 italic py-2">
                       No compatible source files found for this case.
-                      Ingest {selectedModule.input_extensions.join(', ')} files first.
+                      {(selectedModule.input_extensions?.length > 0 || selectedModule.input_filenames?.length > 0) && (
+                        <> Ingest {[
+                          ...(selectedModule.input_extensions || []),
+                          ...(selectedModule.input_filenames  || []),
+                        ].join(', ')} files first.</>
+                      )}
                     </p>
                   ) : (
-                    <div className="space-y-1">
-                      {compatibleSources.map(src => (
-                        <label
-                          key={src.job_id}
-                          className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-gray-50 cursor-pointer border border-transparent hover:border-gray-200 transition-colors"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={selectedJobs.has(src.job_id)}
-                            onChange={() => toggleJob(src.job_id)}
-                            className="rounded border-gray-300"
-                          />
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm text-brand-text truncate font-medium">
-                              {src.original_filename}
-                            </p>
-                            <p className="text-[10px] text-gray-400 mt-0.5">
-                              {(src.events_indexed || 0).toLocaleString()} events
-                              {src.plugin_used ? ` · ${src.plugin_used}` : ''}
-                            </p>
-                          </div>
-                        </label>
-                      ))}
-                    </div>
+                    <>
+                      {compatibleSources.length > 5 && (
+                        <input
+                          type="text"
+                          value={sourceSearch}
+                          onChange={e => setSourceSearch(e.target.value)}
+                          placeholder="Filter files…"
+                          className="w-full mb-2 px-3 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-brand-accent/40 focus:border-brand-accent"
+                        />
+                      )}
+                      <div className="space-y-1">
+                        {visibleSources.map(src => (
+                          <label
+                            key={src.job_id}
+                            className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-gray-50 cursor-pointer border border-transparent hover:border-gray-200 transition-colors"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={selectedJobs.has(src.job_id)}
+                              onChange={() => toggleJob(src.job_id)}
+                              className="rounded border-gray-300"
+                            />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm text-brand-text truncate font-medium">
+                                {src.original_filename}
+                              </p>
+                              <p className="text-[10px] text-gray-400 mt-0.5">
+                                {(src.events_indexed || 0).toLocaleString()} events
+                                {src.plugin_used ? ` · ${src.plugin_used}` : ''}
+                              </p>
+                            </div>
+                          </label>
+                        ))}
+                        {visibleSources.length === 0 && sourceSearch && (
+                          <p className="text-xs text-gray-400 italic py-2 text-center">
+                            No files match "{sourceSearch}"
+                          </p>
+                        )}
+                      </div>
+                    </>
                   )}
                 </div>
               )}
@@ -460,10 +506,16 @@ function ModuleRunCard({ run }) {
                     </span>
                     <span className="font-medium text-brand-text">{hit.rule_title}</span>
                   </div>
-                  <div className="flex gap-3 text-[10px] text-gray-400 font-mono">
-                    {hit.computer && <span>{hit.computer}</span>}
+                  <div className="flex gap-3 text-[10px] text-gray-400 font-mono flex-wrap">
+                    {hit.computer  && <span>{hit.computer}</span>}
                     {hit.timestamp && <span>{hit.timestamp}</span>}
                   </div>
+                  {hit.details_raw && (
+                    <p className="text-[10px] text-gray-500 mt-1 break-all line-clamp-2"
+                       title={hit.details_raw}>
+                      {hit.details_raw}
+                    </p>
+                  )}
                 </div>
               ))}
               {preview.length > 50 && (

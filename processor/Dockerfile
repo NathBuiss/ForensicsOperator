@@ -3,32 +3,41 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
 
-# Install system deps
-# Note: plaso-tools (psort) is NOT installed here because the GIFT PPA requires
-# a gpg-agent that is unavailable in Docker build contexts. The plaso plugin
-# falls back to reading .plaso SQLite storage files directly instead.
+# ── System deps ───────────────────────────────────────────────────────────────
+# binutils  → 'strings' command for the Strings module
+# perl      → RegRipper (Perl-based)
+# unzip     → Hayabusa + RegRipper zip extraction
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-dev \
     libmagic1 libmagic-dev \
     wget curl \
+    binutils \
+    perl \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Hayabusa DFIR binary (Sigma-based EVTX threat hunting — built-in rules, no separate bundle needed)
+# ── Hayabusa DFIR binary (Sigma-based EVTX threat hunting) ────────────────────
 ARG HAYABUSA_VERSION=3.2.0
-RUN apt-get update && apt-get install -y --no-install-recommends unzip \
-    && rm -rf /var/lib/apt/lists/* \
-    && wget -q -O /tmp/hayabusa.zip \
+RUN wget -q -O /tmp/hayabusa.zip \
          "https://github.com/Yamato-Security/hayabusa/releases/download/v${HAYABUSA_VERSION}/hayabusa-${HAYABUSA_VERSION}-lin-x64-musl.zip" \
     && unzip -q /tmp/hayabusa.zip -d /tmp/hayabusa_dir \
     && find /tmp/hayabusa_dir -maxdepth 3 -name "hayabusa-*-lin-x64-musl" -type f \
          -exec install -m 755 {} /usr/local/bin/hayabusa \; \
     && rm -rf /tmp/hayabusa.zip /tmp/hayabusa_dir
 
-# Python deps
+# ── RegRipper (deep Windows registry analysis, Perl) ─────────────────────────
+RUN wget -q -O /tmp/regripper.zip \
+         "https://github.com/keydet89/RegRipper3.0/archive/refs/heads/master.zip" \
+    && unzip -q /tmp/regripper.zip -d /opt/ \
+    && mv /opt/RegRipper3.0-master /opt/regripper \
+    && chmod +x /opt/regripper/rip.pl \
+    && rm /tmp/regripper.zip
+
+# ── Python deps (includes pyhindsight for the Hindsight module) ───────────────
 COPY processor/requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Processor source code
+# ── Processor source code ─────────────────────────────────────────────────────
 COPY processor/ .
 RUN touch tasks/__init__.py utils/__init__.py
 

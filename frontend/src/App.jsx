@@ -4,7 +4,7 @@ import Dashboard from './pages/Dashboard'
 import CaseTimeline from './pages/CaseTimeline'
 import Search from './pages/Search'
 import AlertLibrary from './pages/AlertLibrary'
-import Plugins from './pages/Plugins'
+import Ingesters from './pages/Ingesters'
 
 export default function App() {
   return (
@@ -15,7 +15,9 @@ export default function App() {
           <Route path="cases/:caseId" element={<CaseTimeline />} />
           <Route path="cases/:caseId/search" element={<Search />} />
           <Route path="alert-rules" element={<AlertLibrary />} />
-          <Route path="plugins" element={<Plugins />} />
+          <Route path="ingesters" element={<Ingesters />} />
+          {/* Legacy redirect — keep old /plugins links working */}
+          <Route path="plugins" element={<Navigate to="/ingesters" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

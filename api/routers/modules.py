@@ -16,20 +16,56 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["modules"])
 
 # ── Module registry ───────────────────────────────────────────────────────────
+# input_extensions : list of file extensions to match (lower-case, with dot)
+# input_filenames  : list of exact basenames to match (case-insensitive)
+# Both empty       → accept ANY source file (e.g. "strings")
+# Non-empty        → match if extension OR filename matches
 
 MODULES: list[dict] = [
     {
-        "id":                "hayabusa",
-        "name":              "Hayabusa",
-        "description":       "Sigma-based EVTX threat hunting with built-in detection rules",
-        "input_extensions":  [".evtx"],
-        "available":         True,
+        "id":               "hayabusa",
+        "name":             "Hayabusa",
+        "description":      "Sigma-based EVTX threat hunting with 4 000+ built-in detection rules",
+        "input_extensions": [".evtx"],
+        "input_filenames":  [],
+        "available":        True,
+    },
+    {
+        "id":               "hindsight",
+        "name":             "Hindsight",
+        "description":      "Chrome, Firefox and Edge browser forensics — history, downloads, cookies, form data",
+        "input_extensions": [".db", ".sqlite"],
+        "input_filenames":  [
+            "History", "places.sqlite", "Cookies", "Web Data",
+            "Login Data", "Favicons", "Shortcuts", "Top Sites",
+        ],
+        "available":        True,
+    },
+    {
+        "id":               "strings",
+        "name":             "Strings",
+        "description":      "Extract printable strings (≥ 8 chars) from any file — useful for binary triage",
+        "input_extensions": [],   # empty = accept ALL files
+        "input_filenames":  [],
+        "available":        True,
+    },
+    {
+        "id":               "regripper",
+        "name":             "RegRipper",
+        "description":      "Deep Windows registry analysis — 200+ plugins covering persistence, MRU, ShimCache, UserAssist and more",
+        "input_extensions": [".dat", ".hive"],
+        "input_filenames":  [
+            "NTUSER.DAT", "SYSTEM", "SOFTWARE", "SAM",
+            "SECURITY", "USRCLASS.DAT",
+        ],
+        "available":        True,
     },
     {
         "id":                  "chainsaw",
         "name":                "Chainsaw",
         "description":         "Rapid EVTX analysis using Sigma rules",
         "input_extensions":    [".evtx"],
+        "input_filenames":     [],
         "available":           False,
         "unavailable_reason":  "Sigma rules bundle required — coming soon.",
     },
@@ -38,8 +74,18 @@ MODULES: list[dict] = [
         "name":                "EvtxECmd",
         "description":         "Eric Zimmermann's EVTX timeline reconstruction",
         "input_extensions":    [".evtx"],
+        "input_filenames":     [],
         "available":           False,
         "unavailable_reason":  "Windows/.NET only — not supported on Linux.",
+    },
+    {
+        "id":                  "volatility3",
+        "name":                "Volatility 3",
+        "description":         "Memory forensics — processes, network, registry from RAM dumps",
+        "input_extensions":    [".raw", ".vmem", ".dmp", ".mem", ".lime"],
+        "input_filenames":     [],
+        "available":           False,
+        "unavailable_reason":  "Coming soon.",
     },
 ]
 
@@ -57,7 +103,6 @@ class CreateModuleRunRequest(BaseModel):
 
 @router.get("/modules")
 def list_modules():
-    """Return the module registry."""
     return {"modules": MODULES}
 
 
@@ -71,11 +116,11 @@ def list_case_sources(case_id: str):
     jobs = list_case_jobs(case_id)
     sources = [
         {
-            "job_id":           j["job_id"],
+            "job_id":            j["job_id"],
             "original_filename": j.get("original_filename", ""),
-            "plugin_used":      j.get("plugin_used", ""),
-            "events_indexed":   j.get("events_indexed", 0),
-            "minio_object_key": j.get("minio_object_key", ""),
+            "plugin_used":       j.get("plugin_used", ""),
+            "events_indexed":    j.get("events_indexed", 0),
+            "minio_object_key":  j.get("minio_object_key", ""),
         }
         for j in jobs
         if j.get("status") == "COMPLETED"
@@ -85,7 +130,6 @@ def list_case_sources(case_id: str):
 
 @router.post("/cases/{case_id}/module-runs", status_code=201)
 def create_module_run(case_id: str, req: CreateModuleRunRequest):
-    """Validate inputs, create a module run record, and dispatch Celery task."""
     case = get_case(case_id)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
@@ -96,11 +140,9 @@ def create_module_run(case_id: str, req: CreateModuleRunRequest):
     if not module.get("available"):
         reason = module.get("unavailable_reason", "Module unavailable")
         raise HTTPException(status_code=400, detail=reason)
-
     if not req.job_ids:
         raise HTTPException(status_code=400, detail="At least one source job is required")
 
-    # Resolve source file metadata from Redis job records
     all_jobs = {j["job_id"]: j for j in list_case_jobs(case_id)}
     source_files: list[dict] = []
     for job_id in req.job_ids:
@@ -121,7 +163,6 @@ def create_module_run(case_id: str, req: CreateModuleRunRequest):
     run_id = uuid.uuid4().hex
     run_svc.create_module_run(run_id, case_id, req.module_id, source_files)
 
-    # Dispatch Celery task using send_task (no direct import of processor code)
     try:
         from celery import Celery
         celery_app = Celery(broker=settings.REDIS_URL)
@@ -140,17 +181,14 @@ def create_module_run(case_id: str, req: CreateModuleRunRequest):
 
 @router.get("/cases/{case_id}/module-runs")
 def list_module_runs(case_id: str):
-    """List all module runs for a case (newest first)."""
     case = get_case(case_id)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
-    runs = run_svc.list_case_module_runs(case_id)
-    return {"runs": runs}
+    return {"runs": run_svc.list_case_module_runs(case_id)}
 
 
 @router.get("/module-runs/{run_id}")
 def get_module_run(run_id: str):
-    """Get a single module run with full results_preview."""
     run = run_svc.get_module_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Module run not found")

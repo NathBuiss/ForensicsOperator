@@ -102,10 +102,10 @@ export default function Layout() {
             Alert Rules
           </NavLink>
 
-          <NavLink to="/plugins" className={({ isActive }) =>
+          <NavLink to="/ingesters" className={({ isActive }) =>
             isActive ? 'nav-item-active' : 'nav-item-inactive'}>
             <Puzzle size={15} />
-            Plugins
+            Ingesters
           </NavLink>
 
           {/* Cases section */}
