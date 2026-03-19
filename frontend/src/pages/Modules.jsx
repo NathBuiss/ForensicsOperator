@@ -2,10 +2,8 @@ import { useEffect, useState } from 'react'
 import {
   Cpu, CheckCircle, XCircle, ChevronDown,
   Copy, Check, Code2, BookOpen, AlertCircle, X,
-  PackageOpen, Terminal, Download,
 } from 'lucide-react'
 import { api } from '../api/client'
-import CollectorModal from '../components/CollectorModal'
 
 // ── Code templates shown in the documentation modal ──────────────────────────
 
@@ -178,166 +176,6 @@ function DocsModal({ onClose }) {
         </div>
       </div>
     </div>
-  )
-}
-
-// ── CollectorSection ─────────────────────────────────────────────────────────
-
-const COLLECTOR_STEPS = `# 1 — Build the binary on the target platform
-#   Linux  (produces dist/fo-collector  — self-contained ELF)
-cd collector && ./build.sh
-
-#   Windows  (produces dist\\fo-collector.exe — self-contained EXE)
-cd collector && build.bat
-
-# 2 — Deploy & run on the target host
-#   Linux / macOS (run as root for full collection)
-scp dist/fo-collector root@target:/tmp/
-ssh root@target '/tmp/fo-collector --verbose'
-
-#   Windows (run as Administrator)
-#   Copy fo-collector.exe to the target and double-click,
-#   or from an elevated prompt:
-fo-collector.exe --verbose
-
-# 3 — Upload the produced ZIP to ForensicsOperator
-fo-collector.exe --api-url http://FO_HOST/api/v1 --case-id CASE_ID
-# The ZIP is also saved locally for manual upload via the Ingest panel.`
-
-function CollectorSection() {
-  const [open, setOpen]           = useState(false)
-  const [copied, setCopied]       = useState(false)
-  const [showModal, setShowModal] = useState(false)
-
-  function copy() {
-    navigator.clipboard.writeText(COLLECTOR_STEPS)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }
-
-  return (
-    <section className="mb-8">
-      <h2 className="section-title mb-3">Artifact Collector</h2>
-      <div className="card overflow-hidden">
-        {/* Summary row */}
-        <div className="flex items-start gap-3 p-4">
-          <div className="w-8 h-8 rounded-lg bg-brand-accentlight border border-brand-accent/20 flex items-center justify-center flex-shrink-0 mt-0.5">
-            <PackageOpen size={14} className="text-brand-accent" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 mb-0.5">
-              <span className="text-sm font-semibold text-brand-text">fo-collector</span>
-              <span className="badge bg-blue-50 text-blue-700 border border-blue-200">Windows</span>
-              <span className="badge bg-gray-100 text-gray-600 border border-gray-200">Linux</span>
-            </div>
-            <p className="text-xs text-gray-500">
-              Standalone Python script that collects forensic artifacts from a live system
-              and packages them as a ZIP for direct upload to a ForensicsOperator case.
-            </p>
-          </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
-            <button
-              onClick={() => setShowModal(true)}
-              className="btn-primary text-xs"
-              style={{ height: 30, gap: 5 }}
-            >
-              <Download size={12} />
-              Download
-            </button>
-            <button
-              onClick={() => setOpen(v => !v)}
-              className="btn-ghost p-1.5 rounded-lg"
-              title="Show details"
-            >
-              <ChevronDown size={14} className={`text-gray-400 transition-transform ${open ? 'rotate-180' : ''}`} />
-            </button>
-          </div>
-        </div>
-
-        {open && (
-          <div className="border-t border-gray-100 bg-gray-50 p-4 space-y-4">
-
-            {/* What it collects */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-              <div>
-                <p className="section-title mb-2 flex items-center gap-1.5">
-                  <Terminal size={11} /> Windows artifacts
-                </p>
-                <ul className="space-y-1 text-gray-500">
-                  {[
-                    'EVTX event logs (Security, System, PowerShell, Sysmon…)',
-                    'Registry hives (SYSTEM, SOFTWARE, SAM, NTUSER.DAT…)',
-                    'Prefetch files (.pf)',
-                    'LNK / Recent Items',
-                    'Browser history (Chrome, Edge, Firefox)',
-                    'Scheduled Tasks XML',
-                    'Live triage: processes, services, netstat, users',
-                  ].map(item => (
-                    <li key={item} className="flex items-start gap-1.5">
-                      <CheckCircle size={10} className="text-green-500 flex-shrink-0 mt-0.5" />
-                      {item}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-              <div>
-                <p className="section-title mb-2 flex items-center gap-1.5">
-                  <Terminal size={11} /> Linux artifacts
-                </p>
-                <ul className="space-y-1 text-gray-500">
-                  {[
-                    'System logs (/var/log + systemd journal)',
-                    'Shell histories (.bash_history, .zsh_history…)',
-                    'Auth / SSH artifacts (authorized_keys, known_hosts)',
-                    'Cron jobs (system + user crontabs)',
-                    'System config (/etc/passwd, sudoers, sshd_config…)',
-                    'Live triage: processes, sockets, mounts, env',
-                    'Installed packages (dpkg / rpm)',
-                  ].map(item => (
-                    <li key={item} className="flex items-start gap-1.5">
-                      <CheckCircle size={10} className="text-green-500 flex-shrink-0 mt-0.5" />
-                      {item}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-
-            {/* Build & usage */}
-            <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <p className="section-title flex items-center gap-1.5">
-                  <Download size={11} /> Build &amp; Deploy (optional — for zero-dependency binary)
-                </p>
-                <button onClick={copy} className="btn-ghost text-xs">
-                  {copied
-                    ? <><Check size={12} className="text-green-600" /> Copied</>
-                    : <><Copy size={12} /> Copy</>}
-                </button>
-              </div>
-              <pre className="code-block text-[11px] leading-relaxed overflow-x-auto">
-                {COLLECTOR_STEPS}
-              </pre>
-            </div>
-
-            {/* Notes */}
-            <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
-              <BookOpen size={13} className="flex-shrink-0 mt-0.5" />
-              <div>
-                <strong>Requirements:</strong> Python 3.8+ on the target system (or use PyInstaller
-                to build a zero-dependency binary). Windows collection requires <strong>Administrator</strong>{' '}
-                privileges for registry hives and locked files. Linux collection requires <strong>root</strong>{' '}
-                for /etc/shadow, audit logs, and other privileged paths.
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {showModal && (
-        <CollectorModal onClose={() => setShowModal(false)} />
-      )}
-    </section>
   )
 }
 
@@ -529,9 +367,6 @@ export default function Modules() {
               </div>
             </section>
           )}
-
-          {/* ── Artifact Collector ──────────────────────────────────────────── */}
-          <CollectorSection />
 
           {/* ── How modules work ─────────────────────────────────────────────── */}
           <section>

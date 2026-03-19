@@ -91,11 +91,71 @@ MODULES: list[dict] = [
     {
         "id":                  "volatility3",
         "name":                "Volatility 3",
-        "description":         "Memory forensics — processes, network, registry from RAM dumps",
+        "description":         "Memory forensics — processes, network, registry, malware from RAM dumps",
         "input_extensions":    [".raw", ".vmem", ".dmp", ".mem", ".lime"],
         "input_filenames":     [],
         "available":           False,
         "unavailable_reason":  "Coming soon.",
+    },
+    {
+        "id":               "log2timeline",
+        "name":             "log2timeline → Plaso",
+        "description":      "Run log2timeline to build a Plaso supertimeline from uploaded artifacts, "
+                            "then auto-import the resulting .plaso file into the case",
+        "input_extensions": [
+            ".evtx", ".lnk", ".pf", ".dat", ".hive",
+            ".sqlite", ".db", ".csv", ".log", ".json",
+        ],
+        "input_filenames":  [
+            "NTUSER.DAT", "SYSTEM", "SOFTWARE", "SAM", "SECURITY",
+            "$MFT", "places.sqlite", "History",
+        ],
+        "available":        True,
+    },
+    {
+        "id":               "yara",
+        "name":             "YARA Scanner",
+        "description":      "Scan files with a built-in ruleset of common malware, packer, "
+                            "and threat-hunting YARA signatures",
+        "input_extensions": [],   # accepts ALL files
+        "input_filenames":  [],
+        "available":        True,
+    },
+    {
+        "id":               "exiftool",
+        "name":             "ExifTool",
+        "description":      "Extract metadata from documents, images, executables and office files "
+                            "(author, timestamps, GPS, camera model, embedded macros…)",
+        "input_extensions": [
+            ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+            ".jpg", ".jpeg", ".png", ".tiff", ".tif", ".gif", ".bmp",
+            ".exe", ".dll", ".sys", ".so",
+        ],
+        "input_filenames":  [],
+        "available":        True,
+    },
+    {
+        "id":               "bulk_extractor",
+        "name":             "Bulk Extractor",
+        "description":      "Carve forensic artifacts from raw binary images — email addresses, "
+                            "URLs, credit cards, phone numbers, GPS coordinates, domain names",
+        "input_extensions": [
+            ".dd", ".img", ".iso", ".raw", ".bin", ".vmdk",
+            ".e01", ".s01", ".ex01",
+        ],
+        "input_filenames":  [],
+        "available":        False,
+        "unavailable_reason": "Coming soon — binary packaging in progress.",
+    },
+    {
+        "id":               "capa",
+        "name":             "CAPA",
+        "description":      "Detect capabilities in PE files and shellcode — identifies malware "
+                            "behaviors mapped to MITRE ATT&CK and MBC",
+        "input_extensions": [".exe", ".dll", ".sys", ".bin", ".so"],
+        "input_filenames":  [],
+        "available":        False,
+        "unavailable_reason": "Coming soon.",
     },
 ]
 

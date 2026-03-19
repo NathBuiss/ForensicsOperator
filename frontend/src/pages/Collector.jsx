@@ -10,6 +10,7 @@ import {
   Monitor, Terminal, FileCode, Download, Check,
   ChevronRight, ChevronLeft, Wifi, RefreshCw,
   PackageOpen, AlertTriangle, Globe, Loader2, Trash2,
+  Info,
 } from 'lucide-react'
 import { api } from '../api/client'
 
@@ -88,6 +89,7 @@ export default function Collector() {
   const [netIps, setNetIps]           = useState([])
   const [inK8s, setInK8s]             = useState(false)
   const [netLoading, setNetLoading]   = useState(false)
+  const [ipHint, setIpHint]           = useState(null)   // FO_PUBLIC_URL hint from backend
   const [ingress, setIngress]         = useState(null)   // {status, external_ip, external_url}
   const [ingressBusy, setIngressBusy] = useState(false)
   const [downloading, setDownloading] = useState(false)

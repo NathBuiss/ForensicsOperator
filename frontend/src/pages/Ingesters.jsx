@@ -1,25 +1,23 @@
 import { useEffect, useState, useRef } from 'react'
 import {
   Puzzle, Upload, RefreshCw, FileCode2, X,
-  CheckCircle, AlertCircle, Copy, Check, Lock,
+  CheckCircle, AlertCircle, Copy, Check, Lock, Clock,
 } from 'lucide-react'
 import { api } from '../api/client'
 
 // ── Built-in ingester registry (mirrors processor/plugins/) ──────────────────
+// available: true  → plugin ships with ForensicsOperator (active by default)
+// available: false → planned / coming soon
 const BUILTIN_INGESTERS = [
+  // ── Windows artifacts ───────────────────────────────────────────────────
   {
     name: 'evtx',
     label: 'EVTX',
     description: 'Windows Event Log files — Security, System, Application and custom channels',
     extensions: ['.evtx'],
     filenames: [],
-  },
-  {
-    name: 'plaso',
-    label: 'Plaso',
-    description: 'Log2Timeline/Plaso timeline artifacts — multi-source supertimeline',
-    extensions: ['.plaso'],
-    filenames: [],
+    available: true,
+    category: 'Windows',
   },
   {
     name: 'prefetch',
@@ -27,6 +25,8 @@ const BUILTIN_INGESTERS = [
     description: 'Windows Prefetch files — application execution history',
     extensions: ['.pf'],
     filenames: [],
+    available: true,
+    category: 'Windows',
   },
   {
     name: 'mft',
@@ -34,6 +34,8 @@ const BUILTIN_INGESTERS = [
     description: 'NTFS Master File Table — complete filesystem metadata and timestamps',
     extensions: [],
     filenames: ['$MFT'],
+    available: true,
+    category: 'Windows',
   },
   {
     name: 'registry',
@@ -41,6 +43,8 @@ const BUILTIN_INGESTERS = [
     description: 'Windows Registry hives — NTUSER.DAT, SYSTEM, SOFTWARE, SAM, SECURITY',
     extensions: ['.dat', '.hive'],
     filenames: ['NTUSER.DAT', 'SYSTEM', 'SOFTWARE', 'SAM', 'SECURITY', 'USRCLASS.DAT'],
+    available: true,
+    category: 'Windows',
   },
   {
     name: 'lnk',
@@ -48,6 +52,19 @@ const BUILTIN_INGESTERS = [
     description: 'Windows Shortcut (.lnk) files — target paths, timestamps, volume info',
     extensions: ['.lnk'],
     filenames: [],
+    available: true,
+    category: 'Windows',
+  },
+
+  // ── Timeline / multi-source ─────────────────────────────────────────────
+  {
+    name: 'plaso',
+    label: 'Plaso',
+    description: 'Log2Timeline/Plaso .plaso storage files — multi-source supertimeline',
+    extensions: ['.plaso'],
+    filenames: [],
+    available: true,
+    category: 'Timeline',
   },
   {
     name: 'hayabusa',
@@ -55,6 +72,92 @@ const BUILTIN_INGESTERS = [
     description: 'Hayabusa JSONL / CSV output — import pre-generated Sigma detection results',
     extensions: ['.jsonl', '.csv'],
     filenames: [],
+    available: true,
+    category: 'Windows',
+  },
+
+  // ── Network artifacts ───────────────────────────────────────────────────
+  {
+    name: 'suricata',
+    label: 'Suricata EVE JSON',
+    description: 'Suricata IDS/IPS EVE JSON logs — alerts, DNS, HTTP, TLS, SSH, flows and more',
+    extensions: ['.json', '.jsonl', '.ndjson'],
+    filenames: ['eve.json', 'eve.log'],
+    available: true,
+    category: 'Network',
+  },
+  {
+    name: 'zeek',
+    label: 'Zeek / Bro Logs',
+    description: 'Zeek network analysis logs — conn, dns, http, ssl, ssh, files and custom log types',
+    extensions: ['.log'],
+    filenames: ['conn.log', 'dns.log', 'http.log', 'ssl.log', 'ssh.log', 'files.log'],
+    available: true,
+    category: 'Network',
+  },
+
+  // ── Linux / UNIX artifacts ───────────────────────────────────────────────
+  {
+    name: 'syslog',
+    label: 'Linux Syslog',
+    description: 'RFC 3164 / RFC 5424 syslog files — auth.log, kern.log, daemon.log, messages, dmesg…',
+    extensions: ['.log'],
+    filenames: ['syslog', 'auth.log', 'kern.log', 'daemon.log', 'messages', 'secure'],
+    available: true,
+    category: 'Linux',
+  },
+
+  // ── Generic ─────────────────────────────────────────────────────────────
+  {
+    name: 'ndjson',
+    label: 'JSON Lines / NDJSON',
+    description: 'Generic NDJSON / JSON Lines files — auto-detects timestamps and message fields',
+    extensions: ['.jsonl', '.ndjson'],
+    filenames: [],
+    available: true,
+    category: 'Generic',
+  },
+
+  // ── Planned ─────────────────────────────────────────────────────────────
+  {
+    name: 'apache',
+    label: 'Apache / Nginx Access Logs',
+    description: 'Combined / common log format HTTP access logs from Apache or Nginx',
+    extensions: ['.log'],
+    filenames: ['access.log', 'access_log', 'error.log'],
+    available: false,
+    unavailableReason: 'Coming soon.',
+    category: 'Network',
+  },
+  {
+    name: 'iis',
+    label: 'Windows IIS Logs',
+    description: 'Microsoft IIS W3C extended log format — web server access logs',
+    extensions: ['.log'],
+    filenames: [],
+    available: false,
+    unavailableReason: 'Coming soon.',
+    category: 'Windows',
+  },
+  {
+    name: 'macos_ulog',
+    label: 'macOS Unified Log',
+    description: 'macOS Unified Logging (ULS) — system and app logs from Apple Silicon / Intel Macs',
+    extensions: ['.logarchive', '.tracev3'],
+    filenames: [],
+    available: false,
+    unavailableReason: 'Requires macOS host for log show / osxtools — coming soon.',
+    category: 'macOS',
+  },
+  {
+    name: 'android_logcat',
+    label: 'Android Logcat',
+    description: 'Android logcat output — system and app messages from Android devices',
+    extensions: ['.log', '.txt'],
+    filenames: ['logcat.txt', 'logcat.log'],
+    available: false,
+    unavailableReason: 'Coming soon.',
+    category: 'Mobile',
   },
 ]
 
@@ -271,9 +374,17 @@ export default function Ingesters() {
     setLoading(true)
     api.plugins.list()
       .then(r => {
-        // Exclude built-in ingesters (they're shown separately)
-        const builtinNames = new Set(BUILTIN_INGESTERS.map(b => b.name))
-        const custom = (r.plugins || []).filter(p => !builtinNames.has(p.name))
+        // Exclude built-in ingesters (shown in the built-in section above).
+        // Match case-insensitively against both `name` and `default_artifact_type`
+        // to handle any casing differences between the plugin registry and the API.
+        const builtinKeys = new Set(
+          BUILTIN_INGESTERS.flatMap(b => [b.name.toLowerCase(), (b.name).toLowerCase()])
+        )
+        const custom = (r.plugins || []).filter(p => {
+          const pName = (p.name || '').toLowerCase().trim()
+          const pArt  = (p.default_artifact_type || '').toLowerCase().trim()
+          return !builtinKeys.has(pName) && !builtinKeys.has(pArt)
+        })
         setCustomPlugins(custom)
       })
       .catch(() => {})
@@ -286,8 +397,12 @@ export default function Ingesters() {
     setReloading(true)
     try {
       const r = await api.plugins.reload()
-      const builtinNames = new Set(BUILTIN_INGESTERS.map(b => b.name))
-      const custom = (r.plugins || []).filter(p => !builtinNames.has(p.name))
+      const builtinKeys = new Set(BUILTIN_INGESTERS.flatMap(b => [b.name.toLowerCase()]))
+      const custom = (r.plugins || []).filter(p => {
+        const pName = (p.name || '').toLowerCase().trim()
+        const pArt  = (p.default_artifact_type || '').toLowerCase().trim()
+        return !builtinKeys.has(pName) && !builtinKeys.has(pArt)
+      })
       setCustomPlugins(custom)
     } catch (e) {
       alert('Reload failed: ' + e.message)
@@ -325,46 +440,81 @@ export default function Ingesters() {
       <section className="mb-8">
         <div className="flex items-center gap-2 mb-3">
           <h2 className="section-title">Built-in Ingesters</h2>
-          <span className="badge bg-gray-100 text-gray-500 border border-gray-200">
-            {BUILTIN_INGESTERS.length}
+          <span className="badge bg-green-50 text-green-700 border border-green-200">
+            {BUILTIN_INGESTERS.filter(b => b.available !== false).length} active
           </span>
+          {BUILTIN_INGESTERS.some(b => b.available === false) && (
+            <span className="badge bg-gray-100 text-gray-500 border border-gray-200">
+              {BUILTIN_INGESTERS.filter(b => b.available === false).length} planned
+            </span>
+          )}
         </div>
         <div className="space-y-2">
-          {BUILTIN_INGESTERS.map(ing => (
-            <div key={ing.name} className="card p-4">
-              <div className="flex items-start justify-between gap-4">
-                <div className="flex items-start gap-3">
-                  <div className="w-8 h-8 rounded-lg bg-brand-accentlight border border-brand-accent/20 flex items-center justify-center flex-shrink-0 mt-0.5">
-                    <Puzzle size={14} className="text-brand-accent" />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-sm font-semibold text-brand-text">{ing.label}</span>
-                      <span className="badge bg-green-50 text-green-700 border border-green-200">
-                        <CheckCircle size={9} className="mr-1" /> active
-                      </span>
-                      <span className="badge bg-gray-100 text-gray-400 border border-gray-200 text-[10px] flex items-center gap-1">
-                        <Lock size={8} /> built-in
-                      </span>
+          {BUILTIN_INGESTERS.map(ing => {
+            const isAvailable = ing.available !== false
+            return (
+              <div key={ing.name} className={`card p-4 ${isAvailable ? '' : 'opacity-60'}`}>
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex items-start gap-3">
+                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 ${
+                      isAvailable
+                        ? 'bg-brand-accentlight border border-brand-accent/20'
+                        : 'bg-gray-100 border border-gray-200'
+                    }`}>
+                      <Puzzle size={14} className={isAvailable ? 'text-brand-accent' : 'text-gray-400'} />
                     </div>
-                    <p className="text-xs text-gray-500">{ing.description}</p>
+                    <div>
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
+                        <span className={`text-sm font-semibold ${isAvailable ? 'text-brand-text' : 'text-gray-400'}`}>
+                          {ing.label}
+                        </span>
+                        {isAvailable ? (
+                          <span className="badge bg-green-50 text-green-700 border border-green-200">
+                            <CheckCircle size={9} className="mr-1" /> active
+                          </span>
+                        ) : (
+                          <span className="badge bg-amber-50 text-amber-600 border border-amber-200">
+                            <Clock size={9} className="mr-1" /> coming soon
+                          </span>
+                        )}
+                        <span className="badge bg-gray-100 text-gray-400 border border-gray-200 text-[10px] flex items-center gap-1">
+                          <Lock size={8} /> built-in
+                        </span>
+                        {ing.category && (
+                          <span className="badge bg-blue-50 text-blue-600 border border-blue-100 text-[10px]">
+                            {ing.category}
+                          </span>
+                        )}
+                      </div>
+                      <p className={`text-xs ${isAvailable ? 'text-gray-500' : 'text-gray-400'}`}>
+                        {ing.description}
+                      </p>
+                      {!isAvailable && ing.unavailableReason && (
+                        <p className="text-[10px] text-gray-400 italic mt-0.5">{ing.unavailableReason}</p>
+                      )}
+                    </div>
                   </div>
-                </div>
-                <div className="flex flex-wrap gap-1 justify-end max-w-xs">
-                  {ing.extensions.map(ext => (
-                    <span key={ext} className="badge bg-gray-100 text-gray-600 border border-gray-200 font-mono">
-                      {ext}
-                    </span>
-                  ))}
-                  {ing.filenames.map(fn => (
-                    <span key={fn} className="badge bg-gray-100 text-gray-600 border border-gray-200 font-mono">
-                      {fn}
-                    </span>
-                  ))}
+                  <div className="flex flex-wrap gap-1 justify-end max-w-xs">
+                    {ing.extensions.map(ext => (
+                      <span key={ext} className="badge bg-gray-100 text-gray-600 border border-gray-200 font-mono">
+                        {ext}
+                      </span>
+                    ))}
+                    {ing.filenames.slice(0, 3).map(fn => (
+                      <span key={fn} className="badge bg-gray-100 text-gray-600 border border-gray-200 font-mono">
+                        {fn}
+                      </span>
+                    ))}
+                    {ing.filenames.length > 3 && (
+                      <span className="badge bg-gray-100 text-gray-500 border border-gray-200">
+                        +{ing.filenames.length - 3}
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       </section>
 
@@ -385,8 +535,12 @@ export default function Ingesters() {
         </p>
 
         <UploadZone onUploaded={plugins => {
-          const builtinNames = new Set(BUILTIN_INGESTERS.map(b => b.name))
-          setCustomPlugins((plugins || []).filter(p => !builtinNames.has(p.name)))
+          const builtinKeys = new Set(BUILTIN_INGESTERS.flatMap(b => [b.name.toLowerCase()]))
+          setCustomPlugins((plugins || []).filter(p => {
+            const pName = (p.name || '').toLowerCase().trim()
+            const pArt  = (p.default_artifact_type || '').toLowerCase().trim()
+            return !builtinKeys.has(pName) && !builtinKeys.has(pArt)
+          }))
         }} />
 
         {loading ? (

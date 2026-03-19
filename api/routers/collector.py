@@ -122,7 +122,7 @@ def _parse_ip_addr() -> list[dict]:
 
 
 def _detect_gateway_ip() -> Optional[str]:
-    """Default gateway = Docker host on bridge networks."""
+    """Default gateway — on Docker bridge networks this is the host machine's docker bridge IP."""
     try:
         out = subprocess.check_output(
             ["ip", "route", "show", "default"], text=True, timeout=3,
@@ -145,6 +145,59 @@ def _detect_outbound_ip() -> Optional[str]:
         return ip
     except Exception:
         return None
+
+
+def _resolve_host_docker_internal() -> Optional[str]:
+    """
+    Resolve host.docker.internal — set automatically by Docker Desktop on Mac/Windows.
+
+    On Linux Docker with bridge networking this hostname may not be set unless
+    '--add-host=host-gateway' is in the run flags. Returns None if not resolvable.
+    """
+    try:
+        addr = socket.gethostbyname("host.docker.internal")
+        if addr and not addr.startswith("127."):
+            return addr
+    except (socket.gaierror, OSError):
+        pass
+    # Also scan /etc/hosts for Docker-injected entries
+    try:
+        for line in Path("/etc/hosts").read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "host.docker.internal" in line or "host-gateway" in line:
+                parts = line.split()
+                if parts and not parts[0].startswith("127."):
+                    return parts[0]
+    except Exception:
+        pass
+    return None
+
+
+def _ip_label(ip: str) -> str:
+    """Return a human-readable label for an IP based on its range."""
+    if ip.startswith("172."):
+        return "docker bridge"
+    if ip.startswith("192.168."):
+        return "LAN"
+    if ip.startswith("10."):
+        return "private network"
+    if ip.startswith("169.254."):
+        return "link-local"
+    return "interface"
+
+
+def _only_docker_ips(candidates: list[dict]) -> bool:
+    """Return True if all detected IPs (excluding FO_PUBLIC_URL) are Docker-internal."""
+    non_config = [c for c in candidates if c.get("iface") != "FO_PUBLIC_URL"]
+    if not non_config:
+        return False
+    return all(
+        c["ip"].startswith("172.") or c["ip"].startswith("10.")
+        for c in non_config
+        if not c.get("k8s")
+    )
 
 
 def _is_kubernetes() -> bool:
@@ -222,28 +275,37 @@ def get_network_interfaces():
         for entry in _get_k8s_service_ips():
             _add(entry["ip"], entry["label"], entry["iface"], k8s=True)
 
-    # 3. All non-loopback interface IPs (from ip addr)
+    # 3. host.docker.internal — Docker Desktop Mac/Windows injects the host IP here
+    host_docker = _resolve_host_docker_internal()
+    if host_docker:
+        _add(host_docker, "host machine (Docker Desktop)", "host.docker.internal")
+
+    # 4. All non-loopback interface IPs (from ip addr)
     for entry in _parse_ip_addr():
-        # Distinguish Docker bridge (172.x) from real LAN (192.168.x / 10.x)
-        ip = entry["ip"]
-        if ip.startswith("172."):
-            label = "docker bridge"
-        elif ip.startswith("10.") or ip.startswith("192.168."):
-            label = "LAN"
-        else:
-            label = "interface"
-        _add(ip, label, entry["iface"])
+        _add(entry["ip"], _ip_label(entry["ip"]), entry["iface"])
 
-    # 4. Default gateway (Docker host on bridge networks)
-    _add(_detect_gateway_ip(), "docker host", "gateway")
+    # 5. Default gateway (Docker bridge host on Linux Docker)
+    gw = _detect_gateway_ip()
+    if gw:
+        # Only show the gateway if it's not already in the list
+        _add(gw, "docker host (gateway)", "gateway")
 
-    # 5. Outbound IP (fallback)
+    # 6. Outbound socket IP (last resort)
     _add(_detect_outbound_ip(), "outbound", "socket")
 
+    # Attach a helper flag so the frontend can show a "set FO_PUBLIC_URL" tip
+    only_internal = _only_docker_ips(candidates)
+
     return {
-        "candidates":  candidates,
-        "port":        int(_API_PORT),
-        "in_kubernetes": _is_kubernetes(),
+        "candidates":     candidates,
+        "port":           int(_API_PORT),
+        "in_kubernetes":  _is_kubernetes(),
+        "only_docker_ips": only_internal,
+        "public_url_hint": (
+            "No external IP detected. Set FO_PUBLIC_URL=http://<your-lan-ip>:8000 "
+            "in docker-compose.yml for collectors to reach this server."
+            if only_internal and not _is_kubernetes() else None
+        ),
     }
 
 

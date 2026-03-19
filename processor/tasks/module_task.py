@@ -98,11 +98,14 @@ def run_module(
 
         # ── 2. Run module ─────────────────────────────────────────────────────
         RUNNERS = {
-            "hayabusa":  _run_hayabusa,
-            "strings":   _run_strings,
-            "hindsight": _run_hindsight,
-            "regripper": _run_regripper,
-            "wintriage": _run_wintriage,
+            "hayabusa":    _run_hayabusa,
+            "strings":     _run_strings,
+            "hindsight":   _run_hindsight,
+            "regripper":   _run_regripper,
+            "wintriage":   _run_wintriage,
+            "log2timeline": _run_log2timeline,
+            "yara":        _run_yara,
+            "exiftool":    _run_exiftool,
         }
         runner = RUNNERS.get(module_id)
         if not runner:
@@ -977,5 +980,487 @@ def _run_wintriage(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]
 
         logger.info("[%s] %s → %d hits", run_id, file_path.name, len(hits))
         results.extend(hits)
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# log2timeline → Plaso
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_log2timeline(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
+    """
+    Run log2timeline.py on the sources directory to produce a .plaso supertimeline,
+    then parse the .plaso file using the existing Plaso ingester plugin.
+    """
+    l2t_bin = shutil.which("log2timeline.py") or shutil.which("log2timeline")
+    psort_bin = shutil.which("psort.py") or shutil.which("psort")
+
+    if not l2t_bin:
+        raise RuntimeError(
+            "log2timeline not found. Ensure plaso is installed in the processor image "
+            "(pip install plaso or install via system package)."
+        )
+
+    plaso_out = work_dir / "timeline.plaso"
+    cmd = [
+        l2t_bin,
+        "--status_view", "none",
+        "-z", "UTC",
+        str(plaso_out),
+        str(sources_dir),
+    ]
+
+    logger.info("[%s] Running: %s", run_id, " ".join(cmd))
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("log2timeline timed out after 2 hours")
+
+    if not plaso_out.exists() or plaso_out.stat().st_size == 0:
+        raise RuntimeError(
+            f"log2timeline produced no output (code {proc.returncode}): "
+            f"{(proc.stderr or proc.stdout or '')[:500]}"
+        )
+
+    logger.info("[%s] .plaso file: %d bytes", run_id, plaso_out.stat().st_size)
+
+    # Export to JSONL via psort for easy parsing
+    if psort_bin:
+        jsonl_out = work_dir / "timeline.jsonl"
+        psort_cmd = [
+            psort_bin,
+            "--status_view", "none",
+            "-z", "UTC",
+            "-o", "json_line",
+            "-w", str(jsonl_out),
+            str(plaso_out),
+        ]
+        logger.info("[%s] Running psort: %s", run_id, " ".join(psort_cmd))
+        try:
+            subprocess.run(psort_cmd, capture_output=True, text=True, timeout=3600)
+        except subprocess.TimeoutExpired:
+            logger.warning("[%s] psort timed out, falling back to .plaso plugin", run_id)
+            jsonl_out = None
+
+        if jsonl_out and jsonl_out.exists():
+            return _parse_plaso_jsonl(jsonl_out)
+
+    # Fallback: use the Plaso plugin to read the .plaso file directly
+    return _parse_plaso_file_direct(run_id, plaso_out)
+
+
+def _parse_plaso_jsonl(jsonl_path: Path) -> list[dict]:
+    """Parse psort JSON lines output into module hits."""
+    results: list[dict] = []
+    try:
+        with open(jsonl_path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    ts  = obj.get("datetime", obj.get("timestamp", ""))
+                    msg = obj.get("message", obj.get("description", ""))
+                    src = obj.get("source", obj.get("source_short", ""))
+                    host = obj.get("hostname", obj.get("computer_name", ""))
+                    results.append({
+                        "id":          str(uuid.uuid4()),
+                        "timestamp":   ts,
+                        "level":       "informational",
+                        "level_int":   1,
+                        "rule_title":  src or "Plaso Event",
+                        "computer":    host,
+                        "details_raw": msg[:500] if msg else "",
+                    })
+                except Exception:
+                    continue
+    except OSError as exc:
+        logger.warning("Cannot read psort output: %s", exc)
+    return results
+
+
+def _parse_plaso_file_direct(run_id: str, plaso_path: Path) -> list[dict]:
+    """Use the Plaso ingester plugin to read the .plaso file directly."""
+    sys_plugins_dir = Path("/app/plugins")
+    if str(sys_plugins_dir.parent) not in __import__("sys").path:
+        __import__("sys").path.insert(0, str(sys_plugins_dir.parent))
+
+    try:
+        from plugins.plaso.plaso_plugin import PlasoPlugin
+        from plugins.base_plugin import PluginContext
+
+        ctx = PluginContext(
+            case_id="module",
+            job_id=run_id,
+            source_file_path=plaso_path,
+            source_minio_url="",
+        )
+        plugin = PlasoPlugin(ctx)
+        plugin.setup()
+        results: list[dict] = []
+        for ev in plugin.parse():
+            results.append({
+                "id":          ev.get("fo_id", str(uuid.uuid4())),
+                "timestamp":   ev.get("timestamp", ""),
+                "level":       "informational",
+                "level_int":   1,
+                "rule_title":  ev.get("artifact_type", "plaso"),
+                "computer":    ev.get("host", {}).get("hostname", "") if isinstance(ev.get("host"), dict) else "",
+                "details_raw": ev.get("message", "")[:500],
+            })
+        plugin.teardown()
+        return results
+    except Exception as exc:
+        logger.warning("[%s] Direct Plaso parse failed: %s", run_id, exc)
+        return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# YARA Scanner
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Inline ruleset — common malware patterns and suspicious indicators
+_YARA_RULES_SOURCE = r"""
+rule SuspiciousPE_Packer {
+    meta:
+        description = "Detects common PE packer signatures"
+        severity = "medium"
+    strings:
+        $upx0 = "UPX0" ascii
+        $upx1 = "UPX1" ascii
+        $upx2 = "UPX2" ascii
+        $aspack = "ASPack" ascii
+        $fsg = ".ndata" ascii
+        $mpress = "MPRESS1" ascii
+    condition:
+        2 of them
+}
+
+rule SuspiciousScript_PowerShellEncoded {
+    meta:
+        description = "Detects base64-encoded PowerShell commands"
+        severity = "high"
+    strings:
+        $enc1 = "-EncodedCommand" ascii nocase
+        $enc2 = "-encodedcommand" ascii nocase
+        $enc3 = "FromBase64String" ascii nocase
+        $enc4 = "JABlAG4AYwBvAGQA" ascii   // base64 of "$encod"
+        $iex1 = "Invoke-Expression" ascii nocase
+        $iex2 = "IEX(" ascii nocase
+    condition:
+        any of ($enc*) or any of ($iex*)
+}
+
+rule SuspiciousShell_ReverseShell {
+    meta:
+        description = "Detects common reverse shell patterns"
+        severity = "critical"
+    strings:
+        $nc1  = "nc -e /bin/bash" ascii nocase
+        $nc2  = "nc -e /bin/sh" ascii nocase
+        $nc3  = "/bin/bash -i >& /dev/tcp/" ascii
+        $nc4  = "bash -i >& /dev/tcp/" ascii
+        $perl = "perl -e 'use Socket" ascii nocase
+        $py1  = "python -c 'import socket" ascii nocase
+        $py2  = "python3 -c 'import socket" ascii nocase
+    condition:
+        any of them
+}
+
+rule SuspiciousStrings_Credentials {
+    meta:
+        description = "Detects hard-coded credential patterns"
+        severity = "high"
+    strings:
+        $pass1 = "password=" ascii nocase
+        $pass2 = "passwd=" ascii nocase
+        $pass3 = "pwd=" ascii nocase
+        $api1  = "api_key" ascii nocase
+        $api2  = "apikey" ascii nocase
+        $sec1  = "secret_key" ascii nocase
+        $sec2  = "aws_secret" ascii nocase
+        $tok1  = "bearer " ascii nocase
+    condition:
+        2 of them
+}
+
+rule Mimikatz_Indicators {
+    meta:
+        description = "Detects Mimikatz credential dumping tool signatures"
+        severity = "critical"
+    strings:
+        $s1 = "mimikatz" ascii nocase
+        $s2 = "sekurlsa::" ascii nocase
+        $s3 = "lsadump::" ascii nocase
+        $s4 = "kerberos::" ascii nocase
+        $s5 = "privilege::debug" ascii nocase
+        $s6 = "SamSs" ascii wide
+        $s7 = "wdigest" ascii wide
+    condition:
+        2 of them
+}
+
+rule Webshell_PHP {
+    meta:
+        description = "Detects common PHP webshell patterns"
+        severity = "critical"
+    strings:
+        $p1 = "eval(base64_decode(" ascii nocase
+        $p2 = "eval(gzinflate(" ascii nocase
+        $p3 = "eval(str_rot13(" ascii nocase
+        $p4 = "eval($_POST[" ascii nocase
+        $p5 = "system($_GET[" ascii nocase
+        $p6 = "exec($_REQUEST[" ascii nocase
+        $p7 = "passthru($_" ascii nocase
+    condition:
+        any of them
+}
+
+rule Ransomware_ExtensionTargets {
+    meta:
+        description = "Detects ransomware-like file extension targeting patterns"
+        severity = "high"
+    strings:
+        $ext1 = ".docx,.xlsx,.pptx" ascii nocase
+        $ext2 = "encrypt" ascii nocase
+        $ext3 = "ransom" ascii nocase
+        $ext4 = "YOUR_FILES_ARE_ENCRYPTED" ascii nocase
+        $ext5 = "HOW_TO_DECRYPT" ascii nocase
+        $ext6 = "RECOVERY_KEY" ascii nocase
+    condition:
+        2 of them
+}
+"""
+
+
+def _run_yara(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
+    """Scan source files with YARA rules."""
+    try:
+        import yara
+    except ImportError:
+        # Try system binary as fallback
+        yara_bin = shutil.which("yara")
+        if not yara_bin:
+            raise RuntimeError(
+                "yara-python is not installed and the yara CLI binary is not in PATH. "
+                "Ensure yara-python is installed in the processor image (pip install yara-python)."
+            )
+        return _run_yara_cli(run_id, work_dir, sources_dir, yara_bin)
+
+    # Compile inline rules
+    try:
+        rules = yara.compile(source=_YARA_RULES_SOURCE)
+    except yara.SyntaxError as exc:
+        raise RuntimeError(f"YARA rule compilation failed: {exc}") from exc
+
+    _SEVERITY_MAP = {
+        "critical": ("critical", 5),
+        "high":     ("high",     4),
+        "medium":   ("medium",   3),
+        "low":      ("low",      2),
+    }
+
+    results: list[dict] = []
+
+    for file_path in sorted(sources_dir.iterdir()):
+        if not file_path.is_file():
+            continue
+        logger.info("[%s] YARA scanning: %s", run_id, file_path.name)
+        try:
+            matches = rules.match(str(file_path), timeout=60)
+        except yara.TimeoutError:
+            logger.warning("[%s] YARA timeout on %s", run_id, file_path.name)
+            continue
+        except Exception as exc:
+            logger.debug("[%s] YARA error on %s: %s", run_id, file_path.name, exc)
+            continue
+
+        for match in matches:
+            sev_raw  = (match.meta.get("severity") or "medium").lower()
+            level, lint = _SEVERITY_MAP.get(sev_raw, ("medium", 3))
+            description = match.meta.get("description", "")
+            strings_info = ", ".join(
+                f"{s.identifier}@{s.instances[0].offset:#x}" if s.instances else s.identifier
+                for s in match.strings[:5]
+            )
+            results.append({
+                "id":           str(uuid.uuid4()),
+                "timestamp":    "",
+                "level":        level,
+                "level_int":    lint,
+                "rule_title":   match.rule,
+                "computer":     file_path.name,
+                "details_raw":  f"{description}  [{strings_info}]",
+                "yara_rule":    match.rule,
+                "yara_tags":    list(match.tags),
+                "yara_strings": strings_info,
+            })
+
+    if not results:
+        results.append({
+            "id":          str(uuid.uuid4()),
+            "timestamp":   "",
+            "level":       "informational",
+            "level_int":   1,
+            "rule_title":  "YARA: No matches",
+            "computer":    "",
+            "details_raw": "No YARA rules matched the submitted files.",
+        })
+
+    return results
+
+
+def _run_yara_cli(run_id: str, work_dir: Path, sources_dir: Path, yara_bin: str) -> list[dict]:
+    """Fallback: use the yara CLI binary."""
+    rules_file = work_dir / "rules.yar"
+    rules_file.write_text(_YARA_RULES_SOURCE)
+
+    results: list[dict] = []
+
+    for file_path in sorted(sources_dir.iterdir()):
+        if not file_path.is_file():
+            continue
+        try:
+            proc = subprocess.run(
+                [yara_bin, "-s", str(rules_file), str(file_path)],
+                capture_output=True, text=True, timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            continue
+
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(" ", 1)
+            rule = parts[0]
+            results.append({
+                "id":          str(uuid.uuid4()),
+                "timestamp":   "",
+                "level":       "medium",
+                "level_int":   3,
+                "rule_title":  rule,
+                "computer":    file_path.name,
+                "details_raw": line,
+            })
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ExifTool
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_exiftool(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
+    """Extract metadata from files using ExifTool."""
+    exiftool_bin = shutil.which("exiftool")
+    if not exiftool_bin:
+        raise RuntimeError(
+            "exiftool not found in PATH. Ensure ExifTool is installed in the processor image "
+            "(apt-get install libimage-exiftool-perl, or download from exiftool.org)."
+        )
+
+    results: list[dict] = []
+
+    for file_path in sorted(sources_dir.iterdir()):
+        if not file_path.is_file():
+            continue
+
+        logger.info("[%s] ExifTool: %s", run_id, file_path.name)
+        try:
+            proc = subprocess.run(
+                [exiftool_bin, "-json", "-l", "-a", "-G1", str(file_path)],
+                capture_output=True, text=True, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("[%s] ExifTool timed out on %s", run_id, file_path.name)
+            continue
+
+        if not proc.stdout.strip():
+            continue
+
+        try:
+            data = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            continue
+
+        if not data or not isinstance(data, list):
+            continue
+
+        meta: dict = data[0]
+
+        # Try to extract a meaningful timestamp
+        ts = (
+            meta.get("EXIF:DateTimeOriginal", {}).get("val")
+            or meta.get("XMP:CreateDate", {}).get("val")
+            or meta.get("QuickTime:CreateDate", {}).get("val")
+            or meta.get("PDF:CreateDate", {}).get("val")
+            or meta.get("File:FileModifyDate", {}).get("val")
+            or ""
+        )
+
+        # Author / creator
+        author = (
+            meta.get("EXIF:Artist", {}).get("val")
+            or meta.get("XMP:Creator", {}).get("val")
+            or meta.get("PDF:Author", {}).get("val")
+            or meta.get("Office:Author", {}).get("val")
+            or ""
+        )
+
+        # Software
+        software = (
+            meta.get("EXIF:Software", {}).get("val")
+            or meta.get("XMP:CreatorTool", {}).get("val")
+            or meta.get("PDF:Producer", {}).get("val")
+            or ""
+        )
+
+        # GPS
+        gps_lat = meta.get("EXIF:GPSLatitude", {}).get("val", "")
+        gps_lon = meta.get("EXIF:GPSLongitude", {}).get("val", "")
+
+        # Build details string from interesting fields
+        interesting = []
+        _INTERESTING_FIELDS = [
+            "EXIF:Make", "EXIF:Model", "EXIF:GPSLatitude", "EXIF:GPSLongitude",
+            "XMP:Subject", "XMP:Description", "PDF:Title", "PDF:Subject",
+            "Office:LastModifiedBy", "Office:AppVersion",
+            "File:MIMEType", "File:FileSize",
+            "Composite:GPSPosition",
+        ]
+        for field in _INTERESTING_FIELDS:
+            val_obj = meta.get(field, {})
+            val = val_obj.get("val") if isinstance(val_obj, dict) else val_obj
+            if val:
+                interesting.append(f"{field.split(':')[1]}: {val}")
+
+        details = " | ".join(interesting[:10]) if interesting else f"File: {file_path.name}"
+
+        # Embed macros or suspicious fields
+        has_macros = any(
+            "macro" in k.lower() or "vba" in k.lower()
+            for k in meta.keys()
+        )
+        level     = "medium" if has_macros else "informational"
+        level_int = 3 if has_macros else 1
+
+        results.append({
+            "id":          str(uuid.uuid4()),
+            "timestamp":   ts,
+            "level":       level,
+            "level_int":   level_int,
+            "rule_title":  f"ExifTool: {file_path.name}",
+            "computer":    author or "",
+            "details_raw": details,
+            "exiftool": {
+                "author":    author,
+                "software":  software,
+                "gps":       f"{gps_lat}, {gps_lon}" if gps_lat and gps_lon else "",
+                "has_macros": has_macros,
+            },
+        })
 
     return results
