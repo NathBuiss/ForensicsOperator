@@ -175,11 +175,12 @@ def _run_hayabusa(run_id: str, work_dir: Path, sources_dir: Path) -> list[dict]:
     output_jsonl = work_dir / "hayabusa_output.jsonl"
     cmd = [
         hayabusa_bin, "json-timeline",
+        "--no-wizard",           # required: suppress interactive prompts
         "-d", str(sources_dir),
         "-r", str(_HAYABUSA_RULES_DIR),
         "-o", str(output_jsonl),
         "--no-color",
-        "--quiet",               # suppress progress bars (3.x flag, replaces -q)
+        "--quiet",
         "--min-level", "informational",  # capture ALL severity levels
     ]
 

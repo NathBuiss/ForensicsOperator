@@ -527,7 +527,28 @@ export default function Collector() {
                     </div>
                   )}
                   {ingress?.status === 'error' && (
-                    <p className="text-[11px] text-red-500 mt-1">{ingress.error}</p>
+                    <div className="mt-2 space-y-1">
+                      <p className="text-[11px] text-red-500">{ingress.error}</p>
+                      {ingress.error?.includes('403') || ingress.error?.includes('forbidden') ? (
+                        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-[11px] text-amber-800 space-y-2">
+                          <p className="font-medium flex items-center gap-1.5">
+                            <Info size={11} /> RBAC permission required
+                          </p>
+                          <p>The pod's service account needs permission to create Services. Apply the RBAC manifest once:</p>
+                          <code className="block bg-amber-100 rounded px-2 py-1.5 font-mono text-[10px] break-all select-all">
+                            kubectl apply -f "{api.collector.rbacUrl()}"
+                          </code>
+                          <a
+                            href={api.collector.rbacUrl()}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 text-amber-700 hover:text-amber-900 underline"
+                          >
+                            Download fo-rbac.yaml
+                          </a>
+                        </div>
+                      ) : null}
+                    </div>
                   )}
                 </div>
               )}

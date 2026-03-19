@@ -462,6 +462,45 @@ def get_collector_ingress():
     return _get_lb_status()
 
 
+@router.get("/collector/ingress/rbac")
+def get_ingress_rbac():
+    """
+    Return a ready-to-apply RBAC Role + RoleBinding manifest that grants the
+    pod's default service account permission to create/get/delete Services.
+    Apply once: kubectl apply -f <(curl -s .../collector/ingress/rbac)
+    """
+    ns = _k8s_namespace() if _is_kubernetes() else _LB_NAMESPACE
+    manifest = f"""apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fo-service-manager
+  namespace: {ns}
+rules:
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get", "list", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fo-service-manager
+  namespace: {ns}
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: {ns}
+roleRef:
+  kind: Role
+  name: fo-service-manager
+  apiGroup: rbac.authorization.k8s.io
+"""
+    return Response(
+        content=manifest,
+        media_type="text/yaml",
+        headers={"Content-Disposition": 'attachment; filename="fo-rbac.yaml"'},
+    )
+
+
 @router.delete("/collector/ingress", status_code=204)
 def delete_collector_ingress():
     """Remove the collector LoadBalancer service."""

@@ -240,10 +240,20 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
 
   const canRun = selectedModule && selectedJobs.size > 0 && !running
 
+  // Sources to display in the right column:
+  // if a module is selected → filtered; otherwise → all case sources
+  const displaySources = selectedModule ? compatibleSources : sources
+
+  const visibleDisplaySources = sourceSearch.trim()
+    ? displaySources.filter(s =>
+        (s.original_filename || '').toLowerCase().includes(sourceSearch.toLowerCase())
+      )
+    : displaySources
+
   return (
     <div className="panel-backdrop" onClick={onClose}>
       <div
-        className="absolute right-0 top-0 h-full w-[480px] bg-white border-l border-gray-200 flex flex-col"
+        className="absolute right-0 top-0 h-full w-[720px] bg-white border-l border-gray-200 flex flex-col"
         style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.10)' }}
         onClick={e => e.stopPropagation()}
       >
@@ -258,153 +268,142 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
           </button>
         </div>
 
-        {/* Body */}
-        <div className="flex-1 overflow-y-auto p-5 space-y-5">
-          {loading ? (
-            <div className="flex items-center justify-center py-16 text-gray-400">
-              <Loader2 size={20} className="animate-spin mr-2" />
-              Loading…
-            </div>
-          ) : (
-            <>
-              {/* Module selection */}
-              <div>
-                <p className="section-title mb-2">Select Module</p>
-                <div className="space-y-2">
-                  {modules.map(mod => (
-                    <button
-                      key={mod.id}
-                      disabled={!mod.available}
-                      onClick={() => {
-                        if (mod.available) {
-                          setSelectedModule(mod)
-                          setSelectedJobs(new Set())
-                        }
-                      }}
-                      className={`w-full text-left p-3 rounded-lg border transition-all ${
-                        selectedModule?.id === mod.id
-                          ? 'border-brand-accent bg-brand-accentlight ring-1 ring-brand-accent/30'
-                          : mod.available
-                            ? 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
-                            : 'border-gray-100 bg-gray-50/50 cursor-not-allowed'
-                      }`}
-                      title={!mod.available ? mod.unavailable_reason : undefined}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className={`font-medium text-sm ${mod.available ? 'text-brand-text' : 'text-gray-400'}`}>
-                          {mod.name}
-                        </span>
-                        {!mod.available && (
-                          <span className="badge bg-gray-100 text-gray-400 border border-gray-200 text-[10px] flex-shrink-0">
-                            Unavailable
-                          </span>
-                        )}
-                      </div>
-                      <p className={`text-xs mt-0.5 ${mod.available ? 'text-gray-500' : 'text-gray-400'}`}>
-                        {mod.description}
+        {/* Body — two columns */}
+        {loading ? (
+          <div className="flex-1 flex items-center justify-center text-gray-400">
+            <Loader2 size={20} className="animate-spin mr-2" />
+            Loading…
+          </div>
+        ) : (
+          <div className="flex-1 flex overflow-hidden">
+
+            {/* Left: module list */}
+            <div className="w-[300px] flex-shrink-0 border-r border-gray-100 flex flex-col">
+              <div className="px-4 pt-4 pb-2">
+                <p className="section-title">Select Module</p>
+              </div>
+              <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-2">
+                {modules.filter(m => m.available).map(mod => (
+                  <button
+                    key={mod.id}
+                    onClick={() => { setSelectedModule(mod); setSelectedJobs(new Set()) }}
+                    className={`w-full text-left p-3 rounded-lg border transition-all ${
+                      selectedModule?.id === mod.id
+                        ? 'border-brand-accent bg-brand-accentlight ring-1 ring-brand-accent/30'
+                        : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
+                    }`}
+                  >
+                    <p className="font-medium text-sm text-brand-text">{mod.name}</p>
+                    <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{mod.description}</p>
+                    {(mod.input_extensions?.length > 0 || mod.input_filenames?.length > 0) && (
+                      <p className="text-[10px] text-gray-400 mt-1 font-mono">
+                        {[...(mod.input_extensions || []), ...(mod.input_filenames || [])].join('  ')}
                       </p>
-                      {!mod.available && mod.unavailable_reason && (
-                        <p className="text-[10px] text-gray-400 mt-0.5 italic">
-                          {mod.unavailable_reason}
-                        </p>
-                      )}
-                    </button>
-                  ))}
-                </div>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Right: source files */}
+            <div className="flex-1 flex flex-col overflow-hidden">
+              <div className="px-4 pt-4 pb-2 flex items-center justify-between">
+                <p className="section-title">
+                  Source Files
+                  {displaySources.length > 0 && (
+                    <span className="ml-1.5 font-normal text-gray-400">
+                      ({selectedJobs.size}/{displaySources.length})
+                    </span>
+                  )}
+                </p>
+                {displaySources.length > 0 && (
+                  <button
+                    onClick={() => setSelectedJobs(new Set(displaySources.map(s => s.job_id)))}
+                    className="text-xs text-brand-accent hover:underline"
+                  >
+                    Select all
+                  </button>
+                )}
               </div>
 
-              {/* Source files */}
-              {selectedModule && (
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <p className="section-title">
-                      Source Files
-                      {compatibleSources.length > 0 && (
-                        <span className="ml-1.5 font-normal text-gray-400">
-                          ({compatibleSources.length})
-                        </span>
-                      )}
-                    </p>
-                    {compatibleSources.length > 0 && (
-                      <button
-                        onClick={() => setSelectedJobs(new Set(compatibleSources.map(s => s.job_id)))}
-                        className="text-xs text-brand-accent hover:underline"
-                      >
-                        Select all
-                      </button>
-                    )}
-                  </div>
-
-                  {compatibleSources.length === 0 ? (
-                    <p className="text-xs text-gray-400 italic py-2">
-                      No compatible source files found for this case.
-                      {(selectedModule.input_extensions?.length > 0 || selectedModule.input_filenames?.length > 0) && (
-                        <> Ingest {[
-                          ...(selectedModule.input_extensions || []),
-                          ...(selectedModule.input_filenames  || []),
-                        ].join(', ')} files first.</>
-                      )}
-                    </p>
-                  ) : (
-                    <>
-                      {compatibleSources.length > 5 && (
-                        <input
-                          type="text"
-                          value={sourceSearch}
-                          onChange={e => setSourceSearch(e.target.value)}
-                          placeholder="Filter files…"
-                          className="w-full mb-2 px-3 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-brand-accent/40 focus:border-brand-accent"
-                        />
-                      )}
-                      <div className="space-y-1">
-                        {visibleSources.map(src => (
-                          <label
-                            key={src.job_id}
-                            className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-gray-50 cursor-pointer border border-transparent hover:border-gray-200 transition-colors"
-                          >
-                            <input
-                              type="checkbox"
-                              checked={selectedJobs.has(src.job_id)}
-                              onChange={() => toggleJob(src.job_id)}
-                              className="rounded border-gray-300"
-                            />
-                            <div className="flex-1 min-w-0">
-                              <p className="text-sm text-brand-text truncate font-medium">
-                                {src.original_filename}
-                              </p>
-                              <p className="text-[10px] text-gray-400 mt-0.5">
-                                {(src.events_indexed || 0).toLocaleString()} events
-                                {src.plugin_used ? ` · ${src.plugin_used}` : ''}
-                              </p>
-                            </div>
-                          </label>
-                        ))}
-                        {visibleSources.length === 0 && sourceSearch && (
-                          <p className="text-xs text-gray-400 italic py-2 text-center">
-                            No files match "{sourceSearch}"
-                          </p>
-                        )}
-                      </div>
-                    </>
+              {!selectedModule && sources.length === 0 && (
+                <p className="px-4 text-xs text-gray-400 italic">
+                  No ingested files in this case yet.
+                </p>
+              )}
+              {!selectedModule && sources.length > 0 && (
+                <p className="px-4 pb-2 text-[11px] text-gray-400 italic">
+                  Select a module to filter compatible files.
+                </p>
+              )}
+              {selectedModule && compatibleSources.length === 0 && (
+                <p className="px-4 text-xs text-gray-400 italic">
+                  No compatible files for <strong>{selectedModule.name}</strong>.
+                  {(selectedModule.input_extensions?.length > 0 || selectedModule.input_filenames?.length > 0) && (
+                    <> Ingest {[
+                      ...(selectedModule.input_extensions || []),
+                      ...(selectedModule.input_filenames  || []),
+                    ].join(', ')} files first.</>
                   )}
+                </p>
+              )}
+
+              {displaySources.length > 5 && (
+                <div className="px-4 pb-2">
+                  <input
+                    type="text"
+                    value={sourceSearch}
+                    onChange={e => setSourceSearch(e.target.value)}
+                    placeholder="Filter files…"
+                    className="w-full px-3 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-brand-accent/40 focus:border-brand-accent"
+                  />
                 </div>
               )}
 
-              {error && (
-                <p className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg p-3">
-                  {error}
-                </p>
-              )}
-            </>
-          )}
-        </div>
+              <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-1">
+                {visibleDisplaySources.map(src => (
+                  <label
+                    key={src.job_id}
+                    className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-gray-50 cursor-pointer border border-transparent hover:border-gray-200 transition-colors"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedJobs.has(src.job_id)}
+                      onChange={() => toggleJob(src.job_id)}
+                      className="rounded border-gray-300 flex-shrink-0"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-brand-text truncate font-medium">
+                        {src.original_filename}
+                      </p>
+                      <p className="text-[10px] text-gray-400 mt-0.5">
+                        {(src.events_indexed || 0).toLocaleString()} events
+                        {src.plugin_used ? ` · ${src.plugin_used}` : ''}
+                      </p>
+                    </div>
+                  </label>
+                ))}
+                {visibleDisplaySources.length === 0 && sourceSearch && (
+                  <p className="text-xs text-gray-400 italic py-4 text-center">
+                    No files match "{sourceSearch}"
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Footer */}
-        <div className="border-t border-gray-200 px-5 py-4">
+        <div className="border-t border-gray-200 px-5 py-4 flex items-center gap-3">
+          {error && (
+            <p className="flex-1 text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2 truncate" title={error}>
+              {error}
+            </p>
+          )}
           <button
             onClick={handleRun}
             disabled={!canRun}
-            className="btn-primary w-full justify-center"
+            className="btn-primary ml-auto justify-center"
           >
             {running
               ? <Loader2 size={14} className="animate-spin" />

@@ -117,8 +117,10 @@ export const api = {
     /** Detect candidate API URLs from server network interfaces. */
     networkInterfaces: () => request('GET', '/network/interfaces'),
     /** Kubernetes LoadBalancer ingress management */
-    createIngress:  () => request('POST', '/collector/ingress'),
-    getIngress:     () => request('GET',  '/collector/ingress'),
+    createIngress:  () => request('POST',   '/collector/ingress'),
+    getIngress:     () => request('GET',    '/collector/ingress'),
     deleteIngress:  () => request('DELETE', '/collector/ingress'),
+    /** Returns a ready-to-apply RBAC YAML manifest (text/yaml) */
+    rbacUrl:        () => `${BASE}/collector/ingress/rbac`,
   },
 }
