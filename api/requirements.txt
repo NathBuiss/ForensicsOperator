@@ -4,5 +4,6 @@ pydantic==2.7.1
 pydantic-settings==2.2.1
 python-multipart==0.0.9
 redis==5.0.4
+celery==5.3.6
 minio==7.2.7
 python-magic==0.4.27
