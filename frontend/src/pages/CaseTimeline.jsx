@@ -4,7 +4,7 @@ import {
   Upload, Search, Bell, X, ChevronRight, AlertTriangle,
   CheckCircle, Clock, Database, Loader2, Shield,
   Cpu, RotateCcw, Plus, Download, Play, Terminal,
-  AlertCircle, ChevronDown, FileCode,
+  AlertCircle, ChevronDown, FileCode, ExternalLink,
 } from 'lucide-react'
 import { api } from '../api/client'
 import Timeline from './Timeline'
@@ -78,8 +78,9 @@ function IngestModal({ caseId, onClose, onComplete }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // AlertResultsPanel
 // ─────────────────────────────────────────────────────────────────────────────
-function AlertResultsPanel({ results, onClose }) {
+function AlertResultsPanel({ results, caseId, onClose }) {
   const { matches = [], rules_checked = 0 } = results
+  const navigate = useNavigate()
 
   return (
     <div className="panel-backdrop" onClick={onClose}>
@@ -114,7 +115,7 @@ function AlertResultsPanel({ results, onClose }) {
               <p className="text-sm text-gray-500 mt-1">All rules checked — no matches found</p>
             </div>
           ) : matches.map((m, i) => (
-            <AlertMatchCard key={i} match={m} />
+            <AlertMatchCard key={i} match={m} caseId={caseId} navigate={navigate} />
           ))}
         </div>
       </div>
@@ -122,10 +123,13 @@ function AlertResultsPanel({ results, onClose }) {
   )
 }
 
-function AlertMatchCard({ match }) {
+function AlertMatchCard({ match, caseId, navigate }) {
   const [open, setOpen] = useState(false)
   const rule = match.rule || {}
-  const levelClass = LEVEL_BADGE[rule.level?.toLowerCase?.()] || 'badge-generic'
+
+  function goToSearch(q) {
+    navigate(`/cases/${caseId}/search`, { state: { pivotQuery: q } })
+  }
 
   return (
     <div className="card overflow-hidden">
@@ -154,21 +158,45 @@ function AlertMatchCard({ match }) {
         <ChevronRight size={14} className={`text-gray-400 flex-shrink-0 mt-0.5 transition-transform ${open ? 'rotate-90' : ''}`} />
       </button>
 
-      {open && match.sample_events?.length > 0 && (
+      {open && (
         <div className="border-t border-gray-100 bg-gray-50 px-4 py-3 space-y-2">
-          <p className="section-title mb-2">Sample events</p>
-          {match.sample_events.map((ev, j) => (
-            <div key={j} className="bg-white rounded-lg border border-gray-200 p-2.5">
-              <div className="flex items-center gap-2 text-xs text-gray-500 mb-1 font-mono">
-                <Clock size={10} />
-                {ev.timestamp || '—'}
-              </div>
-              <p className="text-xs text-brand-text">{ev.message || '—'}</p>
-              {ev.host?.hostname && (
-                <p className="text-xs text-gray-500 mt-0.5">Host: {ev.host.hostname}</p>
-              )}
-            </div>
-          ))}
+          {/* View all hits link */}
+          <button
+            onClick={() => goToSearch(rule.query)}
+            className="w-full flex items-center justify-between bg-brand-accent/10 hover:bg-brand-accent/20 border border-brand-accent/30 rounded-lg px-3 py-2 transition-colors"
+          >
+            <span className="text-xs font-medium text-brand-accent">
+              View all {match.match_count.toLocaleString()} matching events in Search
+            </span>
+            <ExternalLink size={12} className="text-brand-accent flex-shrink-0" />
+          </button>
+
+          {/* Sample events */}
+          {match.sample_events?.length > 0 && (
+            <>
+              <p className="section-title mt-1">Sample events</p>
+              {match.sample_events.map((ev, j) => (
+                <button
+                  key={j}
+                  onClick={() => ev.fo_id ? goToSearch(`fo_id:${ev.fo_id}`) : goToSearch(rule.query)}
+                  className="w-full text-left bg-white hover:bg-blue-50 rounded-lg border border-gray-200 hover:border-blue-300 p-2.5 transition-colors group"
+                  title="Click to view this event in Search"
+                >
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <div className="flex items-center gap-1.5 text-xs text-gray-500 font-mono">
+                      <Clock size={10} />
+                      {ev.timestamp || '—'}
+                    </div>
+                    <ExternalLink size={10} className="text-gray-300 group-hover:text-blue-400 flex-shrink-0 transition-colors" />
+                  </div>
+                  <p className="text-xs text-brand-text">{ev.message || '—'}</p>
+                  {ev.host?.hostname && (
+                    <p className="text-xs text-gray-500 mt-0.5">Host: {ev.host.hostname}</p>
+                  )}
+                </button>
+              ))}
+            </>
+          )}
         </div>
       )}
     </div>
@@ -911,6 +939,7 @@ export default function CaseTimeline() {
       {alertResults && (
         <AlertResultsPanel
           results={alertResults}
+          caseId={caseId}
           onClose={() => setAlertResults(null)}
         />
       )}

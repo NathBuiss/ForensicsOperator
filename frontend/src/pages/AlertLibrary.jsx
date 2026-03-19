@@ -1,12 +1,15 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Bell, Plus, Trash2, ChevronDown, ChevronUp, Pencil, Check, X,
   AlertTriangle, Loader2, Search, Play, CheckCircle, Clock, RefreshCw,
+  ExternalLink,
 } from 'lucide-react'
 import { api } from '../api/client'
 
 // ── Run on Case modal ─────────────────────────────────────────────────────────
 function RunOnCaseModal({ rule, cases, onClose }) {
+  const navigate = useNavigate()
   const [running, setRunning]     = useState(false)
   const [result, setResult]       = useState(null)
   const [error, setError]         = useState('')
@@ -25,6 +28,11 @@ function RunOnCaseModal({ rule, cases, onClose }) {
     } finally {
       setRunning(false)
     }
+  }
+
+  function goToSearch(q) {
+    onClose()
+    navigate(`/cases/${selectedCase}/search`, { state: { pivotQuery: q } })
   }
 
   return (
@@ -67,19 +75,35 @@ function RunOnCaseModal({ rule, cases, onClose }) {
           )}
 
           {result && (
-            <div className={`rounded-lg border p-3 ${result.fired ? 'border-red-200 bg-red-50' : 'border-green-200 bg-green-50'}`}>
+            <div className={`rounded-lg border p-3 space-y-2 ${result.fired ? 'border-red-200 bg-red-50' : 'border-green-200 bg-green-50'}`}>
               {result.fired ? (
                 <>
-                  <p className="text-xs font-semibold text-red-700 flex items-center gap-1 mb-2">
-                    <AlertTriangle size={12} /> {result.match.match_count.toLocaleString()} matches found
-                  </p>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs font-semibold text-red-700 flex items-center gap-1">
+                      <AlertTriangle size={12} /> {result.match.match_count.toLocaleString()} matches found
+                    </p>
+                    <button
+                      onClick={() => goToSearch(rule.query)}
+                      className="flex items-center gap-1 text-xs text-brand-accent hover:text-brand-accenthover font-medium"
+                    >
+                      View all in Search <ExternalLink size={11} />
+                    </button>
+                  </div>
                   {result.match.sample_events?.map((ev, i) => (
-                    <div key={i} className="bg-white rounded border border-red-100 p-2 mb-1">
-                      <p className="text-[10px] text-gray-500 font-mono flex items-center gap-1">
-                        <Clock size={9} />{ev.timestamp || '—'}
-                      </p>
+                    <button
+                      key={i}
+                      onClick={() => ev.fo_id ? goToSearch(`fo_id:${ev.fo_id}`) : goToSearch(rule.query)}
+                      className="w-full text-left bg-white hover:bg-blue-50 rounded border border-red-100 hover:border-blue-300 p-2 transition-colors group"
+                      title="Click to view this event in Search"
+                    >
+                      <div className="flex items-center justify-between gap-1">
+                        <p className="text-[10px] text-gray-500 font-mono flex items-center gap-1">
+                          <Clock size={9} />{ev.timestamp || '—'}
+                        </p>
+                        <ExternalLink size={9} className="text-gray-300 group-hover:text-blue-400 flex-shrink-0 transition-colors" />
+                      </div>
                       <p className="text-xs text-gray-700 mt-0.5">{ev.message || '—'}</p>
-                    </div>
+                    </button>
                   ))}
                 </>
               ) : (
