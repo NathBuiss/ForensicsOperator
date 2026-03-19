@@ -4,7 +4,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import cases, ingest, jobs, search, plugins, health, saved_searches, alert_rules, export, global_alert_rules
+from routers import cases, ingest, jobs, search, plugins, health, saved_searches, alert_rules, export, global_alert_rules, modules
 
 logging.basicConfig(level=logging.INFO)
 
@@ -32,3 +32,4 @@ app.include_router(saved_searches.router, prefix="/api/v1")
 app.include_router(alert_rules.router, prefix="/api/v1")
 app.include_router(export.router, prefix="/api/v1")
 app.include_router(global_alert_rules.router, prefix="/api/v1")
+app.include_router(modules.router, prefix="/api/v1")

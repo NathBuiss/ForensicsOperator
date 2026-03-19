@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import {
   Upload, Search, Bell, X, ChevronRight, AlertTriangle,
   CheckCircle, Clock, Database, Loader2, Shield,
+  Cpu, RotateCcw, Plus,
 } from 'lucide-react'
 import { api } from '../api/client'
 import Timeline from './Timeline'
@@ -19,17 +20,24 @@ const ARTIFACT_BADGE = {
   hayabusa:  'badge-hayabusa',
 }
 
-// ── Severity colours for alert results ───────────────────────────────────────
+// ── Severity colours ──────────────────────────────────────────────────────────
 const LEVEL_BADGE = {
   critical:      'badge-critical',
   high:          'badge-high',
   medium:        'badge-medium',
   low:           'badge-low',
   informational: 'badge-informational',
+  info:          'badge-informational',
+}
+
+const MODULE_NAMES = {
+  hayabusa:  'Hayabusa',
+  chainsaw:  'Chainsaw',
+  evtxecmd:  'EvtxECmd',
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Ingest Modal
+// IngestModal
 // ─────────────────────────────────────────────────────────────────────────────
 function IngestModal({ caseId, onClose, onComplete }) {
   return (
@@ -39,7 +47,6 @@ function IngestModal({ caseId, onClose, onComplete }) {
         style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.10)' }}
         onClick={e => e.stopPropagation()}
       >
-        {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
           <div className="flex items-center gap-2">
             <Upload size={16} className="text-brand-accent" />
@@ -49,7 +56,6 @@ function IngestModal({ caseId, onClose, onComplete }) {
             <X size={16} />
           </button>
         </div>
-        {/* Content */}
         <div className="flex-1 overflow-y-auto">
           <Ingest caseId={caseId} onComplete={onComplete} />
         </div>
@@ -59,7 +65,7 @@ function IngestModal({ caseId, onClose, onComplete }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Alert Results Panel
+// AlertResultsPanel
 // ─────────────────────────────────────────────────────────────────────────────
 function AlertResultsPanel({ results, onClose }) {
   const { matches = [], rules_checked = 0 } = results
@@ -71,7 +77,6 @@ function AlertResultsPanel({ results, onClose }) {
         style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.10)' }}
         onClick={e => e.stopPropagation()}
       >
-        {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
           <div>
             <div className="flex items-center gap-2">
@@ -90,7 +95,6 @@ function AlertResultsPanel({ results, onClose }) {
           </button>
         </div>
 
-        {/* Body */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
           {matches.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-center">
@@ -161,17 +165,411 @@ function AlertMatchCard({ match }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ModuleLaunchModal
+// ─────────────────────────────────────────────────────────────────────────────
+function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
+  const [modules, setModules]           = useState([])
+  const [sources, setSources]           = useState([])
+  const [selectedModule, setSelectedModule] = useState(null)
+  const [selectedJobs, setSelectedJobs] = useState(new Set())
+  const [loading, setLoading]           = useState(true)
+  const [running, setRunning]           = useState(false)
+  const [error, setError]               = useState(null)
+
+  useEffect(() => {
+    Promise.all([api.modules.list(), api.modules.listSources(caseId)])
+      .then(([modResp, srcResp]) => {
+        setModules(modResp.modules || [])
+        setSources(srcResp.sources || [])
+        setLoading(false)
+      })
+      .catch(err => { setError(err.message); setLoading(false) })
+  }, [caseId])
+
+  const compatibleSources = selectedModule
+    ? sources.filter(s =>
+        selectedModule.input_extensions.some(ext =>
+          (s.original_filename || '').toLowerCase().endsWith(ext)
+        )
+      )
+    : []
+
+  function toggleJob(jobId) {
+    setSelectedJobs(prev => {
+      const next = new Set(prev)
+      next.has(jobId) ? next.delete(jobId) : next.add(jobId)
+      return next
+    })
+  }
+
+  async function handleRun() {
+    if (!selectedModule || selectedJobs.size === 0) return
+    setRunning(true)
+    setError(null)
+    try {
+      const run = await api.modules.createRun(caseId, {
+        module_id: selectedModule.id,
+        job_ids: [...selectedJobs],
+      })
+      onRunCreated(run)
+    } catch (err) {
+      setError(err.message)
+      setRunning(false)
+    }
+  }
+
+  const canRun = selectedModule && selectedJobs.size > 0 && !running
+
+  return (
+    <div className="panel-backdrop" onClick={onClose}>
+      <div
+        className="absolute right-0 top-0 h-full w-[480px] bg-white border-l border-gray-200 flex flex-col"
+        style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.10)' }}
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
+          <div className="flex items-center gap-2">
+            <Cpu size={16} className="text-brand-accent" />
+            <span className="font-semibold text-brand-text">Launch Module</span>
+          </div>
+          <button onClick={onClose} className="btn-ghost p-1.5 rounded-lg">
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          {loading ? (
+            <div className="flex items-center justify-center py-16 text-gray-400">
+              <Loader2 size={20} className="animate-spin mr-2" />
+              Loading…
+            </div>
+          ) : (
+            <>
+              {/* Module selection */}
+              <div>
+                <p className="section-title mb-2">Select Module</p>
+                <div className="space-y-2">
+                  {modules.map(mod => (
+                    <button
+                      key={mod.id}
+                      disabled={!mod.available}
+                      onClick={() => {
+                        if (mod.available) {
+                          setSelectedModule(mod)
+                          setSelectedJobs(new Set())
+                        }
+                      }}
+                      className={`w-full text-left p-3 rounded-lg border transition-all ${
+                        selectedModule?.id === mod.id
+                          ? 'border-brand-accent bg-brand-accentlight ring-1 ring-brand-accent/30'
+                          : mod.available
+                            ? 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
+                            : 'border-gray-100 bg-gray-50/50 cursor-not-allowed'
+                      }`}
+                      title={!mod.available ? mod.unavailable_reason : undefined}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className={`font-medium text-sm ${mod.available ? 'text-brand-text' : 'text-gray-400'}`}>
+                          {mod.name}
+                        </span>
+                        {!mod.available && (
+                          <span className="badge bg-gray-100 text-gray-400 border border-gray-200 text-[10px] flex-shrink-0">
+                            Unavailable
+                          </span>
+                        )}
+                      </div>
+                      <p className={`text-xs mt-0.5 ${mod.available ? 'text-gray-500' : 'text-gray-400'}`}>
+                        {mod.description}
+                      </p>
+                      {!mod.available && mod.unavailable_reason && (
+                        <p className="text-[10px] text-gray-400 mt-0.5 italic">
+                          {mod.unavailable_reason}
+                        </p>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Source files */}
+              {selectedModule && (
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="section-title">Source Files</p>
+                    {compatibleSources.length > 0 && (
+                      <button
+                        onClick={() => setSelectedJobs(new Set(compatibleSources.map(s => s.job_id)))}
+                        className="text-xs text-brand-accent hover:underline"
+                      >
+                        Select all
+                      </button>
+                    )}
+                  </div>
+
+                  {compatibleSources.length === 0 ? (
+                    <p className="text-xs text-gray-400 italic py-2">
+                      No compatible source files found for this case.
+                      Ingest {selectedModule.input_extensions.join(', ')} files first.
+                    </p>
+                  ) : (
+                    <div className="space-y-1">
+                      {compatibleSources.map(src => (
+                        <label
+                          key={src.job_id}
+                          className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-gray-50 cursor-pointer border border-transparent hover:border-gray-200 transition-colors"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selectedJobs.has(src.job_id)}
+                            onChange={() => toggleJob(src.job_id)}
+                            className="rounded border-gray-300"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm text-brand-text truncate font-medium">
+                              {src.original_filename}
+                            </p>
+                            <p className="text-[10px] text-gray-400 mt-0.5">
+                              {(src.events_indexed || 0).toLocaleString()} events
+                              {src.plugin_used ? ` · ${src.plugin_used}` : ''}
+                            </p>
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {error && (
+                <p className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg p-3">
+                  {error}
+                </p>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="border-t border-gray-200 px-5 py-4">
+          <button
+            onClick={handleRun}
+            disabled={!canRun}
+            className="btn-primary w-full justify-center"
+          >
+            {running
+              ? <Loader2 size={14} className="animate-spin" />
+              : <Cpu size={14} />
+            }
+            {running ? 'Launching…' : 'Run Module'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ModuleRunCard
+// ─────────────────────────────────────────────────────────────────────────────
+function ModuleRunCard({ run }) {
+  const [open, setOpen] = useState(false)
+
+  const moduleName = MODULE_NAMES[run.module_id] || run.module_id
+
+  const STATUS_STYLE = {
+    PENDING:   'bg-gray-100 text-gray-600',
+    RUNNING:   'bg-amber-100 text-amber-700',
+    COMPLETED: 'bg-green-100 text-green-700',
+    FAILED:    'bg-red-100 text-red-700',
+  }
+  const statusStyle = STATUS_STYLE[run.status] || STATUS_STYLE.PENDING
+
+  const ts = run.completed_at || run.started_at
+  const tsDisplay = ts
+    ? new Date(ts).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
+    : null
+
+  const preview  = run.results_preview || []
+  const byLevel  = run.hits_by_level   || {}
+
+  return (
+    <div className="card overflow-hidden">
+      <button
+        className="w-full flex items-start gap-3 p-3 text-left hover:bg-gray-50 transition-colors"
+        onClick={() => setOpen(v => !v)}
+      >
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-medium text-sm text-brand-text">{moduleName}</span>
+            <span className={`badge ${statusStyle} inline-flex items-center gap-1`}>
+              {run.status === 'RUNNING' && <Loader2 size={9} className="animate-spin" />}
+              {run.status}
+            </span>
+            {run.status === 'COMPLETED' && run.total_hits > 0 && (
+              <span className="badge bg-gray-100 text-gray-600">
+                {run.total_hits.toLocaleString()} hits
+              </span>
+            )}
+            {run.status === 'COMPLETED' && run.total_hits === 0 && (
+              <span className="badge bg-green-50 text-green-600">No detections</span>
+            )}
+          </div>
+          {tsDisplay && (
+            <p className="text-[10px] text-gray-400 mt-0.5 font-mono">{tsDisplay}</p>
+          )}
+          {run.status === 'FAILED' && run.error && (
+            <p className="text-xs text-red-600 mt-0.5 truncate" title={run.error}>
+              {run.error}
+            </p>
+          )}
+        </div>
+        <ChevronRight
+          size={14}
+          className={`text-gray-400 flex-shrink-0 mt-0.5 transition-transform ${open ? 'rotate-90' : ''}`}
+        />
+      </button>
+
+      {open && run.status === 'COMPLETED' && (
+        <div className="border-t border-gray-100 bg-gray-50 p-3 space-y-2">
+          {/* Level summary */}
+          {Object.keys(byLevel).length > 0 && (
+            <div className="flex flex-wrap gap-1 mb-2">
+              {['critical', 'high', 'medium', 'low', 'informational'].map(lvl => {
+                const count = byLevel[lvl]
+                if (!count) return null
+                return (
+                  <span key={lvl} className={`badge ${LEVEL_BADGE[lvl] || 'badge-generic'}`}>
+                    {lvl}: {count}
+                  </span>
+                )
+              })}
+            </div>
+          )}
+
+          {preview.length === 0 ? (
+            <p className="text-xs text-gray-400 text-center py-4 italic">No detections</p>
+          ) : (
+            <>
+              {preview.slice(0, 50).map((hit, i) => (
+                <div key={i} className="bg-white rounded border border-gray-200 p-2 text-xs">
+                  <div className="flex items-center gap-2 flex-wrap mb-0.5">
+                    <span className={`badge ${LEVEL_BADGE[hit.level] || 'badge-generic'}`}>
+                      {hit.level}
+                    </span>
+                    <span className="font-medium text-brand-text">{hit.rule_title}</span>
+                  </div>
+                  <div className="flex gap-3 text-[10px] text-gray-400 font-mono">
+                    {hit.computer && <span>{hit.computer}</span>}
+                    {hit.timestamp && <span>{hit.timestamp}</span>}
+                  </div>
+                </div>
+              ))}
+              {preview.length > 50 && (
+                <p className="text-[10px] text-gray-400 text-center pt-1">
+                  Showing first 50 of {run.total_hits.toLocaleString()} hits
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ModuleRunsPanel
+// ─────────────────────────────────────────────────────────────────────────────
+function ModuleRunsPanel({ caseId, onClose }) {
+  const [runs, setRuns]     = useState([])
+  const [loading, setLoading] = useState(true)
+
+  const fetchRuns = useCallback(() => {
+    api.modules.listRuns(caseId)
+      .then(r => { setRuns(r.runs || []); setLoading(false) })
+      .catch(() => setLoading(false))
+  }, [caseId])
+
+  useEffect(() => { fetchRuns() }, [fetchRuns])
+
+  // Auto-poll every 3 s while any run is active
+  useEffect(() => {
+    const hasActive = runs.some(r => r.status === 'PENDING' || r.status === 'RUNNING')
+    if (!hasActive) return
+    const id = setInterval(fetchRuns, 3000)
+    return () => clearInterval(id)
+  }, [runs, fetchRuns])
+
+  return (
+    <div className="panel-backdrop" onClick={onClose}>
+      <div
+        className="absolute right-0 top-0 h-full w-[560px] bg-white border-l border-gray-200 flex flex-col"
+        style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.10)' }}
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
+          <div className="flex items-center gap-2">
+            <Cpu size={16} className="text-brand-accent" />
+            <span className="font-semibold text-brand-text">Module Runs</span>
+            {runs.length > 0 && (
+              <span className="badge bg-gray-100 text-gray-600">{runs.length}</span>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={fetchRuns}
+              className="btn-ghost p-1.5 rounded-lg"
+              title="Refresh"
+            >
+              <RotateCcw size={14} />
+            </button>
+            <button onClick={onClose} className="btn-ghost p-1.5 rounded-lg">
+              <X size={16} />
+            </button>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          {loading ? (
+            <div className="flex items-center justify-center py-16 text-gray-400">
+              <Loader2 size={20} className="animate-spin mr-2" />
+              Loading runs…
+            </div>
+          ) : runs.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-16 text-center">
+              <Cpu size={40} className="text-gray-300 mb-3" />
+              <p className="font-medium text-gray-500">No module runs yet</p>
+              <p className="text-sm text-gray-400 mt-1">
+                Launch a module to analyse ingested files
+              </p>
+            </div>
+          ) : (
+            runs.map(run => <ModuleRunCard key={run.run_id} run={run} />)
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // CaseTimeline — main page
 // ─────────────────────────────────────────────────────────────────────────────
 export default function CaseTimeline() {
   const { caseId } = useParams()
   const navigate = useNavigate()
 
-  const [caseData, setCaseData]       = useState(null)
-  const [loading, setLoading]         = useState(true)
-  const [showIngest, setShowIngest]   = useState(false)
-  const [alertResults, setAlertResults] = useState(null)
-  const [runningAlerts, setRunningAlerts] = useState(false)
+  const [caseData, setCaseData]             = useState(null)
+  const [loading, setLoading]               = useState(true)
+  const [showIngest, setShowIngest]         = useState(false)
+  const [alertResults, setAlertResults]     = useState(null)
+  const [runningAlerts, setRunningAlerts]   = useState(false)
+  const [showModules, setShowModules]       = useState(false)
+  const [showModuleRuns, setShowModuleRuns] = useState(false)
 
   const loadCase = useCallback(() => {
     api.cases.get(caseId)
@@ -193,6 +591,11 @@ export default function CaseTimeline() {
     } finally {
       setRunningAlerts(false)
     }
+  }
+
+  function handleRunCreated() {
+    setShowModules(false)
+    setShowModuleRuns(true)
   }
 
   if (loading) {
@@ -219,7 +622,6 @@ export default function CaseTimeline() {
               {caseData?.name || 'Case'}
             </h1>
 
-            {/* Event count */}
             {caseData?.event_count != null && (
               <span className="flex items-center gap-1 badge bg-gray-100 text-gray-600">
                 <Database size={10} />
@@ -227,7 +629,6 @@ export default function CaseTimeline() {
               </span>
             )}
 
-            {/* Artifact type badges */}
             {artifactTypes.map(t => (
               <span key={t} className={ARTIFACT_BADGE[t] || 'badge-generic'}>
                 {t}
@@ -269,10 +670,29 @@ export default function CaseTimeline() {
             }
             {runningAlerts ? 'Running…' : 'Run Alerts'}
           </button>
+
+          <button
+            onClick={() => { setShowModules(true); setShowModuleRuns(false) }}
+            className="btn-outline"
+          >
+            <Cpu size={14} />
+            Modules
+          </button>
+
+          {/* View runs shortcut — only when runs panel is closed */}
+          {!showModuleRuns && (
+            <button
+              onClick={() => { setShowModuleRuns(true); setShowModules(false) }}
+              className="btn-ghost p-1.5 rounded-lg text-gray-400 hover:text-brand-accent"
+              title="View module runs"
+            >
+              <RotateCcw size={14} />
+            </button>
+          )}
         </div>
       </div>
 
-      {/* ── Timeline (fills remaining space) ─────────────────────────────── */}
+      {/* ── Timeline ─────────────────────────────────────────────────────── */}
       <div className="flex-1 overflow-hidden">
         <Timeline caseId={caseId} artifactTypes={artifactTypes} />
       </div>
@@ -290,6 +710,21 @@ export default function CaseTimeline() {
         <AlertResultsPanel
           results={alertResults}
           onClose={() => setAlertResults(null)}
+        />
+      )}
+
+      {showModules && (
+        <ModuleLaunchModal
+          caseId={caseId}
+          onClose={() => setShowModules(false)}
+          onRunCreated={handleRunCreated}
+        />
+      )}
+
+      {showModuleRuns && (
+        <ModuleRunsPanel
+          caseId={caseId}
+          onClose={() => setShowModuleRuns(false)}
         />
       )}
     </div>

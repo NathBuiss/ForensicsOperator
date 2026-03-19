@@ -8,7 +8,7 @@ app = Celery(
     "forensics_processor",
     broker=REDIS_URL,
     backend=REDIS_URL,
-    include=["tasks.ingest_task"],
+    include=["tasks.ingest_task", "tasks.module_task"],
 )
 
 app.conf.update(

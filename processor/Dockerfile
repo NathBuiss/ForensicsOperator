@@ -13,6 +13,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Hayabusa DFIR binary (Sigma-based EVTX threat hunting — built-in rules, no separate bundle needed)
+ARG HAYABUSA_VERSION=3.2.0
+RUN apt-get update && apt-get install -y --no-install-recommends unzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && wget -q -O /tmp/hayabusa.zip \
+         "https://github.com/Yamato-Security/hayabusa/releases/download/v${HAYABUSA_VERSION}/hayabusa-${HAYABUSA_VERSION}-lin-x64-musl.zip" \
+    && unzip -q /tmp/hayabusa.zip -d /tmp/hayabusa_dir \
+    && find /tmp/hayabusa_dir -maxdepth 3 -name "hayabusa-*-lin-x64-musl" -type f \
+         -exec install -m 755 {} /usr/local/bin/hayabusa \; \
+    && rm -rf /tmp/hayabusa.zip /tmp/hayabusa_dir
+
 # Python deps
 COPY processor/requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt

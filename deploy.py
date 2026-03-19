@@ -517,6 +517,38 @@ def apply_all_manifests(cfg, pull_policy):
 
 # ── Post-deploy ───────────────────────────────────────────────────────────────
 
+def rollout_restart_apps():
+    """
+    Force a rolling restart of the three application deployments.
+
+    Required when images are loaded directly into containerd (k3s / kind) with
+    a fixed tag — Kubernetes has no way to detect the image changed, so it won't
+    restart pods on its own.  This sets the restart annotation and waits up to
+    90 s per deployment.
+    """
+    step("Restarting application pods (api · processor · frontend)")
+    for svc in SERVICES:
+        r = run(
+            ["kubectl", "rollout", "restart", f"deployment/{svc}", "-n", NS],
+            capture=True, check=False,
+        )
+        if r.returncode == 0:
+            ok(f"Restart triggered: {svc}")
+        else:
+            warn(f"Could not restart {svc} — skipping (may not exist on first deploy)")
+
+    # Wait for each rollout to finish (non-blocking warn on timeout)
+    for svc in SERVICES:
+        r = run(
+            ["kubectl", "rollout", "status", f"deployment/{svc}", "-n", NS, "--timeout=90s"],
+            capture=True, check=False,
+        )
+        if r.returncode == 0:
+            ok(f"Rollout complete: {svc}")
+        else:
+            warn(f"Rollout timeout for {svc} — pods may still be starting")
+
+
 def wait_for_elasticsearch():
     step("Waiting for Elasticsearch (up to 3 minutes)")
     for i in range(36):
@@ -688,7 +720,12 @@ def main():
     # 7. Apply all manifests with substituted values
     apply_all_manifests(cfg, pull_policy)
 
-    # 7. Wait for Elasticsearch, apply index template
+    # 8. Force-restart app pods so they pick up the newly loaded images.
+    #    (k3s loads images directly into containerd — kubectl apply alone does
+    #     NOT trigger a rollout when the image tag is unchanged.)
+    rollout_restart_apps()
+
+    # 9. Wait for Elasticsearch, apply index template
     wait_for_elasticsearch()
     apply_es_template()
 

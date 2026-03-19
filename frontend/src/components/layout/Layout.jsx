@@ -67,10 +67,7 @@ export default function Layout() {
 
         {/* Logo */}
         <div className="px-4 py-4 border-b border-white/10 flex items-center justify-between">
-          <NavLink to="/" className="flex items-center gap-2 group min-w-0">
-            <div className="w-7 h-7 rounded-lg bg-brand-accent flex items-center justify-center flex-shrink-0">
-              <span className="text-white font-bold text-xs leading-none">FO</span>
-            </div>
+          <NavLink to="/" className="flex items-center group min-w-0">
             <span className="text-sm font-bold text-white tracking-wide leading-tight truncate">
               Forensics Operator
             </span>

@@ -1,13 +1,13 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { X, Flag, Tag, Plus, Save, Search, Shield, AlertTriangle } from 'lucide-react'
+import { X, Flag, Tag, Plus, Minus, Save, Search, Shield, AlertTriangle } from 'lucide-react'
 import { api } from '../../api/client'
 import { extractIocs, iocSearchQuery } from '../../utils/ioc'
 import { getMitre, TACTIC_COLORS } from '../../utils/mitre'
 
-export default function EventDetail({ event: initialEvent, caseId, onClose }) {
-  const [event, setEvent] = useState(initialEvent)
-  const [note, setNote]   = useState(event.analyst_note || '')
+export default function EventDetail({ event: initialEvent, caseId, onClose, onFilterIn, onFilterOut }) {
+  const [event, setEvent]       = useState(initialEvent)
+  const [note, setNote]         = useState(event.analyst_note || '')
   const [tagInput, setTagInput] = useState('')
   const [saving, setSaving]     = useState(false)
   const navigate = useNavigate()
@@ -61,6 +61,13 @@ export default function EventDetail({ event: initialEvent, caseId, onClose }) {
     hayabusa: 'badge-hayabusa',
   }
 
+  // Build filter field mappings for the artifact-specific group
+  const artifactFilterFields = Object.fromEntries(
+    Object.entries(artifactData)
+      .filter(([, v]) => v !== null && v !== undefined && v !== '' && typeof v !== 'object')
+      .map(([k]) => [k, `${event.artifact_type}.${k}`])
+  )
+
   return (
     <div className="w-96 flex-shrink-0 bg-white border-l border-gray-200 flex flex-col overflow-hidden">
       {/* Header */}
@@ -71,8 +78,10 @@ export default function EventDetail({ event: initialEvent, caseId, onClose }) {
               {event.artifact_type}
             </span>
             {mitre && (
-              <span className={`badge border text-[10px] ${TACTIC_COLORS[mitre.tactic] || 'bg-gray-100 text-gray-600 border-gray-200'}`}
-                title={mitre.tactic}>
+              <span
+                className={`badge border text-[10px] ${TACTIC_COLORS[mitre.tactic] || 'bg-gray-100 text-gray-600 border-gray-200'}`}
+                title={mitre.tactic}
+              >
                 <Shield size={9} className="mr-1" />
                 {mitre.technique_id}
               </span>
@@ -88,8 +97,10 @@ export default function EventDetail({ event: initialEvent, caseId, onClose }) {
       <div className="flex-1 overflow-y-auto p-3 space-y-4 text-xs">
         {/* Actions */}
         <div className="flex gap-2">
-          <button onClick={toggleFlag}
-            className={`btn text-xs ${event.is_flagged ? 'bg-red-100 text-red-700 border border-red-200' : 'btn-ghost'}`}>
+          <button
+            onClick={toggleFlag}
+            className={`btn text-xs ${event.is_flagged ? 'bg-red-100 text-red-700 border border-red-200' : 'btn-ghost'}`}
+          >
             <Flag size={12} />
             {event.is_flagged ? 'Flagged' : 'Flag'}
           </button>
@@ -99,7 +110,7 @@ export default function EventDetail({ event: initialEvent, caseId, onClose }) {
         {mitre && (
           <div className="rounded-lg border border-gray-200 bg-gray-50 p-2.5">
             <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5 flex items-center gap-1">
-              <Shield size={9} /> MITRE ATT&CK
+              <Shield size={9} /> MITRE ATT&amp;CK
             </p>
             <div className="flex items-start justify-between gap-2">
               <div>
@@ -126,9 +137,11 @@ export default function EventDetail({ event: initialEvent, caseId, onClose }) {
                     <span className="text-[10px] text-gray-500 flex-shrink-0 w-12">{ioc.type}</span>
                     <span className={`font-mono text-[10px] truncate ${ioc.color}`}>{ioc.value}</span>
                   </div>
-                  <button onClick={() => pivot(iocSearchQuery(ioc))}
+                  <button
+                    onClick={() => pivot(iocSearchQuery(ioc))}
                     className="flex-shrink-0 p-1 rounded hover:bg-amber-100 text-amber-500 hover:text-amber-700 transition-colors"
-                    title="Find all events with this IOC">
+                    title="Find all events with this IOC"
+                  >
                     <Search size={10} />
                   </button>
                 </div>
@@ -144,13 +157,22 @@ export default function EventDetail({ event: initialEvent, caseId, onClose }) {
           </p>
           <div className="flex flex-wrap gap-1 mb-1.5">
             {(event.tags || []).map(t => (
-              <span key={t} className="badge bg-brand-accentlight text-brand-accent border border-brand-accent/20 cursor-pointer hover:bg-brand-accent/10 transition-colors"
-                onClick={() => removeTag(t)}>{t} ×</span>
+              <span
+                key={t}
+                className="badge bg-brand-accentlight text-brand-accent border border-brand-accent/20 cursor-pointer hover:bg-brand-accent/10 transition-colors"
+                onClick={() => removeTag(t)}
+              >
+                {t} ×
+              </span>
             ))}
           </div>
           <form onSubmit={addTag} className="flex gap-1">
-            <input value={tagInput} onChange={e => setTagInput(e.target.value)}
-              placeholder="Add tag…" className="input flex-1 py-1 text-xs" />
+            <input
+              value={tagInput}
+              onChange={e => setTagInput(e.target.value)}
+              placeholder="Add tag…"
+              className="input flex-1 py-1 text-xs"
+            />
             <button type="submit" className="btn-ghost px-2 text-xs"><Plus size={12} /></button>
           </form>
         </div>
@@ -160,72 +182,126 @@ export default function EventDetail({ event: initialEvent, caseId, onClose }) {
           <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
             Analyst Note
           </p>
-          <textarea value={note} onChange={e => setNote(e.target.value)}
+          <textarea
+            value={note}
+            onChange={e => setNote(e.target.value)}
             className="input w-full h-20 resize-none text-xs"
-            placeholder="Investigation notes…" />
+            placeholder="Investigation notes…"
+          />
           <button onClick={saveNote} disabled={saving} className="btn-primary text-xs mt-1.5">
             <Save size={11} /> {saving ? 'Saving…' : 'Save Note'}
           </button>
         </div>
 
-        {/* Base fields */}
-        <FieldGroup title="Event" fields={{
-          Timestamp: ts,
-          Description: event.timestamp_desc,
-          Host: event.host?.hostname || event.host?.fqdn,
-          User: [event.user?.domain, event.user?.name].filter(Boolean).join('\\') || undefined,
-          SID: event.user?.sid,
-          Process: event.process?.path || event.process?.name,
-          PID: event.process?.pid,
-          'Src IP': event.network?.src_ip,
-        }} pivotFields={['Host', 'User', 'Src IP']} onPivot={pivot} />
+        {/* Base event fields */}
+        <FieldGroup
+          title="Event"
+          fields={{
+            Timestamp:   ts,
+            Description: event.timestamp_desc,
+            Host:        event.host?.hostname || event.host?.fqdn,
+            User:        [event.user?.domain, event.user?.name].filter(Boolean).join('\\') || undefined,
+            SID:         event.user?.sid,
+            Process:     event.process?.path || event.process?.name,
+            PID:         event.process?.pid,
+            'Src IP':    event.network?.src_ip,
+          }}
+          pivotFields={['Host', 'User', 'Src IP']}
+          filterFields={{
+            Host:     'host.hostname',
+            User:     'user.name',
+            'Src IP': 'network.src_ip',
+            Process:  'process.name',
+          }}
+          onPivot={pivot}
+          onFilterIn={onFilterIn}
+          onFilterOut={onFilterOut}
+        />
 
-        {/* Artifact-specific */}
+        {/* Artifact-specific fields */}
         {Object.keys(artifactData).length > 0 && (
-          <FieldGroup title={event.artifact_type?.toUpperCase()} fields={
-            Object.fromEntries(
+          <FieldGroup
+            title={event.artifact_type?.toUpperCase()}
+            fields={Object.fromEntries(
               Object.entries(artifactData)
                 .filter(([, v]) => v !== null && v !== undefined && v !== '')
                 .map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v, null, 2) : v])
-            )
-          } />
+            )}
+            filterFields={artifactFilterFields}
+            onFilterIn={onFilterIn}
+            onFilterOut={onFilterOut}
+          />
         )}
 
         {/* Metadata */}
-        <FieldGroup title="Metadata" fields={{
-          'Ingest Job': event.ingest_job_id,
-          Source: event.source_file,
-          Ingested: event.ingested_at,
-        }} />
+        <FieldGroup
+          title="Metadata"
+          fields={{
+            'Ingest Job': event.ingest_job_id,
+            Source:       event.source_file,
+            Ingested:     event.ingested_at,
+          }}
+        />
       </div>
     </div>
   )
 }
 
-function FieldGroup({ title, fields, pivotFields = [], onPivot }) {
+function FieldGroup({ title, fields, pivotFields = [], filterFields = {}, onPivot, onFilterIn, onFilterOut }) {
   const entries = Object.entries(fields).filter(([, v]) => v !== null && v !== undefined && v !== '')
   if (!entries.length) return null
+
+  const canFilter = onFilterIn && onFilterOut
+
   return (
     <div>
       <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest mb-1.5">{title}</p>
       <div className="space-y-1">
-        {entries.map(([k, v]) => (
-          <div key={k} className="flex gap-2 items-start">
-            <span className="text-gray-400 flex-shrink-0 w-20 text-[10px] pt-0.5">{k}</span>
-            <span className="text-gray-700 break-all font-mono text-[10px] flex-1">
-              {typeof v === 'string' && v.includes('\n')
-                ? <pre className="whitespace-pre-wrap">{v}</pre>
-                : String(v)}
-            </span>
-            {pivotFields.includes(k) && onPivot && v && (
-              <button onClick={() => onPivot(`"${v}"`)}
-                className="flex-shrink-0 p-0.5 rounded hover:bg-gray-100 text-gray-400 hover:text-brand-accent transition-colors"
-                title={`Search all events for: ${v}`}>
-                <Search size={10} />
-              </button>
-            )}
-          </div>
-        ))}
+        {entries.map(([k, v]) => {
+          const esField = filterFields[k]
+          const isFilterable = canFilter && esField && typeof v === 'string' && !v.includes('\n')
+          return (
+            <div key={k} className="flex gap-2 items-start group">
+              <span className="text-gray-400 flex-shrink-0 w-20 text-[10px] pt-0.5">{k}</span>
+              <span className="text-gray-700 break-all font-mono text-[10px] flex-1">
+                {typeof v === 'string' && v.includes('\n')
+                  ? <pre className="whitespace-pre-wrap">{v}</pre>
+                  : String(v)}
+              </span>
+              {/* Filter in / out buttons — visible on group row hover */}
+              {isFilterable && (
+                <span className="inline-flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => onFilterIn(esField, String(v))}
+                    className="w-3.5 h-3.5 rounded flex items-center justify-center bg-green-100 text-green-700 hover:bg-green-200 transition-colors"
+                    title={`Filter: ${esField}:"${v}"`}
+                  >
+                    <Plus size={8} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onFilterOut(esField, String(v))}
+                    className="w-3.5 h-3.5 rounded flex items-center justify-center bg-red-100 text-red-600 hover:bg-red-200 transition-colors"
+                    title={`Exclude: NOT ${esField}:"${v}"`}
+                  >
+                    <Minus size={8} />
+                  </button>
+                </span>
+              )}
+              {/* Pivot / search button */}
+              {pivotFields.includes(k) && onPivot && v && (
+                <button
+                  onClick={() => onPivot(`"${v}"`)}
+                  className="flex-shrink-0 p-0.5 rounded hover:bg-gray-100 text-gray-400 hover:text-brand-accent transition-colors"
+                  title={`Search all events for: ${v}`}
+                >
+                  <Search size={10} />
+                </button>
+              )}
+            </div>
+          )
+        })}
       </div>
     </div>
   )

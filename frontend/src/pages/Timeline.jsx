@@ -453,7 +453,13 @@ export default function Timeline({ caseId, artifactTypes }) {
 
       {/* Event detail panel */}
       {selectedEvent && (
-        <EventDetail event={selectedEvent} caseId={caseId} onClose={() => setSelectedEvent(null)} />
+        <EventDetail
+          event={selectedEvent}
+          caseId={caseId}
+          onClose={() => setSelectedEvent(null)}
+          onFilterIn={(field, value)  => addFilter(field, value, false)}
+          onFilterOut={(field, value) => addFilter(field, value, true)}
+        />
       )}
 
       {/* ── Keyboard shortcuts overlay ───────────────────── */}
