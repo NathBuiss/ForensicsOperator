@@ -330,36 +330,90 @@ def _run_hayabusa(
 
 
 def _parse_hayabusa_jsonl(path: Path, tool_meta: dict | None = None) -> list[dict]:
+    """
+    Parse Hayabusa output.  Handles two formats:
+      • JSONL  – one JSON object per line  (Hayabusa default with .jsonl extension)
+      • JSON   – pretty-printed JSON array  (Hayabusa -o file.json, or pretty mode)
+    Also tolerates trailing commas and BOM headers.
+    """
     results: list[dict] = []
     skipped = 0
     total   = 0
     first_skip_msg = ""
-    with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
-        for lineno, line in enumerate(fh, 1):
+
+    # ── Read all rows regardless of format ───────────────────────────────────
+    rows: list[dict] = []
+
+    with open(path, "rb") as _fh:
+        raw = _fh.read()
+
+    # Strip BOM if present, decode
+    text = raw.lstrip(b"\xef\xbb\xbf").decode("utf-8", errors="replace")
+    stripped = text.lstrip()
+
+    if stripped.startswith("["):
+        # ── JSON array format ──────────────────────────────────────────────
+        try:
+            data = json.loads(text)
+            rows = data if isinstance(data, list) else [data]
+            if tool_meta is not None:
+                tool_meta["log"] += f"\n[format: JSON array, {len(rows):,} entries]\n"
+        except json.JSONDecodeError:
+            # Fallback: strip per-line trailing commas and parse line-by-line
+            for line in text.splitlines():
+                line = line.strip().rstrip(",")
+                if not line or line in ("[", "]"):
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    pass
+            if tool_meta is not None:
+                tool_meta["log"] += f"\n[format: JSON array (line fallback), {len(rows):,} entries]\n"
+    else:
+        # ── JSONL format ───────────────────────────────────────────────────
+        for lineno, line in enumerate(text.splitlines(), 1):
             line = line.strip()
             if not line:
                 continue
-            total += 1
             try:
-                row = json.loads(line)
-                hit = _hayabusa_row_to_hit(row)
-                if hit:
-                    results.append(hit)
-                else:
-                    skipped += 1
-                    if skipped == 1:
-                        first_skip_msg = f"first skipped row keys: {list(row.keys())[:10]}"
-            except Exception as exc:
-                skipped += 1
-                if skipped <= 3:
-                    logger.warning("Hayabusa: parse error line %d: %s | raw: %.120s", lineno, exc, line)
-                if skipped == 1:
-                    first_skip_msg = f"parse error: {exc} | raw[:100]: {line[:100]}"
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                # Try stripping a trailing comma (rare but seen in some builds)
+                try:
+                    rows.append(json.loads(line.rstrip(",")))
+                except Exception as exc:
+                    if lineno <= 3:
+                        logger.warning("Hayabusa: JSONL parse error line %d: %s | raw: %.120s",
+                                       lineno, exc, line)
+        if tool_meta is not None:
+            tool_meta["log"] += f"\n[format: JSONL, {len(rows):,} lines decoded]\n"
 
-    logger.info("Hayabusa JSONL: %d total lines, %d parsed hits, %d skipped", total, len(results), skipped)
+    # ── Convert rows to hits ──────────────────────────────────────────────────
+    for row in rows:
+        if not isinstance(row, dict):
+            skipped += 1
+            continue
+        total += 1
+        try:
+            hit = _hayabusa_row_to_hit(row)
+            if hit:
+                results.append(hit)
+            else:
+                skipped += 1
+                if skipped == 1:
+                    first_skip_msg = f"first skipped row keys: {list(row.keys())[:12]}"
+        except Exception as exc:
+            skipped += 1
+            if skipped <= 3:
+                logger.warning("Hayabusa: row conversion error: %s | keys: %s", exc, list(row.keys())[:8])
+            if skipped == 1:
+                first_skip_msg = f"row error: {exc} | keys: {list(row.keys())[:8]}"
+
+    logger.info("Hayabusa: %d rows decoded, %d hits parsed, %d skipped", total, len(results), skipped)
     if tool_meta is not None:
         tool_meta["log"] += (
-            f"\nParsed {len(results):,} hits from {total:,} JSONL lines ({skipped:,} skipped)"
+            f"\nDecoded {total:,} rows → {len(results):,} hits ({skipped:,} skipped)"
             + (f"\n{first_skip_msg}" if first_skip_msg else "")
             + "\n"
         )
@@ -400,8 +454,14 @@ def _hayabusa_row_to_hit(row: dict) -> dict | None:
     except (ValueError, TypeError):
         event_id = None
 
-    # Normalise level names: Hayabusa 3.x uses "info" instead of "informational"
-    level_map = {"info": "informational", "crit": "critical", "warn": "medium"}
+    # Normalise level names across Hayabusa versions
+    # 3.x: "crit", "high", "med", "low", "info"
+    # 2.x: "critical", "high", "medium", "low", "informational"
+    level_map = {
+        "info": "informational", "information": "informational",
+        "crit": "critical",
+        "med":  "medium", "warn": "medium", "warning": "medium",
+    }
     level = level_map.get(level, level)
 
     return {

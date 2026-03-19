@@ -204,6 +204,105 @@ function AlertMatchCard({ match, caseId, navigate }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// LevelGroup — one severity accordion inside ModuleRunCard
+// ─────────────────────────────────────────────────────────────────────────────
+const LEVEL_HEADER_BG = {
+  critical:      'bg-red-50',
+  high:          'bg-orange-50',
+  medium:        'bg-amber-50',
+  low:           'bg-blue-50',
+  informational: 'bg-gray-50',
+}
+
+function LevelGroup({ level, hits, totalInLevel, defaultOpen, caseId, navigate, buildQuery }) {
+  const [open, setOpen]       = useState(defaultOpen)
+  const [expandedHit, setExpandedHit] = useState(null)
+  const headerBg = LEVEL_HEADER_BG[level] || 'bg-gray-50'
+
+  return (
+    <div className="border-t border-gray-100">
+      <button
+        className={`w-full flex items-center gap-2.5 px-4 py-2 text-left transition-colors hover:brightness-95 ${headerBg}`}
+        onClick={() => setOpen(v => !v)}
+      >
+        <span className={`badge ${LEVEL_BADGE[level] || 'badge-generic'} flex-shrink-0`}>
+          {level}
+        </span>
+        <span className="text-xs font-semibold text-gray-700 flex-1">
+          {totalInLevel.toLocaleString()} detection{totalInLevel !== 1 ? 's' : ''}
+          {hits.length < totalInLevel && (
+            <span className="text-gray-400 font-normal"> · preview: first {hits.length}</span>
+          )}
+        </span>
+        <ChevronDown size={12} className={`text-gray-400 flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+
+      {open && (
+        <div className="divide-y divide-gray-100">
+          {hits.map((hit, i) => {
+            const isExpanded = expandedHit === i
+            return (
+              <div key={i} className="bg-white hover:bg-gray-50/70 transition-colors group">
+                <div className="flex items-start gap-2 px-4 py-2.5">
+                  {/* Hit detail */}
+                  <div
+                    className="flex-1 min-w-0 cursor-pointer"
+                    onClick={() => setExpandedHit(isExpanded ? null : i)}
+                  >
+                    <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
+                      <span className="font-semibold text-xs text-brand-text leading-tight">
+                        {hit.rule_title}
+                      </span>
+                      {hit.event_id && (
+                        <span className="badge bg-purple-50 text-purple-700 border border-purple-100 font-mono text-[9px] flex-shrink-0">
+                          EID {hit.event_id}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-0 text-[10px] font-mono mt-0.5">
+                      {hit.computer  && <span className="text-gray-600 font-semibold">{hit.computer}</span>}
+                      {hit.channel   && (
+                        <span className="text-blue-500 truncate max-w-[200px]" title={hit.channel}>
+                          {hit.channel}
+                        </span>
+                      )}
+                      {hit.timestamp && <span className="text-gray-400">{hit.timestamp}</span>}
+                    </div>
+                    {hit.details_raw && (
+                      <p
+                        className={`text-[10px] text-gray-500 font-mono mt-1 ${
+                          isExpanded ? 'whitespace-pre-wrap break-all' : 'truncate'
+                        }`}
+                        title={!isExpanded ? hit.details_raw : undefined}
+                      >
+                        {hit.details_raw}
+                      </p>
+                    )}
+                  </div>
+                  {/* Search pivot */}
+                  <button
+                    onClick={() =>
+                      navigate(`/cases/${caseId}/search`, {
+                        state: { pivotQuery: buildQuery(hit) },
+                      })
+                    }
+                    className="flex-shrink-0 opacity-0 group-hover:opacity-100 flex items-center gap-1 text-[10px] text-gray-400 hover:text-brand-accent hover:bg-brand-accentlight rounded px-1.5 py-1 transition-all"
+                    title="Find matching events in Search"
+                  >
+                    <ExternalLink size={9} />
+                    Search
+                  </button>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ModuleLaunchModal
 // ─────────────────────────────────────────────────────────────────────────────
 function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
@@ -545,12 +644,16 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // ModuleRunCard
 // ─────────────────────────────────────────────────────────────────────────────
-function ModuleRunCard({ run }) {
-  const zeroDetected = run.status === 'COMPLETED' && run.total_hits === 0
-  const [open, setOpen]             = useState(zeroDetected)   // auto-expand card when no detections
-  const [showOutput, setShowOutput] = useState(zeroDetected)   // auto-show tool output when no detections
+const LEVEL_ORDER_KEYS = ['critical', 'high', 'medium', 'low', 'informational']
 
-  const moduleName = MODULE_NAMES[run.module_id] || run.module_id
+function ModuleRunCard({ run, caseId, navigate }) {
+  const zeroDetected = run.status === 'COMPLETED' && run.total_hits === 0
+  const [open, setOpen]             = useState(false)
+  const [showOutput, setShowOutput] = useState(zeroDetected)
+
+  const moduleName  = MODULE_NAMES[run.module_id] || run.module_id
+  const preview     = run.results_preview || []
+  const byLevel     = run.hits_by_level   || {}
 
   const STATUS_STYLE = {
     PENDING:   'bg-gray-100 text-gray-600',
@@ -565,16 +668,37 @@ function ModuleRunCard({ run }) {
     ? new Date(ts).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
     : null
 
-  const preview    = run.results_preview || []
-  const byLevel    = run.hits_by_level   || {}
-  // Strip residual ANSI codes (belt-and-suspenders: server already strips them for new runs)
+  // Strip residual ANSI codes
   const _stripAnsi = s => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\x1b[@-_][^\x1b]*/g, '')
   const rawOutput  = (run.tool_stdout || '') + (run.tool_log ? '\n--- log ---\n' + run.tool_log : '')
   const toolOutput = _stripAnsi(rawOutput)
   const hasOutput  = toolOutput.trim().length > 0
 
+  // Group preview hits by level
+  const hitsByLevel = {}
+  for (const hit of preview) {
+    const lvl = (hit.level || 'informational').toLowerCase()
+    if (!hitsByLevel[lvl]) hitsByLevel[lvl] = []
+    hitsByLevel[lvl].push(hit)
+  }
+  const levelsWithHits = LEVEL_ORDER_KEYS.filter(lvl => hitsByLevel[lvl]?.length > 0)
+
+  // Build smart Lucene pivot query for a hit
+  function buildQuery(hit) {
+    const parts = []
+    if (hit.event_id) parts.push(`evtx.event_id:${hit.event_id}`)
+    if (hit.computer) parts.push(`host.hostname:"${hit.computer}"`)
+    if (parts.length === 0) {
+      const title = (hit.rule_title || '').replace(/"/g, '')
+      return title ? `message:"${title}"` : '*'
+    }
+    return parts.join(' AND ')
+  }
+
   return (
     <div className="card overflow-hidden">
+
+      {/* ── Card header ───────────────────────────────────────── */}
       <button
         className="w-full flex items-start gap-3 p-3 text-left hover:bg-gray-50 transition-colors"
         onClick={() => setOpen(v => !v)}
@@ -586,13 +710,21 @@ function ModuleRunCard({ run }) {
               {run.status === 'RUNNING' && <Loader2 size={9} className="animate-spin" />}
               {run.status}
             </span>
-            {run.status === 'COMPLETED' && run.total_hits > 0 && (
-              <span className="badge bg-orange-50 text-orange-700 border border-orange-200">
-                {run.total_hits.toLocaleString()} hits
+
+            {/* Level pills in header — only for completed runs */}
+            {run.status === 'COMPLETED' && LEVEL_ORDER_KEYS.map(lvl => {
+              const count = byLevel[lvl] || 0
+              if (!count) return null
+              return (
+                <span key={lvl} className={`badge ${LEVEL_BADGE[lvl] || 'badge-generic'}`}>
+                  {count.toLocaleString()} {lvl === 'informational' ? 'info' : lvl.slice(0, 4)}
+                </span>
+              )
+            })}
+            {zeroDetected && (
+              <span className="badge bg-green-50 text-green-600 border border-green-200">
+                ✓ clean
               </span>
-            )}
-            {run.status === 'COMPLETED' && run.total_hits === 0 && (
-              <span className="badge bg-gray-50 text-gray-500">0 detections</span>
             )}
           </div>
           {tsDisplay && (
@@ -610,84 +742,58 @@ function ModuleRunCard({ run }) {
         />
       </button>
 
+      {/* ── Expanded body ─────────────────────────────────────── */}
       {open && (
-        <div className="border-t border-gray-100 bg-gray-50 p-3 space-y-2">
-
-          {/* ── Level summary ──────────────────────────────────── */}
-          {Object.keys(byLevel).length > 0 && (
-            <div className="flex flex-wrap gap-1 mb-1">
-              {['critical', 'high', 'medium', 'low', 'informational'].map(lvl => {
-                const count = byLevel[lvl]
-                if (!count) return null
-                return (
-                  <span key={lvl} className={`badge ${LEVEL_BADGE[lvl] || 'badge-generic'}`}>
-                    {lvl}: {count}
-                  </span>
-                )
-              })}
-            </div>
-          )}
-
-          {/* ── Hits ───────────────────────────────────────────── */}
+        <div>
+          {/* No detections state */}
           {preview.length === 0 && run.status === 'COMPLETED' && (
-            <div className="bg-white rounded-lg border border-gray-200 p-3 text-center">
-              <p className="text-xs text-gray-500 font-medium">No detections</p>
-              {hasOutput && (
-                <p className="text-[10px] text-gray-400 mt-0.5">
-                  See tool output below for details
-                </p>
-              )}
+            <div className="border-t border-gray-100 p-5 text-center bg-green-50/40">
+              <CheckCircle size={20} className="text-green-400 mx-auto mb-2" />
+              <p className="text-sm font-medium text-gray-700">No detections</p>
+              <p className="text-xs text-gray-400 mt-0.5">
+                {moduleName} found nothing suspicious in the selected files
+              </p>
             </div>
           )}
 
-          {preview.length > 0 && (
-            <>
-              {preview.slice(0, 50).map((hit, i) => (
-                <div key={i} className="bg-white rounded border border-gray-200 p-2 text-xs">
-                  <div className="flex items-center gap-2 flex-wrap mb-0.5">
-                    <span className={`badge ${LEVEL_BADGE[hit.level] || 'badge-generic'}`}>
-                      {hit.level}
-                    </span>
-                    <span className="font-medium text-brand-text">{hit.rule_title}</span>
-                    {hit.filename && (
-                      <span className="text-[10px] text-gray-400 font-mono">{hit.filename}</span>
-                    )}
-                  </div>
-                  <div className="flex gap-3 text-[10px] text-gray-400 font-mono flex-wrap">
-                    {hit.computer  && <span>{hit.computer}</span>}
-                    {hit.channel   && <span className="text-blue-400">{hit.channel}</span>}
-                    {hit.event_id  && <span className="text-purple-400">EID:{hit.event_id}</span>}
-                    {hit.timestamp && <span>{hit.timestamp}</span>}
-                  </div>
-                  {hit.details_raw && (
-                    <p className="text-[10px] text-gray-500 mt-1 break-all line-clamp-3"
-                       title={hit.details_raw}>
-                      {hit.details_raw}
-                    </p>
-                  )}
-                </div>
-              ))}
-              {run.total_hits > 50 && (
-                <p className="text-[10px] text-gray-400 text-center pt-1">
-                  Showing first 50 of {run.total_hits.toLocaleString()} hits
-                </p>
-              )}
-            </>
+          {/* Severity accordion groups */}
+          {levelsWithHits.map(lvl => (
+            <LevelGroup
+              key={lvl}
+              level={lvl}
+              hits={hitsByLevel[lvl]}
+              totalInLevel={byLevel[lvl] || hitsByLevel[lvl].length}
+              defaultOpen={lvl === 'critical' || lvl === 'high'}
+              caseId={caseId}
+              navigate={navigate}
+              buildQuery={buildQuery}
+            />
+          ))}
+
+          {/* Truncation notice */}
+          {run.total_hits > preview.length && preview.length > 0 && (
+            <div className="border-t border-gray-100 px-4 py-2 bg-gray-50 text-center">
+              <p className="text-[10px] text-gray-400">
+                Showing first {preview.length} of{' '}
+                <span className="font-semibold text-gray-600">{run.total_hits.toLocaleString()}</span>{' '}
+                total detections
+              </p>
+            </div>
           )}
 
-          {/* ── Tool output (stdout/log) ──────────────────────── */}
+          {/* Tool output (stdout / log) */}
           {(hasOutput || run.status === 'FAILED') && (
-            <div>
+            <div className="border-t border-gray-100 bg-gray-50/80 px-4 py-2">
               <button
                 onClick={() => setShowOutput(v => !v)}
                 className="w-full flex items-center gap-1.5 text-[10px] text-gray-400 hover:text-gray-600 transition-colors py-1"
               >
                 <Terminal size={10} />
                 Tool output
-                <ChevronDown size={9} className={`transition-transform ${showOutput ? 'rotate-180' : ''}`} />
+                <ChevronDown size={9} className={`ml-auto transition-transform ${showOutput ? 'rotate-180' : ''}`} />
               </button>
               {showOutput && (
-                <pre className="mt-1 bg-gray-950 text-green-300 rounded-lg p-3 text-[10px] font-mono overflow-x-auto max-h-64 leading-relaxed whitespace-pre-wrap break-all">
+                <pre className="mt-1 bg-gray-950 text-green-300 rounded-lg p-3 text-[10px] font-mono overflow-x-auto max-h-72 leading-relaxed whitespace-pre-wrap break-all">
                   {toolOutput || run.error || '(no output)'}
                 </pre>
               )}
@@ -703,7 +809,8 @@ function ModuleRunCard({ run }) {
 // ModuleRunsPanel
 // ─────────────────────────────────────────────────────────────────────────────
 function ModuleRunsPanel({ caseId, onClose }) {
-  const [runs, setRuns]     = useState([])
+  const navigate              = useNavigate()
+  const [runs, setRuns]       = useState([])
   const [loading, setLoading] = useState(true)
 
   const fetchRuns = useCallback(() => {
@@ -768,7 +875,14 @@ function ModuleRunsPanel({ caseId, onClose }) {
               </p>
             </div>
           ) : (
-            runs.map(run => <ModuleRunCard key={run.run_id} run={run} />)
+            runs.map(run => (
+              <ModuleRunCard
+                key={run.run_id}
+                run={run}
+                caseId={caseId}
+                navigate={navigate}
+              />
+            ))
           )}
         </div>
       </div>

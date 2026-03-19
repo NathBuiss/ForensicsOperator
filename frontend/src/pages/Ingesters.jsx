@@ -1,7 +1,9 @@
 import { useEffect, useState, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Puzzle, Upload, RefreshCw, FileCode2, X,
   CheckCircle, AlertCircle, Copy, Check, Lock, Clock,
+  Code2, BookOpen, Plus, ArrowRight,
 } from 'lucide-react'
 import { api } from '../api/client'
 
@@ -170,95 +172,6 @@ const BUILTIN_INGESTERS = [
   },
 ]
 
-// ── Plugin template (identical to the old Plugins page) ──────────────────────
-const INGESTER_TEMPLATE = `"""
-my_artifact_plugin.py — parse my custom artifact format.
-
-File must be named *_plugin.py to be auto-discovered by the loader.
-Drop it in /app/plugins/ (or upload via the UI) and click "Reload All".
-"""
-from base_plugin import BasePlugin, PluginContext, ParsedEvent
-
-
-class MyArtifactPlugin(BasePlugin):
-    # Identifier used as artifact_type in events and index name suffix
-    PLUGIN_NAME = "my-artifact"
-
-    # File extensions this plugin handles (lower-case)
-    SUPPORTED_EXTENSIONS = [".ext", ".ext2"]
-
-    # Exact filenames to match (useful for system files like "$MFT")
-    HANDLED_FILENAMES = []  # e.g. ["$MFT", "NTUSER.DAT"]
-
-    def parse(self, file_path: str, context: PluginContext):
-        """
-        Generator — yield one ParsedEvent per event found in the file.
-
-        Available context fields:
-          context.case_id            current case ID
-          context.job_id             ingest job ID
-          context.source_file_path   path to the evidence file on disk
-          context.source_minio_url   MinIO URL of the evidence file
-        """
-        with open(file_path, "rb") as f:
-            for record in self._parse_records(f):
-                yield ParsedEvent(
-                    timestamp=record["timestamp"],     # ISO-8601 string
-                    message=record["description"],
-                    artifact_type=self.PLUGIN_NAME,
-                    host={"hostname": record.get("hostname", "")},
-                    user={"name": record.get("username", "")},
-                    # Add any extra fields — stored as a sub-object in ES
-                    # extra={"event_id": 4624, "channel": "Security"},
-                )
-
-    def _parse_records(self, file_handle):
-        """Replace with your actual parsing logic."""
-        return []
-`
-
-// ── TemplateModal ─────────────────────────────────────────────────────────────
-function TemplateModal({ onClose }) {
-  const [copied, setCopied] = useState(false)
-
-  function copy() {
-    navigator.clipboard.writeText(INGESTER_TEMPLATE)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }
-
-  return (
-    <div
-      className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-      onClick={e => e.target === e.currentTarget && onClose()}
-    >
-      <div className="bg-white border border-gray-200 rounded-xl w-full max-w-2xl shadow-2xl">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
-          <div className="flex items-center gap-2">
-            <FileCode2 size={16} className="text-brand-accent" />
-            <span className="text-sm font-semibold text-brand-text">Ingester Template</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button onClick={copy} className="btn-ghost text-xs">
-              {copied
-                ? <><Check size={13} className="text-green-600" /> Copied!</>
-                : <><Copy size={13} /> Copy</>}
-            </button>
-            <button onClick={onClose} className="btn-ghost p-1.5">
-              <X size={14} />
-            </button>
-          </div>
-        </div>
-        <div className="p-5">
-          <pre className="code-block text-[11px] leading-relaxed overflow-x-auto max-h-[70vh] overflow-y-auto">
-            {INGESTER_TEMPLATE}
-          </pre>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 // ── UploadZone ────────────────────────────────────────────────────────────────
 function UploadZone({ onUploaded }) {
   const [dragging, setDragging] = useState(false)
@@ -304,7 +217,7 @@ function UploadZone({ onUploaded }) {
   }
 
   return (
-    <div className="mb-5">
+    <div>
       <div
         className={dragging ? 'drop-zone-active' : 'drop-zone-inactive'}
         onDragOver={e => { e.preventDefault(); setDragging(true) }}
@@ -351,8 +264,7 @@ function UploadZone({ onUploaded }) {
               <Upload size={18} className="text-gray-500" />
             </div>
             <p className="text-sm text-gray-500">
-              Drop an ingester file{' '}
-              <code className="text-brand-accent">*_plugin.py</code> here
+              Drop a <code className="text-brand-accent">*_plugin.py</code> file here
             </p>
             <p className="text-xs text-gray-400">or click to browse</p>
           </div>
@@ -375,20 +287,17 @@ function UploadZone({ onUploaded }) {
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function Ingesters() {
+  const navigate = useNavigate()
   const [customPlugins, setCustomPlugins] = useState([])
   const [loading, setLoading]             = useState(true)
   const [reloading, setReloading]         = useState(false)
-  const [showTemplate, setShowTemplate]   = useState(false)
 
   function loadPlugins() {
     setLoading(true)
     api.plugins.list()
       .then(r => {
-        // Exclude built-in ingesters (shown in the built-in section above).
-        // Match case-insensitively against both `name` and `default_artifact_type`
-        // to handle any casing differences between the plugin registry and the API.
         const builtinKeys = new Set(
-          BUILTIN_INGESTERS.flatMap(b => [b.name.toLowerCase(), (b.name).toLowerCase()])
+          BUILTIN_INGESTERS.flatMap(b => [b.name.toLowerCase()])
         )
         const custom = (r.plugins || []).filter(p => {
           const pName = (p.name || '').toLowerCase().trim()
@@ -423,7 +332,6 @@ export default function Ingesters() {
 
   return (
     <div className="p-6 max-w-4xl mx-auto">
-      {showTemplate && <TemplateModal onClose={() => setShowTemplate(false)} />}
 
       {/* Page header */}
       <div className="flex items-center justify-between mb-6">
@@ -432,14 +340,17 @@ export default function Ingesters() {
             <Puzzle size={18} className="text-brand-accent" /> Ingesters
           </h1>
           <p className="text-xs text-gray-500 mt-1">
-            Built-in parsers that convert uploaded forensic artifacts into timeline events
+            Parsers that convert uploaded forensic artifacts into timeline events
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={() => setShowTemplate(true)} className="btn-ghost text-xs">
-            <FileCode2 size={13} /> Template
+          <button
+            onClick={() => navigate('/studio')}
+            className="btn-primary text-xs"
+          >
+            <Plus size={13} /> New Ingester
           </button>
-          <button onClick={reload} disabled={reloading} className="btn-primary text-xs">
+          <button onClick={reload} disabled={reloading} className="btn-outline text-xs">
             <RefreshCw size={13} className={reloading ? 'animate-spin' : ''} />
             {reloading ? 'Reloading…' : 'Reload All'}
           </button>
@@ -529,7 +440,7 @@ export default function Ingesters() {
       </section>
 
       {/* ── Section 2: Custom ingesters ────────────────────────────────────── */}
-      <section>
+      <section className="mb-8">
         <div className="flex items-center gap-2 mb-3">
           <h2 className="section-title">Custom Ingesters</h2>
           {!loading && (
@@ -538,34 +449,24 @@ export default function Ingesters() {
             </span>
           )}
         </div>
-        <p className="text-xs text-gray-400 mb-4">
-          Upload a custom ingester file (named <code className="text-gray-500">*_plugin.py</code>) following the template above.
-          Custom ingesters are stored in <code className="text-gray-500">/app/plugins/</code> and
-          activated at worker startup (or after "Reload All").
-        </p>
-
-        <UploadZone onUploaded={plugins => {
-          const builtinKeys = new Set(BUILTIN_INGESTERS.flatMap(b => [b.name.toLowerCase()]))
-          setCustomPlugins((plugins || []).filter(p => {
-            const pName = (p.name || '').toLowerCase().trim()
-            const pArt  = (p.default_artifact_type || '').toLowerCase().trim()
-            return !builtinKeys.has(pName) && !builtinKeys.has(pArt)
-          }))
-        }} />
 
         {loading ? (
           <div className="space-y-3">
             {[1, 2].map(i => <div key={i} className="skeleton h-16 w-full" />)}
           </div>
         ) : customPlugins.length === 0 ? (
-          <div className="card p-10 text-center">
+          <div className="card p-8 text-center">
             <Puzzle size={28} className="text-gray-300 mx-auto mb-3" />
-            <p className="text-gray-500 text-sm font-medium mb-1">No custom ingesters</p>
-            <p className="text-gray-400 text-xs">
-              Upload a custom ingester above, or copy a{' '}
-              <code className="text-gray-500">*_plugin.py</code> file into{' '}
-              <code className="text-gray-500">/app/plugins/</code> and click Reload All.
+            <p className="text-gray-600 text-sm font-medium mb-1">No custom ingesters yet</p>
+            <p className="text-gray-400 text-xs mb-4">
+              Create a <code className="text-gray-500">*_plugin.py</code> ingester in Studio or upload one below.
             </p>
+            <button
+              onClick={() => navigate('/studio')}
+              className="btn-primary text-xs inline-flex"
+            >
+              <Code2 size={12} /> Create in Studio
+            </button>
           </div>
         ) : (
           <div className="space-y-2">
@@ -594,23 +495,126 @@ export default function Ingesters() {
                       </p>
                     </div>
                   </div>
-                  <div className="flex flex-wrap gap-1 justify-end max-w-xs">
-                    {p.supported_extensions?.map(ext => (
-                      <span key={ext} className="badge bg-gray-100 text-gray-600 border border-gray-200 font-mono">
-                        {ext}
-                      </span>
-                    ))}
-                    {p.handled_filenames?.map(fn => (
-                      <span key={fn} className="badge bg-gray-100 text-gray-600 border border-gray-200 font-mono">
-                        {fn}
-                      </span>
-                    ))}
+                  <div className="flex items-center gap-3">
+                    <div className="flex flex-wrap gap-1 justify-end max-w-xs">
+                      {p.supported_extensions?.map(ext => (
+                        <span key={ext} className="badge bg-gray-100 text-gray-600 border border-gray-200 font-mono">
+                          {ext}
+                        </span>
+                      ))}
+                      {p.handled_filenames?.map(fn => (
+                        <span key={fn} className="badge bg-gray-100 text-gray-600 border border-gray-200 font-mono">
+                          {fn}
+                        </span>
+                      ))}
+                    </div>
+                    <button
+                      onClick={() => navigate('/studio', { state: { type: 'ingester', name: p.name } })}
+                      className="btn-ghost text-xs flex-shrink-0"
+                      title="Edit in Studio"
+                    >
+                      <Code2 size={12} /> Edit
+                    </button>
                   </div>
                 </div>
               </div>
             ))}
           </div>
         )}
+      </section>
+
+      {/* ── Section 3: Build a custom ingester ─────────────────────────────── */}
+      <section className="mb-8">
+        <h2 className="section-title mb-3">Build a Custom Ingester</h2>
+        <div className="card p-5 space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-5 text-xs">
+            {[
+              {
+                n: 1,
+                title: 'Write the parser',
+                body: (
+                  <>
+                    Open <strong>Studio → Ingesters</strong> and create a{' '}
+                    <code className="text-brand-accent bg-brand-accentlight px-1 rounded">*_plugin.py</code> file.
+                    Subclass <code className="text-brand-accent bg-brand-accentlight px-1 rounded">BasePlugin</code> and
+                    implement the <code className="text-brand-accent bg-brand-accentlight px-1 rounded">parse()</code> generator.
+                  </>
+                ),
+              },
+              {
+                n: 2,
+                title: 'Yield ParsedEvents',
+                body: (
+                  <>
+                    Each event needs a <code className="text-brand-accent bg-brand-accentlight px-1 rounded">timestamp</code>,{' '}
+                    <code className="text-brand-accent bg-brand-accentlight px-1 rounded">message</code>, and{' '}
+                    <code className="text-brand-accent bg-brand-accentlight px-1 rounded">artifact_type</code>.
+                    Optional: <code className="text-brand-accent bg-brand-accentlight px-1 rounded">host</code>,{' '}
+                    <code className="text-brand-accent bg-brand-accentlight px-1 rounded">user</code>,{' '}
+                    <code className="text-brand-accent bg-brand-accentlight px-1 rounded">extra</code> dict.
+                  </>
+                ),
+              },
+              {
+                n: 3,
+                title: 'Save & reload',
+                body: (
+                  <>
+                    Save the file in Studio, then click <strong>Reload All</strong> on this page
+                    (or restart the processor). Upload a matching file to any case — it will be
+                    parsed by your ingester automatically.
+                  </>
+                ),
+              },
+            ].map(({ n, title, body }) => (
+              <div key={n} className="flex gap-3">
+                <div className="w-6 h-6 rounded-full bg-gray-200 text-gray-600 flex items-center justify-center text-[11px] font-bold flex-shrink-0 mt-0.5">
+                  {n}
+                </div>
+                <div>
+                  <p className="font-semibold text-brand-text mb-1">{title}</p>
+                  <p className="text-gray-500 leading-relaxed">{body}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-3 border-t border-gray-100 pt-4">
+            <button onClick={() => navigate('/studio')} className="btn-primary text-xs">
+              <Code2 size={12} /> Open Studio
+            </button>
+            <button onClick={() => navigate('/docs')} className="btn-outline text-xs">
+              <BookOpen size={12} /> Read the Docs
+            </button>
+            <span className="text-xs text-gray-400 ml-auto flex items-center gap-1">
+              <ArrowRight size={11} /> Save as <code className="font-mono">ingesters/*_plugin.py</code>
+            </span>
+          </div>
+        </div>
+      </section>
+
+      {/* ── Section 4: Upload an ingester file ─────────────────────────────── */}
+      <section>
+        <div className="flex items-center gap-2 mb-3">
+          <h2 className="section-title">Upload Ingester File</h2>
+          <span className="badge bg-gray-100 text-gray-500 border border-gray-200 text-[10px]">
+            alternative to Studio
+          </span>
+        </div>
+        <p className="text-xs text-gray-400 mb-4">
+          Have an ingester file ready? Drop it here. The file must be named{' '}
+          <code className="text-gray-500">*_plugin.py</code> and will be deployed to{' '}
+          <code className="text-gray-500">/app/ingesters/</code>.
+          Click <strong>Reload All</strong> after uploading to activate it.
+        </p>
+        <UploadZone onUploaded={plugins => {
+          const builtinKeys = new Set(BUILTIN_INGESTERS.flatMap(b => [b.name.toLowerCase()]))
+          setCustomPlugins((plugins || []).filter(p => {
+            const pName = (p.name || '').toLowerCase().trim()
+            const pArt  = (p.default_artifact_type || '').toLowerCase().trim()
+            return !builtinKeys.has(pName) && !builtinKeys.has(pArt)
+          }))
+        }} />
       </section>
     </div>
   )

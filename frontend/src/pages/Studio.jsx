@@ -5,6 +5,7 @@
  * Modules    → modules/*_module.py     — standalone run(run_id, …) functions
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useLocation } from 'react-router-dom'
 import {
   Code2, Plus, Save, Trash2, CheckCircle, AlertCircle,
   RefreshCw, FileCode2, X, ChevronRight, Cpu, Puzzle,
@@ -271,6 +272,7 @@ function CodeEditor({ value, onChange, readOnly = false }) {
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function Studio() {
+  const location = useLocation()
   const [tab, setTab]               = useState('ingesters')  // 'ingesters' | 'modules'
   const [ingesterFiles, setIngFiles] = useState([])
   const [moduleFiles, setModFiles]   = useState([])
@@ -302,6 +304,30 @@ export default function Studio() {
   }, [])
 
   useEffect(() => { loadLists() }, [loadLists])
+
+  // ── Auto-open file when navigated from Modules / Ingesters pages ──────────
+  const didAutoOpen = useRef(false)
+  useEffect(() => {
+    if (didAutoOpen.current) return
+    const state = location.state
+    if (!state?.type) return
+    const { type, name } = state
+    const fileList = type === 'module' ? moduleFiles : ingesterFiles
+    if (fileList.length === 0) return  // wait until lists are loaded
+    didAutoOpen.current = true
+    setTab(type === 'module' ? 'modules' : 'ingesters')
+    if (name) {
+      // Try the exact name, then with suffix appended
+      const suffix = type === 'module' ? '_module.py' : '_ingester.py'
+      const candidateName = fileList.includes(name) ? name
+        : fileList.includes(name + suffix) ? name + suffix
+        : null
+      if (candidateName) {
+        // Use setTimeout to let the tab switch render first
+        setTimeout(() => openFile(type, candidateName), 50)
+      }
+    }
+  }, [location.state, ingesterFiles, moduleFiles]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Open a file ───────────────────────────────────────────────────────────
 
