@@ -15,29 +15,28 @@ function CaseSelector({ label, cases, value, onChange }) {
   )
 }
 
-function CompareColumn({ caseData, facets, label }) {
+function CompareColumn({ caseData, facets }) {
   if (!caseData) return (
-    <div className="flex-1 flex items-center justify-center text-gray-600 text-sm italic">
+    <div className="flex-1 flex items-center justify-center text-gray-400 text-sm italic">
       Select a case
     </div>
   )
 
-  const hostBuckets = facets?.by_hostname?.buckets?.slice(0, 8) || []
-  const artifactBuckets = facets?.by_artifact_type?.buckets || []
-  const userBuckets = facets?.by_username?.buckets?.slice(0, 5) || []
+  const hostBuckets     = facets?.by_hostname?.buckets?.slice(0, 8) || []
+  const userBuckets     = facets?.by_username?.buckets?.slice(0, 5) || []
 
   return (
     <div className="flex-1 min-w-0 space-y-4">
       <div className="card p-4">
-        <h3 className="text-sm font-bold text-gray-100 mb-3 truncate">{caseData.name}</h3>
+        <h3 className="text-sm font-bold text-brand-text mb-3 truncate">{caseData.name}</h3>
         <div className="grid grid-cols-2 gap-3">
-          <div className="bg-gray-700/30 rounded-lg p-3">
+          <div className="bg-gray-50 rounded-lg p-3">
             <p className="text-[10px] text-gray-500 uppercase tracking-wider">Events</p>
-            <p className="text-xl font-bold text-indigo-400 mt-1">{(caseData.event_count || 0).toLocaleString()}</p>
+            <p className="text-xl font-bold text-brand-accent mt-1">{(caseData.event_count || 0).toLocaleString()}</p>
           </div>
-          <div className="bg-gray-700/30 rounded-lg p-3">
+          <div className="bg-gray-50 rounded-lg p-3">
             <p className="text-[10px] text-gray-500 uppercase tracking-wider">Artifacts</p>
-            <p className="text-xl font-bold text-indigo-400 mt-1">{(caseData.artifact_types || []).length}</p>
+            <p className="text-xl font-bold text-brand-accent mt-1">{(caseData.artifact_types || []).length}</p>
           </div>
         </div>
       </div>
@@ -48,9 +47,9 @@ function CompareColumn({ caseData, facets, label }) {
         </p>
         <div className="flex flex-wrap gap-1">
           {(caseData.artifact_types || []).map(at => (
-            <span key={at} className="badge bg-gray-700/60 text-gray-300 border border-gray-600/40 text-[10px]">{at}</span>
+            <span key={at} className="badge bg-gray-100 text-gray-600 border border-gray-200 text-[10px]">{at}</span>
           ))}
-          {(caseData.artifact_types || []).length === 0 && <span className="text-xs text-gray-600 italic">No data</span>}
+          {(caseData.artifact_types || []).length === 0 && <span className="text-xs text-gray-400 italic">No data</span>}
         </div>
       </div>
 
@@ -65,11 +64,11 @@ function CompareColumn({ caseData, facets, label }) {
               return (
                 <div key={b.key}>
                   <div className="flex items-center justify-between text-xs mb-0.5">
-                    <span className="text-gray-300 truncate">{b.key}</span>
+                    <span className="text-brand-text truncate">{b.key}</span>
                     <span className="text-gray-500 flex-shrink-0 ml-2">{b.doc_count.toLocaleString()}</span>
                   </div>
-                  <div className="h-1 bg-gray-700/50 rounded-full overflow-hidden">
-                    <div className="h-full bg-indigo-600/60 rounded-full" style={{ width: `${Math.min(pct, 100)}%` }} />
+                  <div className="h-1 bg-gray-200 rounded-full overflow-hidden">
+                    <div className="h-full bg-brand-accent/50 rounded-full" style={{ width: `${Math.min(pct, 100)}%` }} />
                   </div>
                 </div>
               )
@@ -86,7 +85,7 @@ function CompareColumn({ caseData, facets, label }) {
           <div className="space-y-0.5">
             {userBuckets.map(b => (
               <div key={b.key} className="flex items-center justify-between text-xs">
-                <span className="text-gray-300 truncate">{b.key}</span>
+                <span className="text-brand-text truncate">{b.key}</span>
                 <span className="text-gray-500">{b.doc_count.toLocaleString()}</span>
               </div>
             ))}
@@ -98,14 +97,14 @@ function CompareColumn({ caseData, facets, label }) {
 }
 
 export default function Compare() {
-  const [cases, setCases]       = useState([])
-  const [caseAId, setCaseAId]   = useState('')
-  const [caseBId, setCaseBId]   = useState('')
-  const [dataA, setDataA]       = useState(null)
-  const [dataB, setDataB]       = useState(null)
-  const [facetsA, setFacetsA]   = useState(null)
-  const [facetsB, setFacetsB]   = useState(null)
-  const [loading, setLoading]   = useState(false)
+  const [cases, setCases]     = useState([])
+  const [caseAId, setCaseAId] = useState('')
+  const [caseBId, setCaseBId] = useState('')
+  const [dataA, setDataA]     = useState(null)
+  const [dataB, setDataB]     = useState(null)
+  const [facetsA, setFacetsA] = useState(null)
+  const [facetsB, setFacetsB] = useState(null)
+  const [loading, setLoading] = useState(false)
 
   useEffect(() => {
     api.cases.list().then(r => setCases(r.cases || [])).catch(() => {})
@@ -137,8 +136,8 @@ export default function Compare() {
   return (
     <div className="p-6 max-w-5xl mx-auto">
       <div className="mb-6">
-        <h1 className="text-xl font-bold text-gray-100 flex items-center gap-2">
-          <GitCompare size={18} className="text-indigo-400" /> Case Comparison
+        <h1 className="text-xl font-bold text-brand-text flex items-center gap-2">
+          <GitCompare size={18} className="text-brand-accent" /> Case Comparison
         </h1>
         <p className="text-sm text-gray-500 mt-1">Compare two cases side by side to find overlaps and patterns</p>
       </div>
@@ -157,13 +156,13 @@ export default function Compare() {
 
       {/* Shared hosts banner */}
       {!loading && sharedHosts.length > 0 && (
-        <div className="card p-3 mb-4 border-indigo-800/50 bg-indigo-950/20">
-          <p className="text-xs font-semibold text-indigo-300 mb-1.5 flex items-center gap-1">
+        <div className="card p-3 mb-4 border-brand-accent/20 bg-brand-accentlight/30">
+          <p className="text-xs font-semibold text-brand-accent mb-1.5 flex items-center gap-1">
             <Database size={11} /> {sharedHosts.length} shared host{sharedHosts.length !== 1 ? 's' : ''} found in both cases
           </p>
           <div className="flex flex-wrap gap-1">
             {sharedHosts.map(h => (
-              <span key={h} className="badge bg-indigo-900/40 text-indigo-300 border border-indigo-800/40 font-mono text-[10px]">{h}</span>
+              <span key={h} className="badge bg-brand-accentlight text-brand-accent border border-brand-accent/20 font-mono text-[10px]">{h}</span>
             ))}
           </div>
         </div>
@@ -172,17 +171,17 @@ export default function Compare() {
       {/* Side-by-side comparison */}
       {!loading && (caseAId || caseBId) && (
         <div className="flex gap-4">
-          <CompareColumn caseData={dataA} facets={facetsA} label="Case A" />
-          <div className="w-px bg-gray-700/60 self-stretch" />
-          <CompareColumn caseData={dataB} facets={facetsB} label="Case B" />
+          <CompareColumn caseData={dataA} facets={facetsA} />
+          <div className="w-px bg-gray-200 self-stretch" />
+          <CompareColumn caseData={dataB} facets={facetsB} />
         </div>
       )}
 
       {!caseAId && !caseBId && (
         <div className="card p-12 text-center">
-          <GitCompare size={32} className="text-gray-700 mx-auto mb-3" />
-          <p className="text-gray-400 text-sm font-medium mb-1">Select two cases to compare</p>
-          <p className="text-gray-600 text-xs">Find shared hosts, overlapping time periods, and common patterns across incidents.</p>
+          <GitCompare size={32} className="text-gray-300 mx-auto mb-3" />
+          <p className="text-gray-500 text-sm font-medium mb-1">Select two cases to compare</p>
+          <p className="text-gray-400 text-xs">Find shared hosts, overlapping time periods, and common patterns across incidents.</p>
         </div>
       )}
     </div>

@@ -52,29 +52,33 @@ export default function EventDetail({ event: initialEvent, caseId, onClose }) {
   const artifactData = event[event.artifact_type] || {}
 
   const ARTIFACT_COLOR = {
-    evtx: 'bg-blue-900/40 text-blue-400', prefetch: 'bg-yellow-900/40 text-yellow-400',
-    mft: 'bg-purple-900/40 text-purple-400', registry: 'bg-orange-900/40 text-orange-400',
-    lnk: 'bg-pink-900/40 text-pink-400', timeline: 'bg-teal-900/40 text-teal-400',
+    evtx:     'badge-evtx',
+    prefetch: 'badge-prefetch',
+    mft:      'badge-mft',
+    registry: 'badge-registry',
+    lnk:      'badge-lnk',
+    plaso:    'badge-plaso',
+    hayabusa: 'badge-hayabusa',
   }
 
   return (
-    <div className="w-96 flex-shrink-0 bg-gray-900/95 border-l border-gray-700/60 flex flex-col overflow-hidden">
+    <div className="w-96 flex-shrink-0 bg-white border-l border-gray-200 flex flex-col overflow-hidden">
       {/* Header */}
-      <div className="p-3 border-b border-gray-700/60 flex items-start justify-between gap-2">
+      <div className="p-3 border-b border-gray-200 flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1 flex-wrap">
-            <span className={`badge ${ARTIFACT_COLOR[event.artifact_type] || 'bg-gray-700 text-gray-400'}`}>
+            <span className={`badge ${ARTIFACT_COLOR[event.artifact_type] || 'badge-generic'}`}>
               {event.artifact_type}
             </span>
             {mitre && (
-              <span className={`badge border text-[10px] ${TACTIC_COLORS[mitre.tactic] || 'bg-gray-700 text-gray-400'}`}
+              <span className={`badge border text-[10px] ${TACTIC_COLORS[mitre.tactic] || 'bg-gray-100 text-gray-600 border-gray-200'}`}
                 title={mitre.tactic}>
                 <Shield size={9} className="mr-1" />
                 {mitre.technique_id}
               </span>
             )}
           </div>
-          <p className="text-xs text-gray-300 break-words line-clamp-3">{event.message}</p>
+          <p className="text-xs text-brand-text break-words line-clamp-3">{event.message}</p>
         </div>
         <button onClick={onClose} className="btn-ghost p-1 flex-shrink-0">
           <X size={14} />
@@ -85,7 +89,7 @@ export default function EventDetail({ event: initialEvent, caseId, onClose }) {
         {/* Actions */}
         <div className="flex gap-2">
           <button onClick={toggleFlag}
-            className={`btn text-xs ${event.is_flagged ? 'bg-red-900/50 text-red-300 border border-red-800/50' : 'btn-ghost'}`}>
+            className={`btn text-xs ${event.is_flagged ? 'bg-red-100 text-red-700 border border-red-200' : 'btn-ghost'}`}>
             <Flag size={12} />
             {event.is_flagged ? 'Flagged' : 'Flag'}
           </button>
@@ -93,16 +97,16 @@ export default function EventDetail({ event: initialEvent, caseId, onClose }) {
 
         {/* MITRE ATT&CK */}
         {mitre && (
-          <div className="rounded-lg border border-gray-700/40 bg-gray-800/40 p-2.5">
+          <div className="rounded-lg border border-gray-200 bg-gray-50 p-2.5">
             <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5 flex items-center gap-1">
               <Shield size={9} /> MITRE ATT&CK
             </p>
             <div className="flex items-start justify-between gap-2">
               <div>
-                <p className="text-gray-200 font-medium">{mitre.technique_name}</p>
+                <p className="text-brand-text font-medium">{mitre.technique_name}</p>
                 <p className="text-gray-500 text-[10px]">{mitre.tactic}</p>
               </div>
-              <span className="badge bg-gray-700/60 text-gray-400 border border-gray-600/40 font-mono flex-shrink-0">
+              <span className="badge bg-gray-100 text-gray-600 border border-gray-200 font-mono flex-shrink-0">
                 {mitre.technique_id}
               </span>
             </div>
@@ -111,19 +115,19 @@ export default function EventDetail({ event: initialEvent, caseId, onClose }) {
 
         {/* IOC Panel */}
         {iocs.length > 0 && (
-          <div className="rounded-lg border border-yellow-900/40 bg-yellow-950/10 p-2.5">
-            <p className="text-[10px] font-semibold text-yellow-600 uppercase tracking-wider mb-2 flex items-center gap-1">
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-2.5">
+            <p className="text-[10px] font-semibold text-amber-700 uppercase tracking-wider mb-2 flex items-center gap-1">
               <AlertTriangle size={9} /> IOCs Detected ({iocs.length})
             </p>
             <div className="space-y-1">
               {iocs.map((ioc, i) => (
                 <div key={i} className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-1.5 min-w-0">
-                    <span className="text-[10px] text-gray-600 flex-shrink-0 w-12">{ioc.type}</span>
+                    <span className="text-[10px] text-gray-500 flex-shrink-0 w-12">{ioc.type}</span>
                     <span className={`font-mono text-[10px] truncate ${ioc.color}`}>{ioc.value}</span>
                   </div>
                   <button onClick={() => pivot(iocSearchQuery(ioc))}
-                    className="flex-shrink-0 p-1 rounded hover:bg-gray-700/50 text-gray-600 hover:text-gray-300 transition-colors"
+                    className="flex-shrink-0 p-1 rounded hover:bg-amber-100 text-amber-500 hover:text-amber-700 transition-colors"
                     title="Find all events with this IOC">
                     <Search size={10} />
                   </button>
@@ -140,7 +144,7 @@ export default function EventDetail({ event: initialEvent, caseId, onClose }) {
           </p>
           <div className="flex flex-wrap gap-1 mb-1.5">
             {(event.tags || []).map(t => (
-              <span key={t} className="badge bg-indigo-900/40 text-indigo-400 border border-indigo-800/40 cursor-pointer hover:bg-indigo-900/60 transition-colors"
+              <span key={t} className="badge bg-brand-accentlight text-brand-accent border border-brand-accent/20 cursor-pointer hover:bg-brand-accent/10 transition-colors"
                 onClick={() => removeTag(t)}>{t} ×</span>
             ))}
           </div>
@@ -207,15 +211,15 @@ function FieldGroup({ title, fields, pivotFields = [], onPivot }) {
       <div className="space-y-1">
         {entries.map(([k, v]) => (
           <div key={k} className="flex gap-2 items-start">
-            <span className="text-gray-600 flex-shrink-0 w-20 text-[10px] pt-0.5">{k}</span>
-            <span className="text-gray-300 break-all font-mono text-[10px] flex-1">
+            <span className="text-gray-400 flex-shrink-0 w-20 text-[10px] pt-0.5">{k}</span>
+            <span className="text-gray-700 break-all font-mono text-[10px] flex-1">
               {typeof v === 'string' && v.includes('\n')
                 ? <pre className="whitespace-pre-wrap">{v}</pre>
                 : String(v)}
             </span>
             {pivotFields.includes(k) && onPivot && v && (
               <button onClick={() => onPivot(`"${v}"`)}
-                className="flex-shrink-0 p-0.5 rounded hover:bg-gray-700/50 text-gray-700 hover:text-indigo-400 transition-colors"
+                className="flex-shrink-0 p-0.5 rounded hover:bg-gray-100 text-gray-400 hover:text-brand-accent transition-colors"
                 title={`Search all events for: ${v}`}>
                 <Search size={10} />
               </button>

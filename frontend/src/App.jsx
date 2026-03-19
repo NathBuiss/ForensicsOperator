@@ -1,7 +1,9 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import Layout from './components/layout/Layout'
 import Dashboard from './pages/Dashboard'
-import CaseDetail from './pages/CaseDetail'
+import CaseTimeline from './pages/CaseTimeline'
+import Search from './pages/Search'
+import AlertLibrary from './pages/AlertLibrary'
 import Plugins from './pages/Plugins'
 import Compare from './pages/Compare'
 
@@ -11,7 +13,9 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Layout />}>
           <Route index element={<Dashboard />} />
-          <Route path="cases/:caseId/*" element={<CaseDetail />} />
+          <Route path="cases/:caseId" element={<CaseTimeline />} />
+          <Route path="cases/:caseId/search" element={<Search />} />
+          <Route path="alert-rules" element={<AlertLibrary />} />
           <Route path="plugins" element={<Plugins />} />
           <Route path="compare" element={<Compare />} />
           <Route path="*" element={<Navigate to="/" replace />} />

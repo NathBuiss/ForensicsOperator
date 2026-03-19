@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { api } from '../api/client'
 
-const ACCEPTED_TYPES = ['.evtx', '.plaso', '.pf', '.lnk', '.dat', '.hive']
+const ACCEPTED_TYPES = ['.evtx', '.plaso', '.pf', '.lnk', '.dat', '.hive', '.jsonl', '.csv']
 const ACCEPTED_NAMES = ['$MFT', 'NTUSER.DAT', 'SYSTEM', 'SOFTWARE', 'SAM', 'SECURITY']
 
 function JobCard({ jobId }) {
@@ -23,35 +23,35 @@ function JobCard({ jobId }) {
     }
   }, [job?.status])
 
-  if (!job) return <div className="text-gray-600 text-xs p-2">Loading job {jobId}...</div>
+  if (!job) return <div className="text-gray-400 text-xs p-2">Loading job {jobId}...</div>
 
   const statusColors = {
-    PENDING: 'text-yellow-400',
-    RUNNING: 'text-blue-400',
-    COMPLETED: 'text-green-400',
-    FAILED: 'text-red-400',
+    PENDING:   'text-amber-600',
+    RUNNING:   'text-brand-accent',
+    COMPLETED: 'text-green-600',
+    FAILED:    'text-red-600',
   }
 
   return (
-    <div className={`card p-3 ${job.status === 'FAILED' ? 'border-red-800/50' : ''}`}>
+    <div className={`card p-3 ${job.status === 'FAILED' ? 'border-red-200' : ''}`}>
       <div className="flex items-center justify-between mb-1">
-        <span className="text-xs text-gray-300 font-medium truncate">{job.original_filename}</span>
-        <span className={`text-xs font-mono ${statusColors[job.status] || 'text-gray-400'}`}>
+        <span className="text-xs text-brand-text font-medium truncate">{job.original_filename}</span>
+        <span className={`text-xs font-mono ${statusColors[job.status] || 'text-gray-500'}`}>
           {job.status}
           {job.status === 'RUNNING' && <span className="ml-1 animate-pulse">●</span>}
         </span>
       </div>
 
       {job.plugin_used && (
-        <p className="text-xs text-gray-500">Plugin: <code>{job.plugin_used}</code></p>
+        <p className="text-xs text-gray-500">Plugin: <code className="font-mono">{job.plugin_used}</code></p>
       )}
 
       {job.status === 'RUNNING' && (
         <div className="mt-1">
-          <div className="h-1 bg-gray-700 rounded overflow-hidden">
-            <div className="h-full bg-indigo-500 animate-pulse w-1/3 rounded" />
+          <div className="h-1 bg-gray-200 rounded overflow-hidden">
+            <div className="h-full bg-brand-accent animate-pulse w-1/3 rounded" />
           </div>
-          <p className="text-xs text-gray-600 mt-0.5">
+          <p className="text-xs text-gray-500 mt-0.5">
             {parseInt(job.events_indexed || 0).toLocaleString()} events indexed
           </p>
         </div>
@@ -66,17 +66,17 @@ function JobCard({ jobId }) {
       )}
 
       {job.status === 'FAILED' && (
-        <p className="text-xs text-red-400 mt-0.5 break-all">{job.error}</p>
+        <p className="text-xs text-red-600 mt-0.5 break-all">{job.error}</p>
       )}
     </div>
   )
 }
 
 export default function Ingest({ caseId, onComplete }) {
-  const [dragging, setDragging] = useState(false)
+  const [dragging, setDragging]   = useState(false)
   const [uploading, setUploading] = useState(false)
-  const [jobs, setJobs] = useState([])
-  const [error, setError] = useState('')
+  const [jobs, setJobs]           = useState([])
+  const [error, setError]         = useState('')
   const inputRef = useRef()
 
   useEffect(() => {
@@ -113,7 +113,7 @@ export default function Ingest({ caseId, onComplete }) {
 
   return (
     <div className="p-6 max-w-2xl">
-      <h2 className="text-sm font-semibold text-gray-200 mb-1">Ingest Forensics Files</h2>
+      <h2 className="text-sm font-semibold text-brand-text mb-1">Ingest Forensics Files</h2>
       <p className="text-xs text-gray-500 mb-4">
         Supported: {ACCEPTED_TYPES.join(', ')}, {ACCEPTED_NAMES.join(', ')}
       </p>
@@ -124,14 +124,12 @@ export default function Ingest({ caseId, onComplete }) {
         onDragLeave={() => setDragging(false)}
         onDrop={onDrop}
         onClick={() => inputRef.current?.click()}
-        className={`border-2 border-dashed rounded-lg p-10 text-center cursor-pointer transition-colors mb-4 ${
-          dragging ? 'border-indigo-500 bg-indigo-950/20' : 'border-gray-600 hover:border-gray-500'
-        } ${uploading ? 'opacity-50 pointer-events-none' : ''}`}>
+        className={`${dragging ? 'drop-zone-active' : 'drop-zone-inactive'} mb-4 ${uploading ? 'opacity-50 pointer-events-none' : ''}`}>
         <p className="text-2xl mb-2">📂</p>
-        <p className="text-sm text-gray-400">
+        <p className="text-sm text-gray-500">
           {uploading ? 'Uploading...' : 'Drop forensics files here or click to browse'}
         </p>
-        <p className="text-xs text-gray-600 mt-1">Multiple files supported</p>
+        <p className="text-xs text-gray-400 mt-1">Multiple files supported</p>
         <input
           ref={inputRef}
           type="file"
@@ -142,13 +140,13 @@ export default function Ingest({ caseId, onComplete }) {
       </div>
 
       {error && (
-        <div className="card border-red-800/50 p-3 mb-4 text-xs text-red-400">{error}</div>
+        <div className="card border-red-200 p-3 mb-4 text-xs text-red-600">{error}</div>
       )}
 
       {/* Jobs list */}
       {jobs.length > 0 && (
         <div>
-          <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">
+          <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">
             Processing Jobs
           </h3>
           <div className="space-y-2">

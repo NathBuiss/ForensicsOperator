@@ -36,6 +36,7 @@
         "registry":       { "type": "object", "dynamic": true },
         "lnk":            { "type": "object", "dynamic": true },
         "plaso":          { "type": "object", "dynamic": true },
+        "hayabusa":       { "type": "object", "dynamic": true },
         "raw":            { "type": "object", "enabled": false }
       }
     }

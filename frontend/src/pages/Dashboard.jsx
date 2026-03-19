@@ -4,18 +4,19 @@ import { FolderOpen, Activity, Database, ChevronRight, Plus, Clock } from 'lucid
 import { api } from '../api/client'
 
 const STATUS_CONFIG = {
-  active:   { label: 'Active',   dot: 'bg-green-400', badge: 'bg-green-900/30 text-green-400 border-green-800/40' },
-  archived: { label: 'Archived', dot: 'bg-gray-500',  badge: 'bg-gray-700/50 text-gray-400 border-gray-600/40' },
-  closed:   { label: 'Closed',   dot: 'bg-red-400',   badge: 'bg-red-900/30 text-red-400 border-red-800/40' },
+  active:   { label: 'Active',   dot: 'bg-green-400', badge: 'bg-green-100 text-green-700 border-green-200' },
+  archived: { label: 'Archived', dot: 'bg-gray-400',  badge: 'bg-gray-100 text-gray-600 border-gray-300' },
+  closed:   { label: 'Closed',   dot: 'bg-red-400',   badge: 'bg-red-100 text-red-700 border-red-200' },
 }
 
 const ARTIFACT_BADGES = {
-  evtx:     { label: 'EVTX',     color: 'bg-blue-900/40 text-blue-400' },
-  prefetch: { label: 'Prefetch', color: 'bg-yellow-900/40 text-yellow-400' },
-  mft:      { label: 'MFT',      color: 'bg-purple-900/40 text-purple-400' },
-  registry: { label: 'Registry', color: 'bg-orange-900/40 text-orange-400' },
-  lnk:      { label: 'LNK',      color: 'bg-pink-900/40 text-pink-400' },
-  timeline: { label: 'Timeline', color: 'bg-teal-900/40 text-teal-400' },
+  evtx:      'badge-evtx',
+  prefetch:  'badge-prefetch',
+  mft:       'badge-mft',
+  registry:  'badge-registry',
+  lnk:       'badge-lnk',
+  plaso:     'badge-plaso',
+  hayabusa:  'badge-hayabusa',
 }
 
 function StatCard({ icon: Icon, label, value, color }) {
@@ -27,13 +28,13 @@ function StatCard({ icon: Icon, label, value, color }) {
           <Icon size={15} />
         </div>
       </div>
-      <p className="text-2xl font-bold text-gray-100">{value}</p>
+      <p className="text-2xl font-bold text-brand-text">{value}</p>
     </div>
   )
 }
 
 export default function Dashboard() {
-  const [cases, setCases]   = useState([])
+  const [cases, setCases]     = useState([])
   const [loading, setLoading] = useState(true)
   const navigate = useNavigate()
 
@@ -44,31 +45,31 @@ export default function Dashboard() {
       .finally(() => setLoading(false))
   }, [])
 
-  const totalEvents  = cases.reduce((s, c) => s + (c.event_count || 0), 0)
-  const activeCases  = cases.filter(c => c.status === 'active').length
+  const totalEvents = cases.reduce((s, c) => s + (c.event_count || 0), 0)
+  const activeCases = cases.filter(c => c.status === 'active').length
 
   return (
     <div className="p-6 max-w-5xl mx-auto">
 
       {/* Header */}
       <div className="mb-7">
-        <h1 className="text-xl font-bold text-gray-100">Dashboard</h1>
+        <h1 className="text-xl font-bold text-brand-text">Dashboard</h1>
         <p className="text-sm text-gray-500 mt-1">Forensics case management platform</p>
       </div>
 
       {/* Stats */}
       <div className="grid grid-cols-3 gap-4 mb-8">
         <StatCard icon={FolderOpen} label="Total Cases"  value={cases.length}
-          color="bg-indigo-900/40 text-indigo-400" />
+          color="bg-brand-accent/10 text-brand-accent" />
         <StatCard icon={Activity}   label="Active Cases" value={activeCases}
-          color="bg-green-900/40 text-green-400" />
+          color="bg-green-100 text-green-600" />
         <StatCard icon={Database}   label="Total Events" value={totalEvents.toLocaleString()}
-          color="bg-blue-900/40 text-blue-400" />
+          color="bg-purple-100 text-purple-600" />
       </div>
 
       {/* Cases */}
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-sm font-semibold text-gray-300">Cases</h2>
+        <h2 className="text-sm font-semibold text-brand-text">Cases</h2>
         <span className="text-xs text-gray-500">{cases.length} total</span>
       </div>
 
@@ -78,11 +79,11 @@ export default function Dashboard() {
         </div>
       ) : cases.length === 0 ? (
         <div className="card p-12 text-center">
-          <div className="w-14 h-14 rounded-full bg-gray-700/50 flex items-center justify-center mx-auto mb-4">
-            <FolderOpen size={24} className="text-gray-500" />
+          <div className="w-14 h-14 rounded-full bg-gray-100 flex items-center justify-center mx-auto mb-4">
+            <FolderOpen size={24} className="text-gray-400" />
           </div>
-          <p className="text-gray-400 text-sm font-medium mb-1">No cases yet</p>
-          <p className="text-gray-600 text-xs">
+          <p className="text-gray-500 text-sm font-medium mb-1">No cases yet</p>
+          <p className="text-gray-400 text-xs">
             Click <Plus size={10} className="inline" /> in the sidebar to create your first case.
           </p>
         </div>
@@ -101,7 +102,7 @@ export default function Dashboard() {
                   {/* Main info */}
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1">
-                      <h3 className="text-sm font-semibold text-gray-100 truncate">{c.name}</h3>
+                      <h3 className="text-sm font-semibold text-brand-text truncate">{c.name}</h3>
                       <span className={`badge border text-[10px] ${st.badge}`}>{st.label}</span>
                     </div>
                     <div className="flex items-center gap-3 flex-wrap">
@@ -109,25 +110,24 @@ export default function Dashboard() {
                         <Database size={10} />
                         {(c.event_count || 0).toLocaleString()} events
                       </span>
-                      <span className="flex items-center gap-1 text-xs text-gray-600">
+                      <span className="flex items-center gap-1 text-xs text-gray-400">
                         <Clock size={10} />
                         {new Date(c.created_at).toLocaleDateString()}
                       </span>
                       {c.analyst && (
-                        <span className="text-xs text-gray-600">@{c.analyst}</span>
+                        <span className="text-xs text-gray-400">@{c.analyst}</span>
                       )}
                     </div>
                   </div>
 
                   {/* Artifact badges */}
                   <div className="flex flex-wrap gap-1 max-w-52 justify-end">
-                    {(c.artifact_types || []).map(at => {
-                      const b = ARTIFACT_BADGES[at] || { label: at, color: 'bg-gray-700 text-gray-400' }
-                      return <span key={at} className={`badge ${b.color}`}>{b.label}</span>
-                    })}
+                    {(c.artifact_types || []).map(at => (
+                      <span key={at} className={`badge ${ARTIFACT_BADGES[at] || 'badge-generic'}`}>{at}</span>
+                    ))}
                   </div>
 
-                  <ChevronRight size={14} className="text-gray-600 group-hover:text-indigo-400 flex-shrink-0 transition-colors" />
+                  <ChevronRight size={14} className="text-gray-400 group-hover:text-brand-accent flex-shrink-0 transition-colors" />
                 </div>
               </div>
             )

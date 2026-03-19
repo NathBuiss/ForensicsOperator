@@ -46,14 +46,14 @@ export const MITRE_MAP = {
 }
 
 export const TACTIC_COLORS = {
-  'Credential Access':   'bg-red-900/40 text-red-300 border-red-800/40',
-  'Defense Evasion':     'bg-orange-900/40 text-orange-300 border-orange-800/40',
-  'Lateral Movement':    'bg-yellow-900/40 text-yellow-300 border-yellow-800/40',
-  'Execution':           'bg-pink-900/40 text-pink-300 border-pink-800/40',
-  'Persistence':         'bg-purple-900/40 text-purple-300 border-purple-800/40',
-  'Discovery':           'bg-blue-900/40 text-blue-300 border-blue-800/40',
-  'Privilege Escalation':'bg-indigo-900/40 text-indigo-300 border-indigo-800/40',
-  'Impact':              'bg-gray-700/60 text-gray-300 border-gray-600/40',
+  'Credential Access':   'bg-red-100 text-red-700 border-red-200',
+  'Defense Evasion':     'bg-orange-100 text-orange-700 border-orange-200',
+  'Lateral Movement':    'bg-amber-100 text-amber-700 border-amber-200',
+  'Execution':           'bg-pink-100 text-pink-700 border-pink-200',
+  'Persistence':         'bg-purple-100 text-purple-700 border-purple-200',
+  'Discovery':           'bg-blue-100 text-blue-700 border-blue-200',
+  'Privilege Escalation':'bg-brand-accentlight text-brand-accent border-brand-accent/20',
+  'Impact':              'bg-gray-100 text-gray-600 border-gray-200',
 }
 
 export function getMitre(event) {

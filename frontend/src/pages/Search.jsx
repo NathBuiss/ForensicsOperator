@@ -1,30 +1,36 @@
 import { useState, useCallback, useEffect } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useLocation, useParams } from 'react-router-dom'
 import { Search as SearchIcon, Bookmark, BookmarkCheck, Download, X, Trash2, Loader2 } from 'lucide-react'
 import { api } from '../api/client'
 import EventDetail from '../components/shared/EventDetail'
 
 const ARTIFACT_COLORS = {
-  evtx:'bg-blue-900/40 text-blue-400', prefetch:'bg-yellow-900/40 text-yellow-400',
-  mft:'bg-purple-900/40 text-purple-400', registry:'bg-orange-900/40 text-orange-400',
-  lnk:'bg-pink-900/40 text-pink-400', generic:'bg-gray-700 text-gray-400',
+  evtx:     'badge-evtx',
+  prefetch: 'badge-prefetch',
+  mft:      'badge-mft',
+  registry: 'badge-registry',
+  lnk:      'badge-lnk',
+  plaso:    'badge-plaso',
+  hayabusa: 'badge-hayabusa',
+  generic:  'badge-generic',
 }
 const PAGE_SIZE = 50
 
-export default function Search({ caseId }) {
+export default function Search() {
+  const { caseId } = useParams()
   const location = useLocation()
-  const [query, setQuery]         = useState('')
-  const [inputVal, setInputVal]   = useState('')
-  const [results, setResults]     = useState([])
-  const [total, setTotal]         = useState(0)
-  const [facets, setFacets]       = useState({})
-  const [loading, setLoading]     = useState(false)
-  const [page, setPage]           = useState(0)
-  const [filters, setFilters]     = useState({})
+  const [query, setQuery]           = useState('')
+  const [inputVal, setInputVal]     = useState('')
+  const [results, setResults]       = useState([])
+  const [total, setTotal]           = useState(0)
+  const [facets, setFacets]         = useState({})
+  const [loading, setLoading]       = useState(false)
+  const [page, setPage]             = useState(0)
+  const [filters, setFilters]       = useState({})
   const [selectedEvent, setSelectedEvent] = useState(null)
   const [savedSearches, setSavedSearches] = useState([])
-  const [saveName, setSaveName]   = useState('')
-  const [showSave, setShowSave]   = useState(false)
+  const [saveName, setSaveName]     = useState('')
+  const [showSave, setShowSave]     = useState(false)
 
   // Load saved searches
   useEffect(() => {
@@ -102,16 +108,16 @@ export default function Search({ caseId }) {
   return (
     <div className="flex h-full">
       {/* Left sidebar: facets + saved searches */}
-      <div className="w-52 flex-shrink-0 bg-gray-900/50 border-r border-gray-700/60 flex flex-col overflow-y-auto">
+      <div className="w-52 flex-shrink-0 bg-white border-r border-gray-200 flex flex-col overflow-y-auto">
         {/* Saved searches */}
-        <div className="p-3 border-b border-gray-700/60">
+        <div className="p-3 border-b border-gray-200">
           <div className="flex items-center justify-between mb-2">
             <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest flex items-center gap-1">
               <Bookmark size={9} /> Saved
             </p>
             {query && (
               <button onClick={() => setShowSave(v => !v)}
-                className="text-[10px] text-indigo-400 hover:text-indigo-300">+ Save</button>
+                className="text-[10px] text-brand-accent hover:text-brand-accenthover">+ Save</button>
             )}
           </div>
           {showSave && (
@@ -124,16 +130,16 @@ export default function Search({ caseId }) {
             </div>
           )}
           {savedSearches.length === 0 && (
-            <p className="text-[10px] text-gray-600 italic">No saved searches yet</p>
+            <p className="text-[10px] text-gray-400 italic">No saved searches yet</p>
           )}
           {savedSearches.map(s => (
             <div key={s.id} className="flex items-center gap-1 mb-0.5 group">
               <button onClick={() => loadSavedSearch(s)}
-                className="flex-1 text-left text-xs text-gray-400 hover:text-gray-200 truncate px-1 py-0.5 rounded hover:bg-gray-700/50 transition-colors">
+                className="flex-1 text-left text-xs text-gray-600 hover:text-brand-text truncate px-1 py-0.5 rounded hover:bg-gray-50 transition-colors">
                 {s.name}
               </button>
               <button onClick={() => deleteSavedSearch(s.id)}
-                className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-gray-700/50 text-gray-600 hover:text-red-400 transition-all">
+                className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-gray-100 text-gray-400 hover:text-red-500 transition-all">
                 <Trash2 size={10} />
               </button>
             </div>
@@ -162,10 +168,10 @@ export default function Search({ caseId }) {
                     onClick={() => toggleFilter(filterKey, b.key)}
                     className={`flex items-center justify-between w-full px-2 py-0.5 rounded text-xs mb-0.5 transition-colors
                       ${filters[filterKey] === b.key
-                        ? 'bg-indigo-900/40 text-indigo-300'
-                        : 'text-gray-400 hover:bg-gray-700/50 hover:text-gray-200'}`}>
+                        ? 'bg-brand-accentlight text-brand-accent'
+                        : 'text-gray-600 hover:bg-gray-50 hover:text-brand-text'}`}>
                     <span className="truncate">{b.key}</span>
-                    <span className="text-gray-600 ml-1 flex-shrink-0">{b.doc_count}</span>
+                    <span className="text-gray-400 ml-1 flex-shrink-0">{b.doc_count}</span>
                   </button>
                 ))}
               </div>
@@ -176,9 +182,9 @@ export default function Search({ caseId }) {
 
       {/* Main */}
       <div className="flex-1 flex flex-col overflow-hidden">
-        <form onSubmit={handleSearch} className="p-3 border-b border-gray-700/60 flex gap-2">
+        <form onSubmit={handleSearch} className="p-3 border-b border-gray-200 flex gap-2 bg-white">
           <div className="relative flex-1">
-            <SearchIcon size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+            <SearchIcon size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
             <input value={inputVal} onChange={e => setInputVal(e.target.value)}
               placeholder='Search… "mimikatz", "EventID:4624", "hostname:DC*"'
               className="input-lg pl-9 text-xs" />
@@ -195,9 +201,9 @@ export default function Search({ caseId }) {
         </form>
 
         {Object.entries(filters).length > 0 && (
-          <div className="px-3 py-1.5 border-b border-gray-700/60 flex flex-wrap gap-1">
+          <div className="px-3 py-1.5 border-b border-gray-200 flex flex-wrap gap-1 bg-gray-50">
             {Object.entries(filters).map(([k, v]) => (
-              <span key={k} className="badge bg-indigo-900/40 text-indigo-400 border border-indigo-800/40 cursor-pointer hover:bg-indigo-900/60"
+              <span key={k} className="badge bg-brand-accentlight text-brand-accent border border-brand-accent/20 cursor-pointer hover:bg-brand-accent/10"
                 onClick={() => toggleFilter(k, v)}>{k}: {v} ×</span>
             ))}
           </div>
@@ -211,17 +217,17 @@ export default function Search({ caseId }) {
           )}
           {!loading && results.length === 0 && (
             <div className="flex flex-col items-center justify-center h-48 text-center">
-              <SearchIcon size={28} className="text-gray-700 mb-3" />
+              <SearchIcon size={28} className="text-gray-300 mb-3" />
               <p className="text-gray-500 text-sm">{query || Object.keys(filters).length ? 'No results.' : 'Enter a search query above.'}</p>
             </div>
           )}
           {results.length > 0 && (
             <>
-              <div className="px-3 py-1.5 text-[10px] text-gray-500 border-b border-gray-700/60">
+              <div className="px-3 py-1.5 text-[10px] text-gray-500 border-b border-gray-200 bg-gray-50">
                 {total.toLocaleString()} results
               </div>
               <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-gray-900 border-b border-gray-700/60">
+                <thead className="sticky top-0 bg-gray-50 border-b border-gray-200">
                   <tr>
                     <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-40">Timestamp</th>
                     <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-24">Type</th>
@@ -235,12 +241,12 @@ export default function Search({ caseId }) {
                     const type = ev.artifact_type || 'generic'
                     return (
                       <tr key={ev.fo_id || i}
-                        className="border-b border-gray-800/40 hover:bg-gray-800/40 cursor-pointer transition-colors"
+                        className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors"
                         onClick={() => setSelectedEvent(ev)}>
-                        <td className="px-3 py-2 text-gray-500 font-mono whitespace-nowrap tabular-nums">{ts}</td>
+                        <td className="px-3 py-2 text-gray-400 font-mono whitespace-nowrap tabular-nums">{ts}</td>
                         <td className="px-3 py-2"><span className={`badge ${ARTIFACT_COLORS[type] || ARTIFACT_COLORS.generic}`}>{type}</span></td>
-                        <td className="px-3 py-2 text-gray-400 truncate">{ev.host?.hostname || ''}</td>
-                        <td className="px-3 py-2 text-gray-300 max-w-md"><span className="line-clamp-1">{ev.message}</span></td>
+                        <td className="px-3 py-2 text-gray-500 truncate">{ev.host?.hostname || ''}</td>
+                        <td className="px-3 py-2 text-brand-text max-w-md"><span className="line-clamp-1">{ev.message}</span></td>
                       </tr>
                     )
                   })}

@@ -71,10 +71,17 @@ export const api = {
   },
 
   alertRules: {
+    // Per-case rules (legacy)
     list: (caseId) => request('GET', `/cases/${caseId}/alert-rules`),
     create: (caseId, data) => request('POST', `/cases/${caseId}/alert-rules`, data),
     delete: (caseId, id) => request('DELETE', `/cases/${caseId}/alert-rules/${id}`),
     check: (caseId) => request('POST', `/cases/${caseId}/alert-rules/check`),
+    // Global library
+    listLibrary: () => request('GET', '/alert-rules/library'),
+    createLibraryRule: (data) => request('POST', '/alert-rules/library', data),
+    deleteLibraryRule: (id) => request('DELETE', `/alert-rules/library/${id}`),
+    // Run global library against a specific case
+    runLibrary: (caseId) => request('POST', `/cases/${caseId}/alert-rules/run-library`),
   },
 
   export: {
