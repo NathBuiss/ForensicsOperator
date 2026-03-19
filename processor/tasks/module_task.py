@@ -310,21 +310,17 @@ def _run_hayabusa(
     file_size = output_jsonl.stat().st_size
     logger.info("[%s] Hayabusa output file: %d bytes", run_id, file_size)
 
-    # ── Diagnostic: log first 3 raw lines so we can verify the JSONL format ──
+    # ── Diagnostic: raw bytes peek into tool_stdout so it's visible in UI ────
     try:
-        with open(output_jsonl, "r", encoding="utf-8-sig", errors="replace") as _fh:
-            _sample_lines = []
-            for _ in range(3):
-                _ln = _fh.readline()
-                if _ln:
-                    _sample_lines.append(_ln.rstrip()[:200])
-        tool_meta["log"] += (
-            f"\nJSONL file size: {file_size:,} bytes"
-            f"\nFirst 3 JSONL lines (200 chars each):\n"
-            + "\n".join(_sample_lines) + "\n"
+        with open(output_jsonl, "rb") as _bf:
+            _raw_bytes = _bf.read(600)
+        _raw_text = _raw_bytes.decode("utf-8", errors="replace")
+        tool_meta["stdout"] += (
+            f"\n\n=== Output file: {file_size:,} bytes ==="
+            f"\nFirst 600 bytes:\n{_raw_text}\n"
         )
     except Exception as _e:
-        tool_meta["log"] += f"\n[diagnostic read error: {_e}]\n"
+        tool_meta["stdout"] += f"\n[file peek error: {_e}]\n"
 
     return _parse_hayabusa_jsonl(output_jsonl, tool_meta)
 
@@ -419,8 +415,13 @@ def _parse_hayabusa_jsonl(path: Path, tool_meta: dict | None = None) -> list[dic
         first_row = rows[0]
         _log(f"\nFirst row keys: {list(first_row.keys())}\n")
         _log(f"First row sample: {str(first_row)[:400]}\n")
+        # Also surface to tool_stdout so it's visible without scrolling to log
+        if tool_meta is not None:
+            tool_meta["stdout"] += f"\nFirst row keys: {list(first_row.keys())}\n"
     else:
         _log("\n[WARNING: 0 rows decoded from output file — check format above]\n")
+        if tool_meta is not None:
+            tool_meta["stdout"] += "\n[WARNING: 0 rows decoded from output file]\n"
 
     # ── Convert rows to hits ──────────────────────────────────────────────────
     for row in rows:
@@ -444,11 +445,18 @@ def _parse_hayabusa_jsonl(path: Path, tool_meta: dict | None = None) -> list[dic
                 first_skip_msg = f"row error: {exc} | keys: {list(row.keys())[:8]}"
 
     logger.info("Hayabusa: %d rows, %d hits, %d skipped", total, len(results), skipped)
-    _log(
+    summary = (
         f"\nDecoded {total:,} rows → {len(results):,} hits ({skipped:,} skipped)"
         + (f"\n{first_skip_msg}" if first_skip_msg else "")
         + "\n"
     )
+    _log(summary)
+    # Also surface parse summary to tool_stdout
+    if tool_meta is not None:
+        tool_meta["stdout"] += f"\n=== Parser: {total:,} rows → {len(results):,} hits ({skipped:,} skipped) ==="
+        if first_skip_msg:
+            tool_meta["stdout"] += f"\n{first_skip_msg}"
+        tool_meta["stdout"] += "\n"
     return results
 
 

@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import {
-  Search, Filter, X, Flag, Tag, Loader2, Download,
+  Search, Filter, X, Flag, Loader2, Download,
   BarChart2, Plus, Minus, Keyboard,
 } from 'lucide-react'
 import { api } from '../api/client'
@@ -43,6 +43,7 @@ export default function Timeline({ caseId, artifactTypes }) {
   const [selectedRowIdx, setSelectedRowIdx] = useState(-1)
   const [regexpMode, setRegexpMode]       = useState(false)
   const [showHelp, setShowHelp]           = useState(false)
+  const [flaggedOnly, setFlaggedOnly]     = useState(false)
 
   const loaderRef = useRef(null)
   const searchRef = useRef(null)
@@ -62,15 +63,20 @@ export default function Timeline({ caseId, artifactTypes }) {
       if (selectedType) params.artifact_type = selectedType
       if (fromTs) params.from = fromTs
       if (toTs)   params.to   = toTs
-      const r = query
-        ? await api.search.search(caseId, { ...params, q: query })
+      // Merge flaggedOnly into the effective query
+      let effectiveQ = query
+      if (flaggedOnly) {
+        effectiveQ = effectiveQ ? `(${effectiveQ}) AND is_flagged:true` : 'is_flagged:true'
+      }
+      const r = effectiveQ
+        ? await api.search.search(caseId, { ...params, q: effectiveQ })
         : await api.search.timeline(caseId, params)
       setTotal(r.total || 0)
       setEvents(prev => reset ? (r.events || []) : [...prev, ...(r.events || [])])
       setPage(pg)
     } catch (e) { console.error(e) }
     finally { setLoading(false) }
-  }, [caseId, selectedType, fromTs, toTs, query])
+  }, [caseId, selectedType, fromTs, toTs, query, flaggedOnly])
 
   useEffect(() => { load(0, true) }, [load])
 
@@ -183,7 +189,7 @@ export default function Timeline({ caseId, artifactTypes }) {
   }
 
   const maxCount = histogram.reduce((m, b) => Math.max(m, b.doc_count), 1)
-  const hasFilters = selectedType || fromTs || toTs
+  const hasFilters = selectedType || fromTs || toTs || flaggedOnly
 
   return (
     <div className="flex h-full">
@@ -248,9 +254,24 @@ export default function Timeline({ caseId, artifactTypes }) {
             />
           </div>
 
+          {/* Flagged only */}
+          <div>
+            <button
+              onClick={() => setFlaggedOnly(v => !v)}
+              className={`flex items-center gap-2 w-full text-xs px-2 py-1.5 rounded-lg border transition-colors ${
+                flaggedOnly
+                  ? 'bg-red-50 text-red-600 border-red-200'
+                  : 'text-gray-600 hover:bg-gray-50 border-transparent'
+              }`}
+            >
+              <Flag size={11} className={flaggedOnly ? 'text-red-500' : 'text-gray-400'} />
+              Flagged only
+            </button>
+          </div>
+
           {hasFilters && (
             <button
-              onClick={() => { setSelectedType(''); setFromTs(''); setToTs('') }}
+              onClick={() => { setSelectedType(''); setFromTs(''); setToTs(''); setFlaggedOnly(false) }}
               className="btn-ghost w-full text-xs justify-center"
             >
               <X size={11} /> Clear all
@@ -428,12 +449,18 @@ export default function Timeline({ caseId, artifactTypes }) {
                   key={ev.fo_id || i}
                   index={i}
                   event={ev}
+                  caseId={caseId}
                   onSelect={(ev, idx) => { setSelectedEvent(ev); setSelectedRowIdx(idx) }}
                   selected={selectedEvent?.fo_id === ev.fo_id}
                   keyboardSelected={selectedRowIdx === i}
                   onFilterIn={(field, value)  => addFilter(field, value, false)}
                   onFilterOut={(field, value) => addFilter(field, value, true)}
                   rowRef={el => { rowRefs.current[i] = el }}
+                  onFlagged={(foId, flagged) =>
+                    setEvents(prev => prev.map(e =>
+                      e.fo_id === foId ? { ...e, is_flagged: flagged } : e
+                    ))
+                  }
                 />
               ))}
             </tbody>
@@ -539,12 +566,23 @@ function FilterButtons({ field, value, onIn, onOut }) {
 }
 
 /* ── Event row ── */
-function EventRow({ event, index, onSelect, selected, keyboardSelected, onFilterIn, onFilterOut, rowRef }) {
+function EventRow({ event, index, onSelect, selected, keyboardSelected, onFilterIn, onFilterOut, rowRef, caseId, onFlagged }) {
   const ts    = event.timestamp ? new Date(event.timestamp).toISOString().replace('T', ' ').slice(0, 19) : '—'
   const type  = event.artifact_type || 'generic'
   const color = ARTIFACT_COLORS[type] || ARTIFACT_COLORS.generic
   const host  = event.host?.hostname || ''
   const user  = event.user?.name || ''
+
+  async function handleFlag(e) {
+    e.stopPropagation()
+    const next = !event.is_flagged
+    onFlagged(event.fo_id, next)          // optimistic
+    try {
+      await api.search.flagEvent(caseId, event.fo_id)
+    } catch {
+      onFlagged(event.fo_id, event.is_flagged)  // revert on error
+    }
+  }
 
   return (
     <tr
@@ -587,10 +625,31 @@ function EventRow({ event, index, onSelect, selected, keyboardSelected, onFilter
         <span className="line-clamp-1">{event.message}</span>
       </td>
 
-      <td className="px-3 py-2">
-        <div className="flex items-center gap-1 justify-end">
-          {event.is_flagged       && <Flag size={10} className="text-red-500" />}
-          {event.tags?.length > 0 && <Tag  size={10} className="text-brand-accent" />}
+      <td className="px-3 py-2 w-auto">
+        <div className="flex items-center gap-1 justify-end flex-wrap">
+          {/* Flag toggle button */}
+          <button
+            onClick={handleFlag}
+            className={`p-0.5 rounded transition-colors flex-shrink-0 ${
+              event.is_flagged
+                ? 'text-red-500 hover:text-red-400'
+                : 'text-gray-200 hover:text-red-400 opacity-0 group-hover:opacity-100'
+            }`}
+            title={event.is_flagged ? 'Unflag event' : 'Flag event'}
+          >
+            <Flag size={10} />
+          </button>
+          {/* Tag badges — each clickable to add tags:"value" filter */}
+          {event.tags?.map(t => (
+            <button
+              key={t}
+              onClick={e => { e.stopPropagation(); onFilterIn('tags', t) }}
+              className="text-[9px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700 hover:bg-purple-200 transition-colors font-medium flex-shrink-0"
+              title={`Filter: tags:"${t}"`}
+            >
+              {t}
+            </button>
+          ))}
         </div>
       </td>
     </tr>

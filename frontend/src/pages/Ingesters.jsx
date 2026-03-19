@@ -535,7 +535,7 @@ export default function Ingesters() {
                 body: (
                   <>
                     Open <strong>Studio → Ingesters</strong> and create a{' '}
-                    <code className="text-brand-accent bg-brand-accentlight px-1 rounded">*_plugin.py</code> file.
+                    <code className="text-brand-accent bg-brand-accentlight px-1 rounded">*_ingester.py</code> file.
                     Subclass <code className="text-brand-accent bg-brand-accentlight px-1 rounded">BasePlugin</code> and
                     implement the <code className="text-brand-accent bg-brand-accentlight px-1 rounded">parse()</code> generator.
                   </>
@@ -587,7 +587,7 @@ export default function Ingesters() {
               <BookOpen size={12} /> Read the Docs
             </button>
             <span className="text-xs text-gray-400 ml-auto flex items-center gap-1">
-              <ArrowRight size={11} /> Save as <code className="font-mono">ingesters/*_plugin.py</code>
+              <ArrowRight size={11} /> Save as <code className="font-mono">ingesters/*_ingester.py</code>
             </span>
           </div>
         </div>
