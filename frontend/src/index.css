@@ -177,12 +177,6 @@
            bg-gray-100 border border-gray-300 rounded text-[10px] font-mono
            text-gray-600 leading-none;
   }
-}
-
-  /* ─ Studio / code editor full-height layout ─ */
-  .studio-layout {
-    @apply flex h-full overflow-hidden;
-  }
 
   /* ─ Docs prose links ─ */
   .docs-link {
@@ -199,8 +193,6 @@
 
 @layer utilities {
   .scrollbar-thin { scrollbar-width: thin; }
-  /* Full-height outlet — needed for Studio & Docs */
-  .h-outlet { height: calc(100vh); }
 }
 
 /* ── Dark Mode ────────────────────────────────────────────────────────────── */
