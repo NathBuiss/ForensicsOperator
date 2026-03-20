@@ -151,9 +151,13 @@ export const api = {
       if (caseId)  params.set('case_id',  caseId)
       if (apiUrl)  params.set('api_url',  apiUrl)
       if (collect && collect.length > 0) params.set('collect', collect.join(','))
-      // Embed the current JWT so the collector can upload without prompting for credentials
+      // _token  → authenticates the download request (read by auth dependency)
+      // api_token → embedded in the script so it can upload artifacts without prompting
       const token = getToken()
-      if (token)   params.set('api_token', token)
+      if (token) {
+        params.set('_token',    token)
+        params.set('api_token', token)
+      }
       return `/api/v1/collector/download?${params.toString()}`
     },
     networkInterfaces: () => request('GET',    '/network/interfaces'),

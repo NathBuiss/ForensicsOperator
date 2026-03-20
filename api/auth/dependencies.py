@@ -1,7 +1,7 @@
 """FastAPI auth dependencies — inject into routers via Depends()."""
 from __future__ import annotations
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError
 
@@ -11,9 +11,18 @@ from config import settings
 _oauth2 = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token", auto_error=False)
 
 
-async def get_current_user(token: str | None = Depends(_oauth2)) -> dict:
+async def get_current_user(
+    request: Request,
+    token: str | None = Depends(_oauth2),
+) -> dict:
     """
     Validate the JWT and return the user dict.
+
+    Accepts the token from:
+      1. Authorization: Bearer <token>  header  (normal API calls)
+      2. ?_token=<token>                query param  (browser downloads — CSV export,
+                                                      collector script — where headers
+                                                      cannot be set by the browser)
 
     If AUTH_ENABLED=false the dependency is a no-op and returns a synthetic
     admin user so all existing code keeps working in dev/trusted-LAN mode.
@@ -21,14 +30,17 @@ async def get_current_user(token: str | None = Depends(_oauth2)) -> dict:
     if not settings.AUTH_ENABLED:
         return {"username": "local", "role": "admin"}
 
-    if not token:
+    # Fall back to ?_token query param for browser-initiated downloads
+    effective_token = token or request.query_params.get("_token")
+
+    if not effective_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
     try:
-        payload = decode_token(token)
+        payload = decode_token(effective_token)
         username: str | None = payload.get("sub")
         if not username:
             raise HTTPException(status_code=401, detail="Invalid token")
