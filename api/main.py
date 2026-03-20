@@ -1,9 +1,10 @@
 """TraceX API — FastAPI entrypoint."""
 import logging
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
 
 from routers import (
     cases, ingest, jobs, search, plugins, health,
@@ -14,12 +15,26 @@ from routers import auth as auth_router
 from auth.dependencies import get_current_user
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="TraceX API",
     description="Kubernetes-native digital forensics analysis platform",
     version="1.0.0",
 )
+
+# ── Global exception handler ──────────────────────────────────────────────────
+# Catches anything that escapes FastAPI's built-in handlers (e.g. exceptions
+# thrown inside middleware before the router runs, or errors during ASGI
+# lifecycle) and ensures the response is always valid JSON — never plain text.
+
+@app.exception_handler(Exception)
+async def _unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {type(exc).__name__}: {exc}"},
+    )
 
 # ── Middleware ─────────────────────────────────────────────────────────────────
 

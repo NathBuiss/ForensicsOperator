@@ -14,18 +14,28 @@ export default function Login({ onLogin }) {
     setLoading(true)
     setError('')
     try {
-      const res = await fetch('/api/v1/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: username.trim(), password }),
-      })
+      // Network-level failure (DNS, refused connection, offline…)
+      let res
+      try {
+        res = await fetch('/api/v1/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: username.trim(), password }),
+        })
+      } catch {
+        throw new Error('Cannot reach the API — check that the server is running')
+      }
 
-      // Guard against non-JSON responses (e.g. proxy errors, nginx HTML pages).
+      // The API should always return JSON; if not, show the HTTP status so the
+      // user (or admin) knows where to look.
       let data = {}
       try {
         data = await res.json()
       } catch {
-        throw new Error(`Cannot reach the API (HTTP ${res.status}) — check server connectivity`)
+        if (res.status >= 500) {
+          throw new Error(`Server error (HTTP ${res.status}) — check the API logs: python3 deploy.py --logs api`)
+        }
+        throw new Error(`Unexpected response (HTTP ${res.status})`)
       }
 
       if (!res.ok) {
@@ -34,7 +44,7 @@ export default function Login({ onLogin }) {
         const detail = data?.detail
         const msg = Array.isArray(detail)
           ? detail.map(d => d.msg ?? JSON.stringify(d)).join('; ')
-          : (detail || `HTTP ${res.status}`)
+          : (typeof detail === 'string' ? detail : `HTTP ${res.status}`)
         throw new Error(msg)
       }
 

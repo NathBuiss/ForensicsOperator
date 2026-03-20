@@ -19,8 +19,8 @@ COPY collector/collect.py /app/collector/collect.py
 
 RUN mkdir -p /app/static
 
-# Create routers and services __init__.py stubs
-RUN touch routers/__init__.py services/__init__.py
+# Ensure all internal packages have __init__.py stubs
+RUN touch routers/__init__.py services/__init__.py auth/__init__.py
 
 EXPOSE 8000
 
