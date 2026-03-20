@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Shield, Loader2, Eye, EyeOff } from 'lucide-react'
+import { Loader2, Eye, EyeOff } from 'lucide-react'
 
 export default function Login({ onLogin }) {
   const [username, setUsername]     = useState('')
@@ -36,7 +36,7 @@ export default function Login({ onLogin }) {
         {/* Logo / brand */}
         <div className="flex flex-col items-center mb-8">
           <div className="w-14 h-14 rounded-2xl bg-brand-sidebar flex items-center justify-center mb-4 shadow-card-md">
-            <Shield size={28} className="text-white" />
+            <span className="text-white text-3xl font-black tracking-tight select-none">X</span>
           </div>
           <h1 className="text-2xl font-bold text-brand-text tracking-tight">TraceX</h1>
           <p className="text-sm text-gray-500 mt-1">Sign in to your account</p>

@@ -6,15 +6,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libmagic1 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+# Build context is the repo root — copy api/ sources first
+COPY api/requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY api/ .
 
-# Embed the artifact collector script so the download endpoint can serve it
+# Bake the artifact collector script into the image so the download
+# endpoint always works — regardless of whether the volume mount is present.
+RUN mkdir -p /app/collector
+COPY collector/collect.py /app/collector/collect.py
+
 RUN mkdir -p /app/static
-# collector/collect.py is copied via docker-compose build context (../collector/collect.py)
-# If running from the api/ sub-directory, the file is placed here at build time.
 
 # Create routers and services __init__.py stubs
 RUN touch routers/__init__.py services/__init__.py

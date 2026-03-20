@@ -83,8 +83,8 @@ services:
 
   api:
     build:
-      context: ./api
-      dockerfile: Dockerfile
+      context: .          # repo root so the Dockerfile can COPY collector/collect.py
+      dockerfile: api/Dockerfile
     ports:
       - "8000:8000"
     environment:
