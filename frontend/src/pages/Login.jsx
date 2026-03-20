@@ -19,8 +19,25 @@ export default function Login({ onLogin }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: username.trim(), password }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`)
+
+      // Guard against non-JSON responses (e.g. proxy errors, nginx HTML pages).
+      let data = {}
+      try {
+        data = await res.json()
+      } catch {
+        throw new Error(`Cannot reach the API (HTTP ${res.status}) — check server connectivity`)
+      }
+
+      if (!res.ok) {
+        // FastAPI detail can be a plain string (HTTPException) or an array of
+        // objects (Pydantic v2 validation errors — 422).
+        const detail = data?.detail
+        const msg = Array.isArray(detail)
+          ? detail.map(d => d.msg ?? JSON.stringify(d)).join('; ')
+          : (detail || `HTTP ${res.status}`)
+        throw new Error(msg)
+      }
+
       onLogin(data.access_token, { username: data.username, role: data.role })
     } catch (err) {
       setError(err.message || 'Login failed')

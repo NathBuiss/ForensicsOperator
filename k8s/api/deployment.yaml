@@ -40,6 +40,11 @@ spec:
                 secretKeyRef:
                   name: minio-secret
                   key: secret_key
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: api-auth-secret
+                  key: JWT_SECRET
           resources:
             requests:
               memory: "512Mi"

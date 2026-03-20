@@ -7,7 +7,12 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        // When running inside Docker/K8s the API container is reachable via its
+        // service name, NOT via localhost.  Override with API_TARGET env var:
+        //   docker-compose:  API_TARGET=http://api:8000
+        //   k3s / k8s:       API_TARGET=http://api-service:8000
+        // Falls back to http://localhost:8000 for plain local dev (npm run dev).
+        target: process.env.API_TARGET || 'http://localhost:8000',
         changeOrigin: true,
       },
     },

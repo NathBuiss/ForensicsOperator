@@ -106,6 +106,7 @@ def image_name(svc, cfg):
 
 def build_substitutions(cfg, pull_policy):
     es_heap = cfg["resources"]["elasticsearch_heap_mb"]
+    auth    = cfg.get("auth", {})
     return {
         "__FO_API_IMAGE__":        image_name("api",       cfg),
         "__FO_PROCESSOR_IMAGE__":  image_name("processor", cfg),
@@ -113,6 +114,9 @@ def build_substitutions(cfg, pull_policy):
         "__FO_PULL_POLICY__":      pull_policy,
         "__FO_MINIO_ACCESS_KEY__": cfg["secrets"]["minio_access_key"],
         "__FO_MINIO_SECRET_KEY__": cfg["secrets"]["minio_secret_key"],
+        "__FO_JWT_SECRET__":       cfg["secrets"].get("jwt_secret", "CHANGE_ME_IN_PRODUCTION"),
+        "__FO_AUTH_ENABLED__":     str(auth.get("auth_enabled", True)).lower(),
+        "__FO_JWT_EXPIRE_HOURS__": str(auth.get("jwt_expire_hours", 8)),
         "__FO_ES_HEAP__":          f"{es_heap}m",
         "__FO_ES_STORAGE__":       f"{cfg['resources']['elasticsearch_storage_gi']}Gi",
         "__FO_MINIO_STORAGE__":    f"{cfg['resources']['minio_storage_gi']}Gi",

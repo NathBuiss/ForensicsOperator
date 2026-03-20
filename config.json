@@ -25,7 +25,16 @@
 
   "secrets": {
     "minio_access_key": "minioadmin",
-    "minio_secret_key": "ForensicsM1ni0!"
+    "minio_secret_key": "ForensicsM1ni0!",
+
+    "_comment_jwt": "Generate a strong secret with: python3 -c \"import secrets; print(secrets.token_hex(32))\"",
+    "jwt_secret": "CHANGE_ME_IN_PRODUCTION"
+  },
+
+  "auth": {
+    "_comment": "Set auth_enabled to false to disable authentication (dev/trusted-LAN only).",
+    "auth_enabled": true,
+    "jwt_expire_hours": 8
   },
 
   "resources": {

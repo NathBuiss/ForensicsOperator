@@ -206,6 +206,9 @@ services:
     command: npm run dev -- --host 0.0.0.0
     environment:
       - VITE_API_URL=http://localhost:8000
+      # API_TARGET is read by vite.config.js (server-side) to set the proxy target.
+      # Inside Docker the API service is "api:8000", NOT "localhost:8000".
+      - API_TARGET=http://api:8000
 
 volumes:
   es_data:
