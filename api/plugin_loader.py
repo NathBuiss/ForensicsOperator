@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -17,8 +18,6 @@ logger = logging.getLogger(__name__)
 
 PLUGINS_DIR   = Path("/app/plugins")
 INGESTER_DIR  = Path(os.getenv("INGESTER_DIR", "/app/ingester"))
-
-import os as _os_module  # noqa: E402  (used only for getenv above)
 
 
 class PluginLoader:
