@@ -264,7 +264,7 @@ function UploadZone({ onUploaded }) {
               <Upload size={18} className="text-gray-500" />
             </div>
             <p className="text-sm text-gray-500">
-              Drop a <code className="text-brand-accent">*_plugin.py</code> file here
+              Drop a <code className="text-brand-accent">*_ingester.py</code> file here
             </p>
             <p className="text-xs text-gray-400">or click to browse</p>
           </div>
@@ -459,7 +459,7 @@ export default function Ingesters() {
             <Puzzle size={28} className="text-gray-300 mx-auto mb-3" />
             <p className="text-gray-600 text-sm font-medium mb-1">No custom ingesters yet</p>
             <p className="text-gray-400 text-xs mb-4">
-              Create a <code className="text-gray-500">*_plugin.py</code> ingester in Studio or upload one below.
+              Create a <code className="text-gray-500">*_ingester.py</code> ingester in Studio or upload one below.
             </p>
             <button
               onClick={() => navigate('/studio')}
@@ -603,7 +603,7 @@ export default function Ingesters() {
         </div>
         <p className="text-xs text-gray-400 mb-4">
           Have an ingester file ready? Drop it here. The file must be named{' '}
-          <code className="text-gray-500">*_plugin.py</code> and will be deployed to{' '}
+          <code className="text-gray-500">*_ingester.py</code> and will be deployed to{' '}
           <code className="text-gray-500">/app/ingesters/</code>.
           Click <strong>Reload All</strong> after uploading to activate it.
         </p>

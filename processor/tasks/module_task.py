@@ -9,6 +9,7 @@ Supported modules:
 """
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import os
@@ -17,6 +18,8 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,11 +30,12 @@ from celery_app import app
 
 logger = logging.getLogger(__name__)
 
-REDIS_URL      = os.getenv("REDIS_URL",        "redis://redis-service:6379/0")
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT",   "minio-service:9000")
-MINIO_ACCESS   = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
-MINIO_SECRET   = os.getenv("MINIO_SECRET_KEY", "minioadmin")
-MINIO_BUCKET   = os.getenv("MINIO_BUCKET",     "forensics-cases")
+REDIS_URL           = os.getenv("REDIS_URL",            "redis://redis-service:6379/0")
+MINIO_ENDPOINT      = os.getenv("MINIO_ENDPOINT",       "minio-service:9000")
+MINIO_ACCESS        = os.getenv("MINIO_ACCESS_KEY",     "minioadmin")
+MINIO_SECRET        = os.getenv("MINIO_SECRET_KEY",     "minioadmin")
+MINIO_BUCKET        = os.getenv("MINIO_BUCKET",         "forensics-cases")
+ELASTICSEARCH_URL   = os.getenv("ELASTICSEARCH_URL",    "http://elasticsearch-service:9200")
 
 # Custom modules directory (shared volume, created via Studio UI)
 CUSTOM_MODULES_DIR = Path(os.getenv("MODULES_DIR", "/app/modules"))
@@ -160,6 +164,17 @@ def run_module(
 
         results = runner(run_id, work_dir, sources_dir, params, tool_meta)
 
+        # ── 3a. For Hayabusa: also index into Elasticsearch so hits appear in Timeline ──
+        if module_id == "hayabusa" and results:
+            ingested_at = datetime.now(timezone.utc).isoformat()
+            try:
+                indexed = _hayabusa_index_to_es(case_id, run_id, results, ingested_at)
+                tool_meta["log"] += f"\nIndexed {indexed} events into Elasticsearch (artifact_type=hayabusa)\n"
+                tool_meta["stdout"] += f"\n=== Indexed {indexed} events into Timeline (ES) ===\n"
+            except Exception as _es_exc:
+                logger.warning("[%s] ES indexing failed (non-fatal): %s", run_id, _es_exc)
+                tool_meta["log"] += f"\n[ES index warning: {_es_exc}]\n"
+
         # ── 3. Upload full results to MinIO ───────────────────────────────────
         results_json = work_dir / "results.json"
         results_json.write_text(json.dumps(results, ensure_ascii=False))
@@ -255,15 +270,17 @@ def _run_hayabusa(
     logger.info("[%s] EVTX files in sources_dir: %s", run_id, evtx_files)
     tool_meta["log"] = f"Rules: {rules_dir}\nEVTX files: {', '.join(evtx_files) or 'none'}\n"
 
-    output_jsonl = work_dir / "hayabusa_output.jsonl"
-    min_level    = params.get("min_level", "informational")
+    output_csv = work_dir / "hayabusa_output.csv"
+    min_level  = params.get("min_level", "informational")
 
+    # csv-timeline is the most reliable output format across all Hayabusa 3.x versions.
+    # The JSONL writer has had format-shift bugs between minor releases; CSV is stable.
     cmd = [
-        hayabusa_bin, "json-timeline",
+        hayabusa_bin, "csv-timeline",
         "--no-wizard",           # required since 3.x: suppress interactive wizard
         "-d", str(sources_dir),
         "-r", str(rules_dir),
-        "-o", str(output_jsonl),
+        "-o", str(output_csv),
         "--min-level", min_level,
     ]
 
@@ -302,27 +319,191 @@ def _run_hayabusa(
             f"Hayabusa exited {proc.returncode}: {(stderr_str or stdout_str or '')[:500]}"
         )
 
-    if not output_jsonl.exists() or output_jsonl.stat().st_size == 0:
+    if not output_csv.exists() or output_csv.stat().st_size == 0:
         detail = f"\n\nHayabusa output:\n{combined[:1000]}" if combined else ""
         logger.warning("[%s] Hayabusa produced no output file (or empty)%s", run_id, detail)
         return []
 
-    file_size = output_jsonl.stat().st_size
+    file_size = output_csv.stat().st_size
     logger.info("[%s] Hayabusa output file: %d bytes", run_id, file_size)
 
     # ── Diagnostic: raw bytes peek into tool_stdout so it's visible in UI ────
     try:
-        with open(output_jsonl, "rb") as _bf:
+        with open(output_csv, "rb") as _bf:
             _raw_bytes = _bf.read(600)
         _raw_text = _raw_bytes.decode("utf-8", errors="replace")
         tool_meta["stdout"] += (
-            f"\n\n=== Output file: {file_size:,} bytes ==="
+            f"\n\n=== CSV output: {file_size:,} bytes ==="
             f"\nFirst 600 bytes:\n{_raw_text}\n"
         )
     except Exception as _e:
         tool_meta["stdout"] += f"\n[file peek error: {_e}]\n"
 
-    return _parse_hayabusa_jsonl(output_jsonl, tool_meta)
+    return _parse_hayabusa_csv(output_csv, tool_meta)
+
+
+def _parse_hayabusa_csv(path: Path, tool_meta: dict | None = None) -> list[dict]:
+    """Parse Hayabusa csv-timeline output into the hit list used by the module runner."""
+
+    def _log(msg: str) -> None:
+        if tool_meta is not None:
+            tool_meta["log"] += msg
+
+    _LEVEL_MAP = {
+        "info": "informational", "information": "informational",
+        "crit": "critical",
+        "med":  "medium", "warn": "medium", "warning": "medium",
+    }
+
+    results: list[dict] = []
+    skipped = 0
+    first_skip_msg = ""
+
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
+            reader = csv.DictReader(fh)
+            _log(f"\nCSV columns: {reader.fieldnames}\n")
+            if tool_meta:
+                tool_meta["stdout"] += f"\nCSV columns: {reader.fieldnames}\n"
+
+            for lineno, row in enumerate(reader, 2):
+                try:
+                    rule_title = str(row.get("RuleTitle") or row.get("ruleTitle") or "")
+                    ts_raw     = str(row.get("Timestamp") or row.get("timestamp") or "")
+                    if not rule_title and not ts_raw:
+                        skipped += 1
+                        if skipped == 1:
+                            first_skip_msg = f"line {lineno}: missing RuleTitle+Timestamp"
+                        continue
+
+                    level = str(row.get("Level") or row.get("level") or "informational").lower()
+                    level = _LEVEL_MAP.get(level, level)
+
+                    details_raw = str(row.get("Details") or row.get("details") or "")
+                    # CSV Details is always a string; may contain key: val | key: val
+                    event_id_raw = str(row.get("EventID") or row.get("eventId") or "")
+                    try:
+                        event_id: int | None = int(event_id_raw) if event_id_raw else None
+                    except ValueError:
+                        event_id = None
+
+                    results.append({
+                        "id":          str(uuid.uuid4()),
+                        "timestamp":   _normalize_ts(ts_raw),
+                        "level":       level,
+                        "level_int":   LEVEL_INT.get(level, 1),
+                        "rule_title":  rule_title,
+                        "computer":    str(row.get("Computer") or row.get("computer") or ""),
+                        "channel":     str(row.get("Channel") or row.get("channel") or ""),
+                        "event_id":    event_id,
+                        "details_raw": details_raw[:2000],
+                        "rule_file":   str(row.get("RuleFile") or row.get("ruleFile") or ""),
+                        "evtx_file":   str(row.get("EvtxFile") or row.get("evtxFile") or ""),
+                    })
+                except Exception as exc:
+                    skipped += 1
+                    if skipped <= 3:
+                        logger.warning("Hayabusa CSV row %d error: %s", lineno, exc)
+                    if skipped == 1:
+                        first_skip_msg = f"line {lineno}: {exc}"
+
+    except Exception as exc:
+        _log(f"\n[CSV read error: {exc}]\n")
+        return []
+
+    summary = (
+        f"\nParsed {len(results):,} CSV hits ({skipped:,} skipped)"
+        + (f"\n{first_skip_msg}" if first_skip_msg else "")
+        + "\n"
+    )
+    _log(summary)
+    if tool_meta:
+        tool_meta["stdout"] += f"\n=== Parser: {len(results):,} hits ({skipped:,} skipped) ===\n"
+        if first_skip_msg:
+            tool_meta["stdout"] += f"{first_skip_msg}\n"
+
+    return results
+
+
+def _hayabusa_index_to_es(
+    case_id: str,
+    run_id: str,
+    hits: list[dict],
+    ingested_at: str,
+    bulk_size: int = 500,
+) -> int:
+    """Bulk-index Hayabusa hits into Elasticsearch as artifact_type=hayabusa events."""
+    es_url = ELASTICSEARCH_URL.rstrip("/")
+    indexed = 0
+
+    def _flush(batch: list[dict]) -> None:
+        nonlocal indexed
+        lines = []
+        for event in batch:
+            index_name = f"fo-case-{case_id}-hayabusa"
+            action = {"index": {"_index": index_name, "_id": event["fo_id"]}}
+            lines.append(json.dumps(action))
+            lines.append(json.dumps(event))
+        body = "\n".join(lines) + "\n"
+        req = urllib.request.Request(
+            f"{es_url}/_bulk",
+            data=body.encode("utf-8"),
+            headers={"Content-Type": "application/x-ndjson"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            result = json.loads(resp.read())
+            if result.get("errors"):
+                errs = [i for i in result.get("items", []) if i.get("index", {}).get("error")]
+                logger.warning("Hayabusa ES bulk: %d errors in batch", len(errs))
+        indexed += len(batch)
+
+    batch: list[dict] = []
+    for hit in hits:
+        level = hit.get("level", "informational")
+        computer = hit.get("computer", "")
+        rule_title = hit.get("rule_title", "")
+        message = f"[{level.upper()}] {rule_title}"
+        if computer:
+            message += f" on {computer}"
+
+        event = {
+            "fo_id":          str(uuid.uuid4()),
+            "case_id":        case_id,
+            "ingest_job_id":  run_id,
+            "source_file":    f"module:hayabusa:{run_id}",
+            "ingested_at":    ingested_at,
+            "artifact_type":  "hayabusa",
+            "timestamp":      hit.get("timestamp", ""),
+            "timestamp_desc": "Hayabusa Detection",
+            "message":        message,
+            "host":           {"hostname": computer},
+            "hayabusa": {
+                "rule_title":  rule_title,
+                "level":       level,
+                "level_int":   hit.get("level_int", 1),
+                "computer":    computer,
+                "channel":     hit.get("channel", ""),
+                "event_id":    hit.get("event_id"),
+                "details_raw": hit.get("details_raw", ""),
+                "rule_file":   hit.get("rule_file", ""),
+                "evtx_file":   hit.get("evtx_file", ""),
+            },
+            "tags":          [],
+            "analyst_note":  "",
+            "is_flagged":    False,
+            "mitre":         {},
+            "raw":           {},
+        }
+        batch.append(event)
+        if len(batch) >= bulk_size:
+            _flush(batch)
+            batch = []
+
+    if batch:
+        _flush(batch)
+
+    return indexed
 
 
 def _parse_hayabusa_jsonl(path: Path, tool_meta: dict | None = None) -> list[dict]:
