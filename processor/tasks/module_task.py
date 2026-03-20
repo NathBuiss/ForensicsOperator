@@ -392,6 +392,11 @@ def _parse_hayabusa_csv(path: Path, tool_meta: dict | None = None) -> list[dict]
                     except ValueError:
                         event_id = None
 
+                    # Tags column: comma-separated MITRE ATT&CK tags
+                    # e.g. "attack.defense-evasion,attack.t1059.003"
+                    tags_raw = str(row.get("Tags") or row.get("tags") or row.get("MitreTags") or "")
+                    tags = [t.strip() for t in tags_raw.split(",") if t.strip()] if tags_raw else []
+
                     results.append({
                         "id":          str(uuid.uuid4()),
                         "timestamp":   _normalize_ts(ts_raw),
@@ -404,6 +409,7 @@ def _parse_hayabusa_csv(path: Path, tool_meta: dict | None = None) -> list[dict]
                         "details_raw": details_raw[:2000],
                         "rule_file":   str(row.get("RuleFile") or row.get("ruleFile") or ""),
                         "evtx_file":   str(row.get("EvtxFile") or row.get("evtxFile") or ""),
+                        "tags":        tags,
                     })
                 except Exception as exc:
                     skipped += 1

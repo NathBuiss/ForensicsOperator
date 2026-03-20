@@ -647,7 +647,12 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
 // ─────────────────────────────────────────────────────────────────────────────
 const LEVEL_ORDER_KEYS = ['critical', 'high', 'medium', 'low', 'informational']
 
-function ModuleRunCard({ run, caseId, navigate, activeLevels, onResetFilter }) {
+function ModuleRunCard({
+  run, caseId, navigate,
+  // Hit-level filters (all optional — undefined = no filtering)
+  activeLevels, activeComputers, activeChannels, activeTags, ruleSearch,
+  onResetFilter,
+}) {
   const zeroDetected = run.status === 'COMPLETED' && run.total_hits === 0
   const [showOutput, setShowOutput] = useState(zeroDetected)
 
@@ -674,20 +679,39 @@ function ModuleRunCard({ run, caseId, navigate, activeLevels, onResetFilter }) {
   const toolOutput = _stripAnsi(rawOutput)
   const hasOutput  = toolOutput.trim().length > 0
 
-  // Group preview hits by level
+  // ── Per-hit filtering ──────────────────────────────────────────────────────
+  // Applies all active filters at once so every dimension is ANDed together.
+  const filteredPreview = useMemo(() => {
+    const hasFilters = (activeLevels?.size > 0) || ruleSearch?.trim() ||
+                       (activeComputers?.size > 0) || (activeChannels?.size > 0) ||
+                       (activeTags?.size > 0)
+    if (!hasFilters) return preview
+    return preview.filter(hit => {
+      const lvl = (hit.level || 'informational').toLowerCase()
+      if (activeLevels?.size  && !activeLevels.has(lvl))              return false
+      if (ruleSearch?.trim()  && !hit.rule_title?.toLowerCase().includes(ruleSearch.trim().toLowerCase())) return false
+      if (activeComputers?.size && !activeComputers.has(hit.computer)) return false
+      if (activeChannels?.size  && !activeChannels.has(hit.channel))   return false
+      if (activeTags?.size) {
+        const ht = hit.tags || []
+        if (!ht.some(t => activeTags.has(t))) return false
+      }
+      return true
+    })
+  }, [preview, activeLevels, ruleSearch, activeComputers, activeChannels, activeTags])
+
+  // Group filtered hits by level for accordion display
   const hitsByLevel = {}
-  for (const hit of preview) {
+  for (const hit of filteredPreview) {
     const lvl = (hit.level || 'informational').toLowerCase()
     if (!hitsByLevel[lvl]) hitsByLevel[lvl] = []
     hitsByLevel[lvl].push(hit)
   }
-  const levelsWithHits = LEVEL_ORDER_KEYS.filter(lvl => hitsByLevel[lvl]?.length > 0)
+  const filteredLevels = LEVEL_ORDER_KEYS.filter(lvl => hitsByLevel[lvl]?.length > 0)
 
-  // Apply level filter from ModuleRunsPanel
-  const filteredLevels = activeLevels && activeLevels.size > 0
-    ? levelsWithHits.filter(lvl => activeLevels.has(lvl))
-    : levelsWithHits
-  const hasFilteredHits = filteredLevels.length > 0
+  // Used to show "no detections at selected filters" empty state
+  const anyHitsInPreview = preview.length > 0
+  const hasFilteredHits  = filteredLevels.length > 0
 
   // Auto-open completed cards that have detections matching the active filter
   const [open, setOpen] = useState(hasFilteredHits && run.status === 'COMPLETED')
@@ -766,14 +790,14 @@ function ModuleRunCard({ run, caseId, navigate, activeLevels, onResetFilter }) {
           )}
 
           {/* Severity accordion groups */}
-          {filteredLevels.length === 0 && levelsWithHits.length > 0 && (
+          {filteredLevels.length === 0 && anyHitsInPreview && (
             <div className="border-t border-gray-100 px-4 py-5 text-center">
-              <p className="text-xs text-gray-400">No detections at selected levels.</p>
+              <p className="text-xs text-gray-400">No detections match the active filters.</p>
               <button
                 onClick={onResetFilter}
                 className="mt-1 text-[11px] text-brand-accent hover:underline"
               >
-                Show all levels
+                Clear filters
               </button>
             </div>
           )}
@@ -782,7 +806,7 @@ function ModuleRunCard({ run, caseId, navigate, activeLevels, onResetFilter }) {
               key={lvl}
               level={lvl}
               hits={hitsByLevel[lvl]}
-              totalInLevel={byLevel[lvl] || hitsByLevel[lvl].length}
+              totalInLevel={byLevel[lvl] || 0}
               defaultOpen={lvl === 'critical' || lvl === 'high'}
               caseId={caseId}
               navigate={navigate}
@@ -790,13 +814,14 @@ function ModuleRunCard({ run, caseId, navigate, activeLevels, onResetFilter }) {
             />
           ))}
 
-          {/* Truncation notice */}
-          {run.total_hits > preview.length && preview.length > 0 && (
+          {/* Truncation / filter notice */}
+          {preview.length > 0 && (
             <div className="border-t border-gray-100 px-4 py-2 bg-gray-50 text-center">
               <p className="text-[10px] text-gray-400">
-                Showing first {preview.length} of{' '}
-                <span className="font-semibold text-gray-600">{run.total_hits.toLocaleString()}</span>{' '}
-                total detections
+                {filteredPreview.length !== preview.length
+                  ? <>{filteredPreview.length.toLocaleString()} matched / top {preview.length} by severity{run.total_hits > preview.length && <> of {run.total_hits.toLocaleString()} total</>}</>
+                  : <>Top {preview.length} by severity{run.total_hits > preview.length && <> of{' '}<span className="font-semibold text-gray-600">{run.total_hits.toLocaleString()}</span> total</>}</>
+                }
               </p>
             </div>
           )}
@@ -835,7 +860,7 @@ function ModuleRunsPanel({ caseId, onClose }) {
   const [runs, setRuns]       = useState([])
   const [loading, setLoading] = useState(true)
 
-  // ── Level filter ───────────────────────────────────────────────────────────
+  // ── Level filter (hit-level) ───────────────────────────────────────────────
   const [activeLevels, setActiveLevels] = useState(new Set())
 
   // ── Run-level filters ──────────────────────────────────────────────────────
@@ -843,6 +868,12 @@ function ModuleRunsPanel({ caseId, onClose }) {
   const [dateFrom,     setDateFrom]     = useState('')
   const [dateTo,       setDateTo]       = useState('')
   const [flaggedOnly,  setFlaggedOnly]  = useState(false)
+
+  // ── Hit-level filters ──────────────────────────────────────────────────────
+  const [ruleSearch,      setRuleSearch]      = useState('')
+  const [activeComputers, setActiveComputers] = useState(new Set())
+  const [activeChannels,  setActiveChannels]  = useState(new Set())
+  const [activeTags,      setActiveTags]      = useState(new Set())
 
   const fetchRuns = useCallback(() => {
     api.modules.listRuns(caseId)
@@ -885,7 +916,29 @@ function ModuleRunsPanel({ caseId, onClose }) {
     return true
   }), [runs, moduleFilter, dateFrom, dateTo, flaggedOnly])
 
-  const hasActiveFilters = moduleFilter || dateFrom || dateTo || flaggedOnly
+  const hasActiveRunFilters = moduleFilter || dateFrom || dateTo || flaggedOnly
+  const hasActiveHitFilters = activeLevels.size > 0 || ruleSearch.trim() ||
+                              activeComputers.size > 0 || activeChannels.size > 0 || activeTags.size > 0
+  const hasActiveFilters    = hasActiveRunFilters || hasActiveHitFilters
+
+  // Derive available filter options from the visible run previews
+  const { allComputers, allChannels, allTags } = useMemo(() => {
+    const computers = new Set()
+    const channels  = new Set()
+    const tags      = new Set()
+    for (const run of filteredRuns) {
+      for (const hit of (run.results_preview || [])) {
+        if (hit.computer) computers.add(hit.computer)
+        if (hit.channel)  channels.add(hit.channel)
+        for (const t of (hit.tags || [])) tags.add(t)
+      }
+    }
+    return {
+      allComputers: [...computers].sort(),
+      allChannels:  [...channels].sort(),
+      allTags:      [...tags].sort(),
+    }
+  }, [filteredRuns])
 
   return (
     <div className="panel-backdrop" onClick={onClose}>
@@ -1027,17 +1080,154 @@ function ModuleRunsPanel({ caseId, onClose }) {
                 <Flag size={9} />
                 Flagged only
               </button>
-              {hasActiveFilters && (
-                <button
-                  onClick={() => { setModuleFilter(''); setDateFrom(''); setDateTo(''); setFlaggedOnly(false) }}
-                  className="text-[10px] text-gray-400 hover:text-brand-accent transition-colors"
-                  title="Clear all filters"
-                >
-                  Clear
-                </button>
-              )}
             </div>
           </div>
+
+          {/* Rule title search */}
+          <div className="px-4 py-2 flex items-center gap-2">
+            <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider w-10 flex-shrink-0">
+              Rule
+            </span>
+            <input
+              type="text"
+              value={ruleSearch}
+              onChange={e => setRuleSearch(e.target.value)}
+              placeholder="Filter by rule title…"
+              className="flex-1 text-[11px] border border-gray-200 rounded-md px-2.5 py-1 text-gray-600 bg-white focus:outline-none focus:ring-1 focus:ring-brand-accent placeholder-gray-300"
+            />
+            {ruleSearch && (
+              <button onClick={() => setRuleSearch('')} className="text-gray-300 hover:text-gray-500">
+                <X size={12} />
+              </button>
+            )}
+          </div>
+
+          {/* Computer filter — only shown when >1 computer appears in results */}
+          {allComputers.length > 1 && (
+            <div className="px-4 py-2 flex items-start gap-1.5 flex-wrap">
+              <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider w-10 flex-shrink-0 mt-0.5">
+                Host
+              </span>
+              <button
+                onClick={() => setActiveComputers(new Set())}
+                className={`badge cursor-pointer select-none transition-colors ${
+                  activeComputers.size === 0
+                    ? 'bg-gray-600 text-white border-gray-500'
+                    : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-100'
+                }`}
+              >
+                All
+              </button>
+              {allComputers.map(c => (
+                <button
+                  key={c}
+                  onClick={() => setActiveComputers(prev => {
+                    const next = new Set(prev)
+                    if (next.has(c)) { next.delete(c); return next.size === 0 ? new Set() : next }
+                    next.add(c); return next
+                  })}
+                  className={`badge cursor-pointer select-none transition-colors truncate max-w-[140px] ${
+                    activeComputers.has(c)
+                      ? 'bg-indigo-100 text-indigo-700 border-indigo-200'
+                      : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-100'
+                  }`}
+                  title={c}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Channel filter — only shown when >1 channel */}
+          {allChannels.length > 1 && (
+            <div className="px-4 py-2 flex items-start gap-1.5 flex-wrap">
+              <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider w-10 flex-shrink-0 mt-0.5">
+                Chan
+              </span>
+              <button
+                onClick={() => setActiveChannels(new Set())}
+                className={`badge cursor-pointer select-none transition-colors ${
+                  activeChannels.size === 0
+                    ? 'bg-gray-600 text-white border-gray-500'
+                    : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-100'
+                }`}
+              >
+                All
+              </button>
+              {allChannels.map(ch => (
+                <button
+                  key={ch}
+                  onClick={() => setActiveChannels(prev => {
+                    const next = new Set(prev)
+                    if (next.has(ch)) { next.delete(ch); return next.size === 0 ? new Set() : next }
+                    next.add(ch); return next
+                  })}
+                  className={`badge cursor-pointer select-none transition-colors truncate max-w-[180px] ${
+                    activeChannels.has(ch)
+                      ? 'bg-teal-100 text-teal-700 border-teal-200'
+                      : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-100'
+                  }`}
+                  title={ch}
+                >
+                  {ch.replace(/^Microsoft-Windows-/, '')}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* MITRE ATT&CK tags filter — only shown when tags exist */}
+          {allTags.length > 0 && (
+            <div className="px-4 py-2 flex items-start gap-1.5 flex-wrap">
+              <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider w-10 flex-shrink-0 mt-0.5">
+                Tags
+              </span>
+              <button
+                onClick={() => setActiveTags(new Set())}
+                className={`badge cursor-pointer select-none transition-colors ${
+                  activeTags.size === 0
+                    ? 'bg-gray-600 text-white border-gray-500'
+                    : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-100'
+                }`}
+              >
+                All
+              </button>
+              {allTags.map(tag => (
+                <button
+                  key={tag}
+                  onClick={() => setActiveTags(prev => {
+                    const next = new Set(prev)
+                    if (next.has(tag)) { next.delete(tag); return next.size === 0 ? new Set() : next }
+                    next.add(tag); return next
+                  })}
+                  className={`badge cursor-pointer select-none transition-colors truncate max-w-[180px] font-mono ${
+                    activeTags.has(tag)
+                      ? 'bg-purple-100 text-purple-700 border-purple-200'
+                      : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-100'
+                  }`}
+                  title={tag}
+                >
+                  {tag.replace(/^attack\./, '')}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Clear all filters */}
+          {hasActiveFilters && (
+            <div className="px-4 py-1.5 flex justify-end">
+              <button
+                onClick={() => {
+                  setModuleFilter(''); setDateFrom(''); setDateTo(''); setFlaggedOnly(false)
+                  setActiveLevels(new Set()); setRuleSearch(''); setActiveComputers(new Set())
+                  setActiveChannels(new Set()); setActiveTags(new Set())
+                }}
+                className="text-[10px] text-brand-accent hover:underline"
+              >
+                Clear all filters
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Body */}
@@ -1060,7 +1250,11 @@ function ModuleRunsPanel({ caseId, onClose }) {
               <Filter size={28} className="text-gray-300 mb-3" />
               <p className="font-medium text-gray-500">No runs match the filters</p>
               <button
-                onClick={() => { setModuleFilter(''); setDateFrom(''); setDateTo(''); setFlaggedOnly(false); setActiveLevels(new Set()) }}
+                onClick={() => {
+                  setModuleFilter(''); setDateFrom(''); setDateTo(''); setFlaggedOnly(false)
+                  setActiveLevels(new Set()); setRuleSearch(''); setActiveComputers(new Set())
+                  setActiveChannels(new Set()); setActiveTags(new Set())
+                }}
                 className="mt-2 text-xs text-brand-accent hover:underline"
               >
                 Clear all filters
@@ -1074,7 +1268,14 @@ function ModuleRunsPanel({ caseId, onClose }) {
                 caseId={caseId}
                 navigate={navigate}
                 activeLevels={activeLevels}
-                onResetFilter={() => setActiveLevels(new Set())}
+                activeComputers={activeComputers}
+                activeChannels={activeChannels}
+                activeTags={activeTags}
+                ruleSearch={ruleSearch}
+                onResetFilter={() => {
+                  setActiveLevels(new Set()); setRuleSearch(''); setActiveComputers(new Set())
+                  setActiveChannels(new Set()); setActiveTags(new Set())
+                }}
               />
             ))
           )}
