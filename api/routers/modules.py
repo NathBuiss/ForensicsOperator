@@ -284,6 +284,7 @@ def create_module_run(case_id: str, req: CreateModuleRunRequest):
             "module.run",
             args=[run_id, case_id, req.module_id, source_files, req.params],
             task_id=run_id,
+            queue="modules",
         )
     except Exception as exc:
         logger.error("Celery dispatch failed for module run %s: %s", run_id, exc)

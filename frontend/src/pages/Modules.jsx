@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Cpu, CheckCircle, XCircle, ChevronDown,
-  Code2, BookOpen, AlertCircle, ArrowRight,
+  Code2, BookOpen, AlertCircle, ArrowRight, Search as SearchIcon, X,
 } from 'lucide-react'
 import { api } from '../api/client'
+import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 
 // ── ModuleCard ────────────────────────────────────────────────────────────────
 function ModuleCard({ mod, onEdit }) {
@@ -132,6 +133,13 @@ export default function Modules() {
   const [modules, setModules]   = useState([])
   const [loading, setLoading]   = useState(true)
   const [error, setError]       = useState(null)
+  const [search, setSearch]         = useState('')
+  const [showUnavailable, setShowUnavailable] = useState(true)
+  const searchRef = useRef(null)
+
+  useKeyboardShortcuts([
+    { key: '/', handler: () => searchRef.current?.focus() },
+  ])
 
   useEffect(() => {
     api.modules.list()
@@ -140,8 +148,19 @@ export default function Modules() {
       .finally(() => setLoading(false))
   }, [])
 
-  const available   = modules.filter(m => m.available)
-  const unavailable = modules.filter(m => !m.available)
+  const filteredModules = useMemo(() => {
+    const q = search.toLowerCase()
+    return modules.filter(m => {
+      const textMatch = !q ||
+        (m.name || '').toLowerCase().includes(q) ||
+        (m.description || '').toLowerCase().includes(q)
+      const availabilityMatch = showUnavailable || m.available
+      return textMatch && availabilityMatch
+    })
+  }, [modules, search, showUnavailable])
+
+  const available   = filteredModules.filter(m => m.available)
+  const unavailable = filteredModules.filter(m => !m.available)
 
   function openInStudio(moduleId) {
     navigate('/studio', { state: { type: 'module', name: moduleId } })
@@ -172,6 +191,46 @@ export default function Modules() {
       {error && (
         <div className="mb-4 flex items-center gap-2 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
           <AlertCircle size={13} /> Failed to load modules: {error}
+        </div>
+      )}
+
+      {/* Filter bar */}
+      {!loading && !error && (
+        <div className="flex items-center gap-2 mb-5 flex-wrap">
+          {/* Search input */}
+          <div className="relative flex-1 min-w-[200px]">
+            <SearchIcon size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input
+              ref={searchRef}
+              type="text"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Filter modules… (press /)"
+              className="input text-xs pl-8 pr-7"
+            />
+            {search && (
+              <button
+                onClick={() => setSearch('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+              >
+                <X size={12} />
+              </button>
+            )}
+          </div>
+
+          {/* Show unavailable toggle */}
+          <button
+            onClick={() => setShowUnavailable(v => !v)}
+            className={`btn-ghost text-xs gap-1.5 ${showUnavailable ? 'text-brand-accent' : 'text-gray-400'}`}
+          >
+            <XCircle size={13} className={showUnavailable ? 'text-brand-accent' : 'text-gray-300'} />
+            {showUnavailable ? 'Showing unavailable' : 'Hiding unavailable'}
+          </button>
+
+          {/* Result count */}
+          <span className="badge bg-gray-100 text-gray-500 border border-gray-200">
+            {filteredModules.length} of {modules.length}
+          </span>
         </div>
       )}
 

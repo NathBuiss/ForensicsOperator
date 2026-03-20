@@ -1,0 +1,115 @@
+import { useEffect } from 'react'
+import { X } from 'lucide-react'
+
+const KBD_CLS = 'inline-flex items-center px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded border border-gray-300 bg-gray-100 text-gray-700 shadow-sm'
+
+function Kbd({ children }) {
+  return <kbd className={KBD_CLS}>{children}</kbd>
+}
+
+const SHORTCUT_SECTIONS = [
+  {
+    title: 'Navigation',
+    shortcuts: [
+      { keys: ['g', 'd'], label: 'Dashboard' },
+      { keys: ['g', 'c'], label: 'Cases' },
+      { keys: ['g', 'm'], label: 'Modules' },
+      { keys: ['g', 'a'], label: 'Alert Rules' },
+      { keys: ['g', 'i'], label: 'Ingesters' },
+      { keys: ['g', 's'], label: 'Studio' },
+    ],
+  },
+  {
+    title: 'Global',
+    shortcuts: [
+      { keys: ['?'], label: 'Show this help' },
+      { keys: ['Esc'], label: 'Close panel / modal' },
+      { keys: ['Cmd/Ctrl', 'K'], label: 'Focus search' },
+      { keys: ['n'], label: 'New case (on Cases page)' },
+    ],
+  },
+  {
+    title: 'Search page',
+    shortcuts: [
+      { keys: ['/'], label: 'Focus query input' },
+      { keys: ['?'], label: 'Search syntax help' },
+      { keys: ['Cmd/Ctrl', 'Enter'], label: 'Run search' },
+    ],
+  },
+  {
+    title: 'Timeline',
+    shortcuts: [
+      { keys: ['e'], label: 'Add evidence' },
+      { keys: ['r'], label: 'Run module' },
+    ],
+  },
+]
+
+export default function KeyboardShortcutsModal({ onClose }) {
+  // Close on Escape
+  useEffect(() => {
+    function handleKey(e) {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [onClose])
+
+  return (
+    <div
+      className="modal-overlay"
+      onClick={e => e.target === e.currentTarget && onClose()}
+    >
+      <div className="modal-box w-full max-w-lg">
+        {/* Header */}
+        <div className="modal-header">
+          <div className="flex items-center gap-2">
+            <span className={KBD_CLS}>?</span>
+            <span className="font-semibold text-brand-text text-sm">Keyboard Shortcuts</span>
+          </div>
+          <button onClick={onClose} className="icon-btn" aria-label="Close">
+            <X size={14} />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-6">
+          {SHORTCUT_SECTIONS.map(section => (
+            <div key={section.title}>
+              <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-2">
+                {section.title}
+              </p>
+              <div className="space-y-1.5">
+                {section.shortcuts.map((sc, i) => (
+                  <div key={i} className="flex items-center justify-between gap-3">
+                    <span className="text-xs text-gray-600">{sc.label}</span>
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      {sc.keys.map((k, ki) => (
+                        <span key={ki} className="flex items-center gap-1">
+                          {ki > 0 && (
+                            <span className="text-[10px] text-gray-400">then</span>
+                          )}
+                          <Kbd>{k}</Kbd>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Footer */}
+        <div className="px-5 py-3 border-t border-gray-100 flex items-center justify-between">
+          <p className="text-[10px] text-gray-400">
+            Press <Kbd>?</Kbd> anywhere to toggle this panel
+          </p>
+          <button onClick={onClose} className="btn-ghost text-xs">
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}

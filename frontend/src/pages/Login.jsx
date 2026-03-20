@@ -1,7 +1,10 @@
 import { useState } from 'react'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { Loader2, Eye, EyeOff } from 'lucide-react'
 
 export default function Login({ onLogin }) {
+  const navigate = useNavigate()
+  const location = useLocation()
   const [username, setUsername]     = useState('')
   const [password, setPassword]     = useState('')
   const [showPass, setShowPass]     = useState(false)
@@ -49,6 +52,8 @@ export default function Login({ onLogin }) {
       }
 
       onLogin(data.access_token, { username: data.username, role: data.role })
+      const from = location.state?.from?.pathname || '/'
+      navigate(from, { replace: true })
     } catch (err) {
       setError(err.message || 'Login failed')
     } finally {

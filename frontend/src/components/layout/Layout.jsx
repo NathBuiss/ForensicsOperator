@@ -6,6 +6,8 @@ import {
   Code2, BookOpen, LogOut, UserCircle,
 } from 'lucide-react'
 import { api } from '../../api/client'
+import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts'
+import KeyboardShortcutsModal from '../KeyboardShortcutsModal'
 
 const STATUS_DOT = {
   active:   'status-dot-active',
@@ -39,7 +41,19 @@ export default function Layout({ user, onLogout }) {
   const [showNewCase, setShowNewCase] = useState(false)
   const [newCaseName, setNewCaseName] = useState('')
   const [dark, setDark]               = useTheme()
+  const [showShortcuts, setShowShortcuts] = useState(false)
   const navigate = useNavigate()
+
+  useKeyboardShortcuts([
+    { key: 'g d', handler: () => navigate('/') },
+    { key: 'g c', handler: () => navigate('/cases') },
+    { key: 'g m', handler: () => navigate('/modules') },
+    { key: 'g a', handler: () => navigate('/alert-rules') },
+    { key: 'g i', handler: () => navigate('/ingesters') },
+    { key: 'g s', handler: () => navigate('/studio') },
+    { key: 'shift+/', handler: () => setShowShortcuts(v => !v), skipInputs: false },
+    { key: 'escape', handler: () => setShowShortcuts(false) },
+  ])
 
   const refreshCases = () =>
     api.cases.list().then(r => setCases(r.cases || [])).catch(() => {})
@@ -227,6 +241,13 @@ export default function Layout({ user, onLogout }) {
               <p className="text-[10px] text-white/40 capitalize">{user.role}</p>
             </div>
             <button
+              onClick={() => setShowShortcuts(true)}
+              className="icon-btn text-gray-400 hover:text-gray-600"
+              title="Keyboard shortcuts (?)"
+            >
+              <span className="text-[11px] font-mono font-bold">?</span>
+            </button>
+            <button
               onClick={onLogout}
               title="Sign out"
               className="w-6 h-6 flex items-center justify-center rounded text-brand-sidebarmuted
@@ -246,6 +267,8 @@ export default function Layout({ user, onLogout }) {
       <main className="flex-1 flex flex-col overflow-y-auto bg-gray-50">
         <Outlet context={{ refreshCases }} />
       </main>
+
+      {showShortcuts && <KeyboardShortcutsModal onClose={() => setShowShortcuts(false)} />}
     </div>
   )
 }

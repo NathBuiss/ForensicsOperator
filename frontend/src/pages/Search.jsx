@@ -1,8 +1,111 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useLocation, useParams } from 'react-router-dom'
-import { Search as SearchIcon, Bookmark, BookmarkCheck, Download, X, Trash2, Loader2 } from 'lucide-react'
+import { Search as SearchIcon, Bookmark, BookmarkCheck, Download, X, Trash2, Loader2, HelpCircle } from 'lucide-react'
 import { api } from '../api/client'
 import EventDetail from '../components/shared/EventDetail'
+import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
+
+// ── Search Help Panel ─────────────────────────────────────────────────────────
+function SearchHelpPanel({ onClose }) {
+  return (
+    <>
+      <div
+        className="panel-backdrop"
+        onClick={onClose}
+      />
+      <div className="absolute right-0 top-0 h-full w-80 bg-white border-l border-gray-200 shadow-xl z-30 overflow-y-auto flex flex-col">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 flex-shrink-0">
+          <div className="flex items-center gap-2">
+            <HelpCircle size={14} className="text-brand-accent" />
+            <span className="font-semibold text-brand-text text-sm">Search Syntax Reference</span>
+          </div>
+          <button onClick={onClose} className="icon-btn">
+            <X size={14} />
+          </button>
+        </div>
+
+        <div className="p-4 space-y-5 text-xs flex-1">
+
+          {/* Basic search */}
+          <section>
+            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-2">Basic search</p>
+            <div className="space-y-1.5">
+              {[
+                { q: 'apache error', desc: 'match events containing both words' },
+                { q: '"apache error"', desc: 'exact phrase match' },
+                { q: 'error OR warning', desc: 'either term' },
+                { q: 'error AND NOT timeout', desc: 'exclusion' },
+                { q: 'err*', desc: 'wildcard prefix' },
+              ].map(({ q, desc }) => (
+                <div key={q} className="flex gap-2">
+                  <code className="flex-shrink-0 bg-gray-100 text-brand-accent px-1.5 py-0.5 rounded font-mono text-[11px]">{q}</code>
+                  <span className="text-gray-500">{desc}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {/* Field queries */}
+          <section>
+            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-2">Field queries</p>
+            <div className="space-y-1.5">
+              {[
+                { q: 'EventID:4624', desc: 'specific field value' },
+                { q: 'host.hostname:DC01', desc: 'nested field' },
+                { q: 'message:*failed*', desc: 'wildcard in field' },
+                { q: 'EventID:[4624 TO 4634]', desc: 'numeric range' },
+                { q: 'timestamp:[2024-01-01 TO 2024-12-31]', desc: 'date range' },
+              ].map(({ q, desc }) => (
+                <div key={q} className="flex gap-2">
+                  <code className="flex-shrink-0 bg-gray-100 text-brand-accent px-1.5 py-0.5 rounded font-mono text-[11px]">{q}</code>
+                  <span className="text-gray-500">{desc}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {/* Available fields */}
+          <section>
+            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-2">Available fields (common)</p>
+            <div className="space-y-1.5">
+              {[
+                { field: 'EventID', desc: 'Windows event ID' },
+                { field: 'host.hostname', desc: 'source hostname' },
+                { field: 'username', desc: 'user account' },
+                { field: 'message', desc: 'full event message' },
+                { field: 'artifact_type', desc: 'data source type (evtx, mft, lnk…)' },
+                { field: 'channel', desc: 'Windows event channel' },
+              ].map(({ field, desc }) => (
+                <div key={field} className="flex gap-2">
+                  <code className="flex-shrink-0 bg-gray-100 text-brand-accent px-1.5 py-0.5 rounded font-mono text-[11px]">{field}</code>
+                  <span className="text-gray-500">{desc}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {/* Examples */}
+          <section>
+            <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-2">Examples</p>
+            <div className="space-y-2">
+              {[
+                { q: 'EventID:4624 AND username:admin', desc: 'admin logins' },
+                { q: 'EventID:(4625 OR 4771)', desc: 'failed auth events' },
+                { q: 'host.hostname:DC* AND EventID:4768', desc: 'Kerberos on DCs' },
+              ].map(({ q, desc }) => (
+                <div key={q}>
+                  <code className="block bg-gray-100 text-brand-accent px-2 py-1 rounded font-mono text-[11px] mb-0.5 break-all">{q}</code>
+                  <span className="text-gray-500">{desc}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </>
+  )
+}
 
 const ARTIFACT_COLORS = {
   evtx:     'badge-evtx',
@@ -31,6 +134,8 @@ export default function Search() {
   const [savedSearches, setSavedSearches] = useState([])
   const [saveName, setSaveName]     = useState('')
   const [showSave, setShowSave]     = useState(false)
+  const [showHelp, setShowHelp]     = useState(false)
+  const queryInputRef = useRef(null)
 
   // Load saved searches
   useEffect(() => {
@@ -67,6 +172,12 @@ export default function Search() {
   useEffect(() => {
     if (query) doSearch(query, filters, 0)
   }, [query])
+
+  useKeyboardShortcuts([
+    { key: '/', handler: () => queryInputRef.current?.focus() },
+    { key: 'cmd+enter', handler: () => { setQuery(inputVal); doSearch(inputVal, filters, 0) }, skipInputs: false },
+    { key: 'shift+/', handler: () => setShowHelp(v => !v), skipInputs: false },
+  ])
 
   function handleSearch(e) {
     e.preventDefault()
@@ -181,15 +292,27 @@ export default function Search() {
       </div>
 
       {/* Main */}
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex-1 flex flex-col overflow-hidden relative">
         <form onSubmit={handleSearch} className="p-3 border-b border-gray-200 flex gap-2 bg-white">
           <div className="relative flex-1">
             <SearchIcon size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-            <input value={inputVal} onChange={e => setInputVal(e.target.value)}
+            <input
+              ref={queryInputRef}
+              value={inputVal}
+              onChange={e => setInputVal(e.target.value)}
               placeholder='Search… "mimikatz", "EventID:4624", "hostname:DC*"'
-              className="input-lg pl-9 text-xs" />
+              className="input-lg pl-9 text-xs"
+            />
           </div>
           <button type="submit" className="btn-primary text-xs">Search</button>
+          <button
+            type="button"
+            onClick={() => setShowHelp(v => !v)}
+            className={`btn-ghost text-xs ${showHelp ? 'text-brand-accent' : ''}`}
+            title="Search syntax help (?)"
+          >
+            <HelpCircle size={14} />
+          </button>
           {Object.keys(filters).length > 0 && (
             <button type="button" onClick={() => setFilters({})} className="btn-ghost text-xs"><X size={13} /></button>
           )}
@@ -263,6 +386,8 @@ export default function Search() {
           )}
         </div>
       </div>
+
+      {showHelp && <SearchHelpPanel onClose={() => setShowHelp(false)} />}
 
       {selectedEvent && <EventDetail event={selectedEvent} caseId={caseId} onClose={() => setSelectedEvent(null)} />}
     </div>

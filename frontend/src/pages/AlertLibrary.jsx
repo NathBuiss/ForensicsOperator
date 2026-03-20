@@ -1,11 +1,12 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Bell, Plus, Trash2, ChevronDown, ChevronUp, Pencil, Check, X,
   AlertTriangle, Loader2, Search, Play, CheckCircle, Clock, RefreshCw,
-  ExternalLink,
+  ExternalLink, Filter,
 } from 'lucide-react'
 import { api } from '../api/client'
+import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
 
 // ── Run on Case modal ─────────────────────────────────────────────────────────
 function RunOnCaseModal({ rule, cases, onClose }) {
@@ -378,6 +379,29 @@ export default function AlertLibrary() {
   const [loading, setLoading] = useState(true)
   const [seeding, setSeeding] = useState(false)
   const [seedMsg, setSeedMsg] = useState(null)   // {added, total} or null
+  const [search, setSearch]           = useState('')
+  const [artifactFilter, setArtifactFilter] = useState('all')
+  const searchRef = useRef(null)
+
+  useKeyboardShortcuts([
+    { key: '/', handler: () => searchRef.current?.focus() },
+  ])
+
+  const artifactTypes = useMemo(
+    () => ['all', ...new Set(rules.map(r => r.artifact_type).filter(Boolean))],
+    [rules]
+  )
+
+  const filteredRules = useMemo(() => {
+    const q = search.toLowerCase()
+    return rules.filter(r => {
+      const textMatch = !q ||
+        (r.name || '').toLowerCase().includes(q) ||
+        (r.description || '').toLowerCase().includes(q)
+      const artifactMatch = artifactFilter === 'all' || r.artifact_type === artifactFilter
+      return textMatch && artifactMatch
+    })
+  }, [rules, search, artifactFilter])
 
   const loadRules = useCallback(() => {
     api.alertRules.listLibrary()
@@ -468,6 +492,51 @@ export default function AlertLibrary() {
           </div>
         </div>
 
+        {/* Filter bar */}
+        {!loading && rules.length > 0 && (
+          <div className="flex items-center gap-2 mb-3 flex-wrap">
+            {/* Search input */}
+            <div className="relative flex-1 min-w-[180px]">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input
+                ref={searchRef}
+                type="text"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Filter rules… (press /)"
+                className="input text-xs pl-8 pr-7"
+              />
+              {search && (
+                <button
+                  onClick={() => setSearch('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+
+            {/* Artifact type filter */}
+            <div className="flex items-center gap-1">
+              <Filter size={12} className="text-gray-400" />
+              <select
+                value={artifactFilter}
+                onChange={e => setArtifactFilter(e.target.value)}
+                className="input text-xs py-1.5"
+              >
+                {artifactTypes.map(t => (
+                  <option key={t} value={t}>{t === 'all' ? 'All types' : t}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Result count */}
+            <span className="text-xs text-gray-400 whitespace-nowrap">
+              Showing {filteredRules.length} of {rules.length} rules
+            </span>
+          </div>
+        )}
+
         {loading ? (
           <div className="flex items-center gap-2 text-gray-400 py-8 justify-center">
             <Loader2 size={18} className="animate-spin" />
@@ -487,9 +556,20 @@ export default function AlertLibrary() {
               Load Default Rules
             </button>
           </div>
+        ) : filteredRules.length === 0 ? (
+          <div className="card p-8 flex flex-col items-center text-center text-gray-400">
+            <Search size={24} className="mb-2 opacity-30" />
+            <p className="text-sm">No rules match your filters.</p>
+            <button
+              onClick={() => { setSearch(''); setArtifactFilter('all') }}
+              className="btn-ghost text-xs mt-3"
+            >
+              Clear filters
+            </button>
+          </div>
         ) : (
           <div className="space-y-2">
-            {rules.map(r => (
+            {filteredRules.map(r => (
               <LibraryRuleCard
                 key={r.id}
                 rule={r}

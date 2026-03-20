@@ -27,6 +27,7 @@ def _dispatch_celery_task(job_id: str, case_id: str, minio_key: str, filename: s
         "ingest.process_artifact",
         args=[job_id, case_id, minio_key, filename],
         task_id=job_id,
+        queue="ingest",
     )
 
 
