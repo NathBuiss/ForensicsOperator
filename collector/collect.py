@@ -448,7 +448,7 @@ class LinuxCollector(Collector):
 # Upload helper
 # ─────────────────────────────────────────────────────────────────────────────
 
-def upload_to_fo(zip_path: Path, api_url: str, case_id: str) -> None:
+def upload_to_fo(zip_path: Path, api_url: str, case_id: str, api_token: str = "") -> None:
     import urllib.request
     import urllib.error
 
@@ -466,18 +466,24 @@ def upload_to_fo(zip_path: Path, api_url: str, case_id: str) -> None:
         f"Content-Type: application/zip\r\n\r\n"
     ).encode() + file_data + f"\r\n--{boundary}--\r\n".encode()
 
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-        method="POST",
-    )
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    if api_token:
+        headers["Authorization"] = f"Bearer {api_token}"
+
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=600) as resp:
             print(f"  [+] Upload successful  (HTTP {resp.status})")
     except urllib.error.HTTPError as exc:
-        print(f"  [!] Upload failed: HTTP {exc.code} — {exc.read(256).decode(errors='replace')}",
-              file=sys.stderr)
+        body_preview = exc.read(256).decode(errors="replace")
+        if exc.code == 401:
+            print(
+                f"  [!] Upload failed: HTTP 401 Unauthorized — "
+                f"pass --api-token <your JWT token> or embed it at download time.",
+                file=sys.stderr,
+            )
+        else:
+            print(f"  [!] Upload failed: HTTP {exc.code} — {body_preview}", file=sys.stderr)
         sys.exit(1)
     except Exception as exc:
         print(f"  [!] Upload error: {exc}", file=sys.stderr)
@@ -494,24 +500,28 @@ def main() -> None:
         description="TraceX Artifact Collector",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--output",   "-o", type=Path, default=None)
-    parser.add_argument("--api-url",  type=str, default=None)
-    parser.add_argument("--case-id",  type=str, default=None)
-    parser.add_argument("--collect",  type=str, default=None,
+    parser.add_argument("--output",    "-o", type=Path, default=None)
+    parser.add_argument("--api-url",   type=str, default=None)
+    parser.add_argument("--case-id",   type=str, default=None)
+    parser.add_argument("--api-token", type=str, default=None,
+                        help="JWT bearer token for authenticated upload")
+    parser.add_argument("--collect",   type=str, default=None,
                         help="Comma-separated artifact types (e.g. evtx,registry,prefetch)")
-    parser.add_argument("--dry-run",  action="store_true")
-    parser.add_argument("--verbose",  "-v", action="store_true")
+    parser.add_argument("--dry-run",   action="store_true")
+    parser.add_argument("--verbose",   "-v", action="store_true")
     args = parser.parse_args()
 
     # Merge: EMBEDDED_CONFIG < CLI args (CLI wins)
     cfg = {**EMBEDDED_CONFIG}
-    if args.api_url:  cfg["api_url"]  = args.api_url
-    if args.case_id:  cfg["case_id"]  = args.case_id
-    if args.collect:  cfg["collect"]  = args.collect.split(",")
-    if args.output:   cfg["output"]   = str(args.output)
+    if args.api_url:   cfg["api_url"]   = args.api_url
+    if args.case_id:   cfg["case_id"]   = args.case_id
+    if args.api_token: cfg["api_token"] = args.api_token
+    if args.collect:   cfg["collect"]   = args.collect.split(",")
+    if args.output:    cfg["output"]    = str(args.output)
 
-    api_url  = cfg.get("api_url",  "")
-    case_id  = cfg.get("case_id",  "")
+    api_url   = cfg.get("api_url",   "")
+    case_id   = cfg.get("case_id",   "")
+    api_token = cfg.get("api_token", "")
     output   = Path(cfg["output"]) if cfg.get("output") else \
                Path.cwd() / f"fo-artifacts-{HOSTNAME}-{TS_NOW}.zip"
 
@@ -548,7 +558,7 @@ def main() -> None:
     else:
         collector.package()
         if api_url and case_id:
-            upload_to_fo(output, api_url, case_id)
+            upload_to_fo(output, api_url, case_id, api_token=api_token)
         elif api_url or case_id:
             print("  [!] Both --api-url and --case-id required for upload.", file=sys.stderr)
 

@@ -190,11 +190,16 @@ def run_module(
             hits_by_level[lvl] = hits_by_level.get(lvl, 0) + 1
 
         # ── 5. Complete ───────────────────────────────────────────────────────
+        # Sort by severity descending for the preview so the most critical
+        # detections always appear first — not just the first 200 by timestamp.
+        results_by_severity = sorted(
+            results, key=lambda h: h.get("level_int", 1), reverse=True
+        )
         _update(r, run_id,
                 status="COMPLETED",
                 total_hits=str(len(results)),
                 hits_by_level=json.dumps(hits_by_level),
-                results_preview=json.dumps(results[:200]),
+                results_preview=json.dumps(results_by_severity[:200]),
                 output_minio_key=output_key,
                 tool_stdout=tool_meta.get("stdout", "")[:16000],
                 tool_stderr=tool_meta.get("stderr", "")[:4000],

@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   Upload, Search, Bell, X, ChevronRight, AlertTriangle,
   CheckCircle, Clock, Database, Loader2, Shield,
   Cpu, RefreshCw, Plus, Download, Play, Terminal,
   AlertCircle, ChevronDown, FileCode, ExternalLink,
+  Flag, Filter,
 } from 'lucide-react'
 import { api } from '../api/client'
 import Timeline from './Timeline'
@@ -231,7 +232,7 @@ function LevelGroup({ level, hits, totalInLevel, defaultOpen, caseId, navigate, 
         <span className="text-xs font-semibold text-gray-700 flex-1">
           {totalInLevel.toLocaleString()} detection{totalInLevel !== 1 ? 's' : ''}
           {hits.length < totalInLevel && (
-            <span className="text-gray-400 font-normal"> · preview: first {hits.length}</span>
+            <span className="text-gray-400 font-normal"> · top {hits.length} by severity</span>
           )}
         </span>
         <ChevronDown size={12} className={`text-gray-400 flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
@@ -833,7 +834,15 @@ function ModuleRunsPanel({ caseId, onClose }) {
   const navigate              = useNavigate()
   const [runs, setRuns]       = useState([])
   const [loading, setLoading] = useState(true)
-  const [activeLevels, setActiveLevels] = useState(new Set(['high', 'medium']))
+
+  // ── Level filter ───────────────────────────────────────────────────────────
+  const [activeLevels, setActiveLevels] = useState(new Set())
+
+  // ── Run-level filters ──────────────────────────────────────────────────────
+  const [moduleFilter, setModuleFilter] = useState('')   // '' = all
+  const [dateFrom,     setDateFrom]     = useState('')
+  const [dateTo,       setDateTo]       = useState('')
+  const [flaggedOnly,  setFlaggedOnly]  = useState(false)
 
   const fetchRuns = useCallback(() => {
     api.modules.listRuns(caseId)
@@ -851,10 +860,37 @@ function ModuleRunsPanel({ caseId, onClose }) {
     return () => clearInterval(id)
   }, [runs, fetchRuns])
 
+  // Unique module IDs present in the runs list
+  const uniqueModuleIds = useMemo(
+    () => [...new Set(runs.map(r => r.module_id).filter(Boolean))],
+    [runs],
+  )
+
+  // Apply run-level filters
+  const filteredRuns = useMemo(() => runs.filter(run => {
+    if (moduleFilter && run.module_id !== moduleFilter) return false
+
+    const runDate = run.completed_at || run.started_at
+    if (runDate) {
+      const d = new Date(runDate)
+      if (dateFrom && d < new Date(dateFrom))               return false
+      if (dateTo   && d > new Date(dateTo + 'T23:59:59'))   return false
+    }
+
+    if (flaggedOnly) {
+      const bl = run.hits_by_level || {}
+      if (!((bl.critical || 0) > 0 || (bl.high || 0) > 0)) return false
+    }
+
+    return true
+  }), [runs, moduleFilter, dateFrom, dateTo, flaggedOnly])
+
+  const hasActiveFilters = moduleFilter || dateFrom || dateTo || flaggedOnly
+
   return (
     <div className="panel-backdrop" onClick={onClose}>
       <div
-        className="absolute right-0 top-0 h-full w-[560px] bg-white border-l border-gray-200 flex flex-col"
+        className="absolute right-0 top-0 h-full w-[580px] bg-white border-l border-gray-200 flex flex-col"
         style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.10)' }}
         onClick={e => e.stopPropagation()}
       >
@@ -864,15 +900,15 @@ function ModuleRunsPanel({ caseId, onClose }) {
             <Cpu size={16} className="text-brand-accent" />
             <span className="font-semibold text-brand-text">Module Runs</span>
             {runs.length > 0 && (
-              <span className="badge bg-gray-100 text-gray-600">{runs.length}</span>
+              <span className="badge bg-gray-100 text-gray-600">
+                {filteredRuns.length !== runs.length
+                  ? `${filteredRuns.length} / ${runs.length}`
+                  : runs.length}
+              </span>
             )}
           </div>
           <div className="flex items-center gap-1.5">
-            <button
-              onClick={fetchRuns}
-              className="btn-ghost p-1.5 rounded-lg"
-              title="Refresh"
-            >
+            <button onClick={fetchRuns} className="btn-ghost p-1.5 rounded-lg" title="Refresh">
               <RefreshCw size={14} />
             </button>
             <button onClick={onClose} className="btn-ghost p-1.5 rounded-lg">
@@ -881,48 +917,127 @@ function ModuleRunsPanel({ caseId, onClose }) {
           </div>
         </div>
 
-        {/* ── Level filter bar ──────────────────────────────────────────── */}
-        <div className="px-4 py-2 border-b border-gray-100 bg-gray-50/60 flex items-center gap-1.5 flex-wrap">
-          <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider flex-shrink-0">
-            Level
-          </span>
-          <button
-            onClick={() => setActiveLevels(new Set())}
-            className={`badge cursor-pointer select-none transition-colors ${
-              activeLevels.size === 0
-                ? 'bg-gray-600 text-white border-gray-500'
-                : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-100'
-            }`}
-          >
-            All
-          </button>
-          {LEVEL_ORDER_KEYS.map(lvl => {
-            const active = activeLevels.has(lvl)
-            return (
+        {/* ── Filter panel ──────────────────────────────────────────────────── */}
+        <div className="border-b border-gray-100 bg-gray-50/60 divide-y divide-gray-100">
+
+          {/* Level filter row */}
+          <div className="px-4 py-2 flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider w-10 flex-shrink-0">
+              Level
+            </span>
+            <button
+              onClick={() => setActiveLevels(new Set())}
+              className={`badge cursor-pointer select-none transition-colors ${
+                activeLevels.size === 0
+                  ? 'bg-gray-600 text-white border-gray-500'
+                  : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-100'
+              }`}
+            >
+              All
+            </button>
+            {LEVEL_ORDER_KEYS.map(lvl => {
+              const active = activeLevels.has(lvl)
+              return (
+                <button
+                  key={lvl}
+                  onClick={() =>
+                    setActiveLevels(prev => {
+                      const next = new Set(prev)
+                      if (next.has(lvl)) {
+                        next.delete(lvl)
+                        if (next.size === 0) return new Set()
+                      } else {
+                        next.add(lvl)
+                      }
+                      return next
+                    })
+                  }
+                  className={`badge cursor-pointer select-none transition-colors ${
+                    active
+                      ? (LEVEL_BADGE[lvl] || 'badge-generic')
+                      : 'bg-white text-gray-400 border-gray-200 hover:bg-gray-100'
+                  }`}
+                >
+                  {lvl === 'informational' ? 'info' : lvl}
+                </button>
+              )
+            })}
+          </div>
+
+          {/* Artifact / module type row */}
+          <div className="px-4 py-2 flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider w-10 flex-shrink-0">
+              Type
+            </span>
+            <button
+              onClick={() => setModuleFilter('')}
+              className={`badge cursor-pointer select-none transition-colors ${
+                moduleFilter === ''
+                  ? 'bg-gray-600 text-white border-gray-500'
+                  : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-100'
+              }`}
+            >
+              All types
+            </button>
+            {uniqueModuleIds.map(id => (
               <button
-                key={lvl}
-                onClick={() =>
-                  setActiveLevels(prev => {
-                    const next = new Set(prev)
-                    if (next.has(lvl)) {
-                      next.delete(lvl)
-                      if (next.size === 0) return new Set()
-                    } else {
-                      next.add(lvl)
-                    }
-                    return next
-                  })
-                }
+                key={id}
+                onClick={() => setModuleFilter(prev => prev === id ? '' : id)}
                 className={`badge cursor-pointer select-none transition-colors ${
-                  active
-                    ? (LEVEL_BADGE[lvl] || 'badge-generic')
-                    : 'bg-white text-gray-400 border-gray-200 hover:bg-gray-100'
+                  moduleFilter === id
+                    ? 'bg-brand-accent text-white border-brand-accent'
+                    : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-100'
                 }`}
               >
-                {lvl === 'informational' ? 'info' : lvl}
+                {MODULE_NAMES[id] || id}
               </button>
-            )
-          })}
+            ))}
+          </div>
+
+          {/* Date range + Flagged row */}
+          <div className="px-4 py-2 flex items-center gap-2 flex-wrap">
+            <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider w-10 flex-shrink-0">
+              Date
+            </span>
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={e => setDateFrom(e.target.value)}
+              className="text-[11px] border border-gray-200 rounded-md px-2 py-1 text-gray-600 bg-white focus:outline-none focus:ring-1 focus:ring-brand-accent"
+              title="From date"
+            />
+            <span className="text-[10px] text-gray-400">→</span>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={e => setDateTo(e.target.value)}
+              className="text-[11px] border border-gray-200 rounded-md px-2 py-1 text-gray-600 bg-white focus:outline-none focus:ring-1 focus:ring-brand-accent"
+              title="To date"
+            />
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                onClick={() => setFlaggedOnly(v => !v)}
+                className={`flex items-center gap-1 badge cursor-pointer select-none transition-colors ${
+                  flaggedOnly
+                    ? 'bg-orange-100 text-orange-700 border-orange-200'
+                    : 'bg-white text-gray-400 border-gray-200 hover:bg-gray-100'
+                }`}
+                title="Show only runs with critical or high detections"
+              >
+                <Flag size={9} />
+                Flagged only
+              </button>
+              {hasActiveFilters && (
+                <button
+                  onClick={() => { setModuleFilter(''); setDateFrom(''); setDateTo(''); setFlaggedOnly(false) }}
+                  className="text-[10px] text-gray-400 hover:text-brand-accent transition-colors"
+                  title="Clear all filters"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* Body */}
@@ -940,8 +1055,19 @@ function ModuleRunsPanel({ caseId, onClose }) {
                 Launch a module to analyse ingested files
               </p>
             </div>
+          ) : filteredRuns.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-12 text-center">
+              <Filter size={28} className="text-gray-300 mb-3" />
+              <p className="font-medium text-gray-500">No runs match the filters</p>
+              <button
+                onClick={() => { setModuleFilter(''); setDateFrom(''); setDateTo(''); setFlaggedOnly(false); setActiveLevels(new Set()) }}
+                className="mt-2 text-xs text-brand-accent hover:underline"
+              >
+                Clear all filters
+              </button>
+            </div>
           ) : (
-            runs.map(run => (
+            filteredRuns.map(run => (
               <ModuleRunCard
                 key={run.run_id}
                 run={run}

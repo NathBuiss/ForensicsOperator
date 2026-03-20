@@ -67,6 +67,7 @@ def download_collector(
     case_id: Optional[str] = Query(default=None),
     api_url: Optional[str] = Query(default=None),
     collect: Optional[str] = Query(default=None),
+    api_token: Optional[str] = Query(default=None, description="JWT bearer token embedded in the script"),
 ):
     """Return a configured collect.py script as a file download."""
     platform = platform.lower()
@@ -89,6 +90,8 @@ def download_collector(
         config["api_url"] = api_url.rstrip("/")
     if collect:
         config["collect"] = [k.strip() for k in collect.split(",") if k.strip()]
+    if api_token:
+        config["api_token"] = api_token
 
     return Response(
         content=_inject_config(source, config).encode("utf-8"),
