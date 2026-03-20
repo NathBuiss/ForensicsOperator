@@ -248,11 +248,12 @@ def build_images(cfg):
     for svc in SERVICES:
         img = image_name(svc, cfg)
         print(f"  Building {img} ...")
-        if svc == "processor":
-            # Build from repo root so the top-level plugins/ directory is in context.
-            # The Dockerfile uses COPY processor/... and COPY plugins/... paths.
+        if svc in ("processor", "api"):
+            # Build from repo root so cross-directory COPYs work:
+            #   processor: needs COPY plugins/ ...
+            #   api:       needs COPY collector/collect.py ...
             run(["docker", "build", "-t", img,
-                 "-f", str(ROOT / "processor" / "Dockerfile"),
+                 "-f", str(ROOT / svc / "Dockerfile"),
                  str(ROOT)])
         else:
             run(["docker", "build", "-t", img, str(ROOT / svc)])
