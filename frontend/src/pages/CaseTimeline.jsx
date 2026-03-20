@@ -646,9 +646,8 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
 // ─────────────────────────────────────────────────────────────────────────────
 const LEVEL_ORDER_KEYS = ['critical', 'high', 'medium', 'low', 'informational']
 
-function ModuleRunCard({ run, caseId, navigate }) {
+function ModuleRunCard({ run, caseId, navigate, activeLevels, onResetFilter }) {
   const zeroDetected = run.status === 'COMPLETED' && run.total_hits === 0
-  const [open, setOpen]             = useState(false)
   const [showOutput, setShowOutput] = useState(zeroDetected)
 
   const moduleName  = MODULE_NAMES[run.module_id] || run.module_id
@@ -682,6 +681,15 @@ function ModuleRunCard({ run, caseId, navigate }) {
     hitsByLevel[lvl].push(hit)
   }
   const levelsWithHits = LEVEL_ORDER_KEYS.filter(lvl => hitsByLevel[lvl]?.length > 0)
+
+  // Apply level filter from ModuleRunsPanel
+  const filteredLevels = activeLevels && activeLevels.size > 0
+    ? levelsWithHits.filter(lvl => activeLevels.has(lvl))
+    : levelsWithHits
+  const hasFilteredHits = filteredLevels.length > 0
+
+  // Auto-open completed cards that have detections matching the active filter
+  const [open, setOpen] = useState(hasFilteredHits && run.status === 'COMPLETED')
 
   // Build smart Lucene pivot query for a hit
   function buildQuery(hit) {
@@ -757,7 +765,18 @@ function ModuleRunCard({ run, caseId, navigate }) {
           )}
 
           {/* Severity accordion groups */}
-          {levelsWithHits.map(lvl => (
+          {filteredLevels.length === 0 && levelsWithHits.length > 0 && (
+            <div className="border-t border-gray-100 px-4 py-5 text-center">
+              <p className="text-xs text-gray-400">No detections at selected levels.</p>
+              <button
+                onClick={onResetFilter}
+                className="mt-1 text-[11px] text-brand-accent hover:underline"
+              >
+                Show all levels
+              </button>
+            </div>
+          )}
+          {filteredLevels.map(lvl => (
             <LevelGroup
               key={lvl}
               level={lvl}
@@ -814,6 +833,7 @@ function ModuleRunsPanel({ caseId, onClose }) {
   const navigate              = useNavigate()
   const [runs, setRuns]       = useState([])
   const [loading, setLoading] = useState(true)
+  const [activeLevels, setActiveLevels] = useState(new Set(['high', 'medium']))
 
   const fetchRuns = useCallback(() => {
     api.modules.listRuns(caseId)
@@ -861,6 +881,50 @@ function ModuleRunsPanel({ caseId, onClose }) {
           </div>
         </div>
 
+        {/* ── Level filter bar ──────────────────────────────────────────── */}
+        <div className="px-4 py-2 border-b border-gray-100 bg-gray-50/60 flex items-center gap-1.5 flex-wrap">
+          <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider flex-shrink-0">
+            Level
+          </span>
+          <button
+            onClick={() => setActiveLevels(new Set())}
+            className={`badge cursor-pointer select-none transition-colors ${
+              activeLevels.size === 0
+                ? 'bg-gray-600 text-white border-gray-500'
+                : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-100'
+            }`}
+          >
+            All
+          </button>
+          {LEVEL_ORDER_KEYS.map(lvl => {
+            const active = activeLevels.has(lvl)
+            return (
+              <button
+                key={lvl}
+                onClick={() =>
+                  setActiveLevels(prev => {
+                    const next = new Set(prev)
+                    if (next.has(lvl)) {
+                      next.delete(lvl)
+                      if (next.size === 0) return new Set()
+                    } else {
+                      next.add(lvl)
+                    }
+                    return next
+                  })
+                }
+                className={`badge cursor-pointer select-none transition-colors ${
+                  active
+                    ? (LEVEL_BADGE[lvl] || 'badge-generic')
+                    : 'bg-white text-gray-400 border-gray-200 hover:bg-gray-100'
+                }`}
+              >
+                {lvl === 'informational' ? 'info' : lvl}
+              </button>
+            )
+          })}
+        </div>
+
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
           {loading ? (
@@ -883,6 +947,8 @@ function ModuleRunsPanel({ caseId, onClose }) {
                 run={run}
                 caseId={caseId}
                 navigate={navigate}
+                activeLevels={activeLevels}
+                onResetFilter={() => setActiveLevels(new Set())}
               />
             ))
           )}
