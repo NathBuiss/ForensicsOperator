@@ -1,5 +1,5 @@
 """
-BasePlugin: The contract all ForensicsOperator plugins must satisfy.
+BasePlugin: The contract all TraceX plugins must satisfy.
 
 A plugin is a Python module placed into the shared plugins volume.
 The PluginLoader discovers modules whose top-level class inherits from BasePlugin.
@@ -48,7 +48,7 @@ class PluginContext:
 
 class BasePlugin(abc.ABC):
     """
-    Abstract base class for all ForensicsOperator artifact parsers.
+    Abstract base class for all TraceX artifact parsers.
 
     Subclass this, implement the abstract methods, and drop the module into
     the plugins volume. No further registration is required.

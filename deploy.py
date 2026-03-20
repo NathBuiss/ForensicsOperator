@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ForensicsOperator — universal deploy script.
+TraceX — universal deploy script.
 
 Works against any Kubernetes cluster: k3s, k3d, minikube, kind,
 Docker Desktop, or any remote cluster.
@@ -87,7 +87,7 @@ def cmd_exists(name):
 def load_config():
     path = ROOT / "config.json"
     if not path.exists():
-        die("config.json not found. Run this script from the forensicsOperator directory.")
+        die("config.json not found. Run this script from the tracex directory.")
     with open(path) as f:
         raw = json.load(f)
     # Strip _comment* and _readme keys
@@ -609,7 +609,7 @@ def print_summary(cfg):
 
     print()
     print("┌" + "─" * 58 + "┐")
-    print("│  ForensicsOperator deployed!                           │")
+    print("│  TraceX deployed!                                      │")
     print("└" + "─" * 58 + "┘")
     cert_note = (
         "\n  Note: using a self-signed certificate — your browser will\n"
@@ -673,7 +673,7 @@ def cmd_destroy(cfg):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    p = argparse.ArgumentParser(description="ForensicsOperator — universal deploy")
+    p = argparse.ArgumentParser(description="TraceX — universal deploy")
     p.add_argument("--no-build", action="store_true", help="Skip Docker image build")
     p.add_argument("--status",   action="store_true", help="Show pod/service status")
     p.add_argument("--destroy",  action="store_true", help="Delete namespace / cluster")
@@ -687,7 +687,7 @@ def main():
     if args.destroy: cmd_destroy(cfg); return
 
     # ── Deployment ────────────────────────────────────────────────────────────
-    print("\n  ForensicsOperator — Deploying\n")
+    print("\n  TraceX — Deploying\n")
     info(f"Context  : {cfg['cluster'].get('context') or '(current)'}")
     info(f"Hostname : {cfg['access']['hostname']}")
     info(f"Registry : {cfg['images']['registry'] or '(none — direct load)'}")

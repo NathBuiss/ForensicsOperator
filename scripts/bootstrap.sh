@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bootstrap ForensicsOperator on a fresh cluster
+# Bootstrap TraceX on a fresh cluster
 set -euo pipefail
 
 NS=forensics-operator
@@ -21,7 +21,7 @@ curl -s -X PUT "${ES_URL}/_index_template/fo-cases-template" \
   -d @elasticsearch/index_templates/fo-cases-template.json
 echo ""
 
-echo "==> Done! ForensicsOperator is running."
+echo "==> Done! TraceX is running."
 echo "    Frontend:  http://localhost (or your ingress hostname)"
 echo "    API:       http://localhost/api/v1"
 echo "    Kibana:    http://localhost/kibana"

@@ -196,24 +196,31 @@
 }
 
 /* ── Dark Mode ────────────────────────────────────────────────────────────── */
+/*
+ * "Soft dark" palette — slate-blue tones, noticeably lighter than pitch-black.
+ * Base surface:  #22253A  (was #0F1117)
+ * Card surface:  #2A2D42  (was #1A1D2E)
+ * Raised:        #323554  (was #252836)
+ * Border:        #3E4163  (was #2D3147)
+ */
 
 .dark body {
-  background-color: #0F1117;
+  background-color: #22253A;
   color: #D1D5DB;
 }
 
-.dark ::-webkit-scrollbar-thumb { background: #374151; }
-.dark ::-webkit-scrollbar-thumb:hover { background: #4B5563; }
+.dark ::-webkit-scrollbar-thumb { background: #3E4163; }
+.dark ::-webkit-scrollbar-thumb:hover { background: #505478; }
 
 /* Cards */
 .dark .card,
 .dark .card-hover {
-  background-color: #1A1D2E;
-  border-color: #2D3147;
-  box-shadow: 0 1px 3px 0 rgba(0,0,0,0.3);
+  background-color: #2A2D42;
+  border-color: #3E4163;
+  box-shadow: 0 1px 3px 0 rgba(0,0,0,0.25);
 }
 .dark .card-hover:hover {
-  border-color: rgba(0, 119, 204, 0.5);
+  border-color: rgba(59, 158, 221, 0.5);
 }
 
 /* Buttons */
@@ -221,16 +228,16 @@
   color: #9CA3AF;
 }
 .dark .btn-ghost:hover {
-  background-color: #252836;
+  background-color: #323554;
   color: #E5E7EB;
 }
 .dark .btn-outline {
-  background-color: #1A1D2E;
-  border-color: #374151;
+  background-color: #2A2D42;
+  border-color: #3E4163;
   color: #D1D5DB;
 }
 .dark .btn-outline:hover {
-  background-color: #252836;
+  background-color: #323554;
 }
 .dark .btn-danger {
   background-color: rgba(220, 38, 38, 0.15);
@@ -248,13 +255,13 @@
 /* Inputs */
 .dark .input,
 .dark .input-lg {
-  background-color: #252836;
-  border-color: #374151;
+  background-color: #323554;
+  border-color: #3E4163;
   color: #E5E7EB;
 }
 .dark .input::placeholder,
 .dark .input-lg::placeholder {
-  color: #6B7280;
+  color: #7B80A0;
 }
 .dark .input:focus,
 .dark .input-lg:focus {
@@ -262,12 +269,12 @@
 }
 
 /* Skeleton */
-.dark .skeleton { background-color: #252836; }
+.dark .skeleton { background-color: #323554; }
 
 /* Drop zones */
 .dark .drop-zone-inactive {
-  border-color: #374151;
-  background-color: #1A1D2E;
+  border-color: #3E4163;
+  background-color: #2A2D42;
 }
 .dark .drop-zone-inactive:hover {
   border-color: rgba(59, 158, 221, 0.6);
@@ -280,51 +287,51 @@
 
 /* Kbd */
 .dark .kbd {
-  background-color: #252836;
-  border-color: #374151;
+  background-color: #323554;
+  border-color: #3E4163;
   color: #9CA3AF;
 }
 
 /* Badges — artifact types stay the same (colored), generic gets darker */
-.dark .badge-generic { background-color: #252836; color: #9CA3AF; }
-.dark .badge-informational { background-color: #1F2937; color: #9CA3AF; }
+.dark .badge-generic { background-color: #323554; color: #9CA3AF; }
+.dark .badge-informational { background-color: #2A2D42; color: #9CA3AF; }
 
 /* Section title */
-.dark .section-title { color: #6B7280; }
+.dark .section-title { color: #7B80A0; }
 
 /* Panel/Modal */
-.dark .panel-backdrop { background: rgba(0,0,0,0.6); }
+.dark .panel-backdrop { background: rgba(0,0,0,0.5); }
 .dark .panel-slide {
-  background-color: #1A1D2E;
-  border-color: #2D3147;
+  background-color: #2A2D42;
+  border-color: #3E4163;
 }
-.dark .modal-overlay { background: rgba(0,0,0,0.65); }
+.dark .modal-overlay { background: rgba(0,0,0,0.55); }
 .dark .modal-box {
-  background-color: #1A1D2E;
-  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  background-color: #2A2D42;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.4);
 }
-.dark .modal-header { border-color: #2D3147; }
-.dark .icon-btn { color: #6B7280; }
-.dark .icon-btn:hover { background-color: #252836; color: #D1D5DB; }
+.dark .modal-header { border-color: #3E4163; }
+.dark .icon-btn { color: #7B80A0; }
+.dark .icon-btn:hover { background-color: #323554; color: #D1D5DB; }
 
 /* White/gray backgrounds in page content */
 .dark main {
-  background-color: #0F1117;
+  background-color: #22253A;
 }
 
 /* Tables */
 .dark thead tr {
-  background-color: #141620 !important;
-  border-color: #2D3147 !important;
+  background-color: #252840 !important;
+  border-color: #3E4163 !important;
 }
 .dark thead th {
-  color: #6B7280 !important;
+  color: #7B80A0 !important;
 }
 .dark tbody tr {
-  border-color: #1F2430 !important;
+  border-color: #2E3150 !important;
 }
 .dark tbody tr:hover {
-  background-color: #1E2132 !important;
+  background-color: #2E3252 !important;
 }
 .dark tbody td {
   color: #D1D5DB;
@@ -335,37 +342,37 @@
 .dark h1, .dark h2, .dark h3, .dark h4 {
   color: #E5E7EB;
 }
-.dark .text-gray-500 { color: #6B7280; }
+.dark .text-gray-500 { color: #7B80A0; }
 .dark .text-gray-600 { color: #9CA3AF; }
-.dark .text-gray-400 { color: #6B7280; }
+.dark .text-gray-400 { color: #7B80A0; }
 .dark .text-gray-700 { color: #D1D5DB; }
 
 /* Border overrides */
-.dark .border-gray-200 { border-color: #2D3147; }
-.dark .border-gray-100 { border-color: #1F2430; }
+.dark .border-gray-200 { border-color: #3E4163; }
+.dark .border-gray-100 { border-color: #2E3150; }
 
 /* Background overrides */
-.dark .bg-white        { background-color: #1A1D2E; }
-.dark .bg-gray-50      { background-color: #141620; }
-.dark .bg-gray-100     { background-color: #1F2430; }
-.dark .bg-gray-200     { background-color: #252836; }
+.dark .bg-white        { background-color: #2A2D42; }
+.dark .bg-gray-50      { background-color: #252840; }
+.dark .bg-gray-100     { background-color: #2E3150; }
+.dark .bg-gray-200     { background-color: #323554; }
 
 /* Accent light in dark mode */
-.dark .bg-brand-accentlight { background-color: rgba(59, 158, 221, 0.1); }
+.dark .bg-brand-accentlight { background-color: rgba(59, 158, 221, 0.12); }
 .dark .text-brand-accent    { color: #3B9EDD; }
 .dark .border-brand-accent  { border-color: #3B9EDD; }
 
 /* Form elements: select options */
-.dark select option { background-color: #1A1D2E; color: #E5E7EB; }
+.dark select option { background-color: #2A2D42; color: #E5E7EB; }
 
 /* Inline code in dark mode */
 .dark code:not(.code-block code) {
-  background-color: #252836;
+  background-color: #323554;
   color: #3B9EDD;
 }
 
 /* Filter/sidebar panels */
-.dark .border-r { border-color: #2D3147; }
-.dark .border-b { border-color: #2D3147; }
-.dark .border-t { border-color: #2D3147; }
-.dark .border-l { border-color: #2D3147; }
+.dark .border-r { border-color: #3E4163; }
+.dark .border-b { border-color: #3E4163; }
+.dark .border-t { border-color: #3E4163; }
+.dark .border-l { border-color: #3E4163; }

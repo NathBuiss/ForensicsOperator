@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """
-ForensicsOperator Artifact Collector
-=====================================
+TraceX Artifact Collector
+==========================
 Collect forensic artifacts from a live Windows or Linux system and package
 them as a timestamped ZIP archive, then optionally upload directly to a case.
 
 Usage
 -----
-  fo-collector                                           # collect everything
-  fo-collector --collect evtx,registry,prefetch          # selective collection
-  fo-collector --api-url http://FO/api/v1 --case-id XYZ  # upload to case
-  fo-collector --output /tmp/evidence.zip                # custom output path
-  fo-collector --dry-run --verbose                       # preview only
+  tracex-collector                                           # collect everything
+  tracex-collector --collect evtx,registry,prefetch          # selective collection
+  tracex-collector --api-url http://TRACEX/api/v1 --case-id XYZ  # upload to case
+  tracex-collector --output /tmp/evidence.zip                # custom output path
+  tracex-collector --dry-run --verbose                       # preview only
 
 Build
 -----
-  Linux ELF:   ./build.sh        → dist/fo-collector
-  Windows EXE: build.bat         → dist\\fo-collector.exe
+  Linux ELF:   ./build.sh        → dist/tracex-collector
+  Windows EXE: build.bat         → dist\\tracex-collector.exe
 """
 from __future__ import annotations
 
-# ── Embedded configuration (injected by ForensicsOperator at download time) ───
+# ── Embedded configuration (injected by TraceX at download time) ─────────────
 # When non-empty, these values are used as defaults and can still be overridden
 # by CLI arguments.
 EMBEDDED_CONFIG: dict = {}
@@ -49,7 +49,7 @@ IS_MACOS   = platform.system() == "Darwin"
 
 BANNER = f"""
 ╔══════════════════════════════════════════════════════════╗
-║         ForensicsOperator Artifact Collector  v{VERSION}       ║
+║              TraceX Artifact Collector  v{VERSION}             ║
 ╚══════════════════════════════════════════════════════════╝"""
 
 # Default collection sets — all enabled when nothing is specified
@@ -490,8 +490,8 @@ def upload_to_fo(zip_path: Path, api_url: str, case_id: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="fo-collector",
-        description="ForensicsOperator Artifact Collector",
+        prog="tracex-collector",
+        description="TraceX Artifact Collector",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--output",   "-o", type=Path, default=None)

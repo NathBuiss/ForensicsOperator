@@ -55,7 +55,7 @@ def update_job_status(r: redis.Redis, job_id: str, **fields) -> None:
     r.expire(key, 604800)  # 7 days TTL
 
 
-@app.task(bind=True, name="ingest.process_artifact")
+@app.task(bind=True, name="ingest.process_artifact", queue="ingest")
 def process_artifact(
     self,
     job_id: str,

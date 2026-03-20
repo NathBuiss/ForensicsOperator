@@ -8,7 +8,7 @@ log2timeline supports a very wide range of input formats:
   (browsers, iOS backups), PCAP (via Dpfilter), PE files, and many more.
 
 This plugin acts as a "universal" ingester for formats that have no dedicated
-plugin in ForensicsOperator — or when you want Plaso's full timeline depth
+plugin in TraceX — or when you want Plaso's full timeline depth
 instead of the targeted field extraction done by the native plugins.
 
 Requirements: log2timeline (plaso suite) must be installed in the processor
@@ -29,7 +29,7 @@ from plugins.base_plugin import BasePlugin, PluginContext, PluginFatalError
 
 logger = logging.getLogger(__name__)
 
-# Extensions that have NO dedicated ForensicsOperator plugin — log2timeline is
+# Extensions that have NO dedicated TraceX plugin — log2timeline is
 # the primary ingester for these formats.
 _PRIMARY_EXTENSIONS = frozenset({
     ".evt",       # Old Windows Event Log (NT/XP/2003)

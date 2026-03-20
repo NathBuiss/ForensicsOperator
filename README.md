@@ -1,4 +1,4 @@
-# ForensicsOperator
+# TraceX
 
 A Kubernetes-native forensics analysis platform. Upload Windows forensics artefacts (Plaso timelines, Event Logs, Prefetch files, MFT, Registry hives, LNK files), have them automatically parsed and indexed into Elasticsearch, then explore them through a web UI or Kibana.
 
@@ -108,7 +108,7 @@ A Kubernetes-native forensics analysis platform. Upload Windows forensics artefa
 ```bash
 # 1. Clone the repo
 git clone <your-repo-url>
-cd forensicsOperator
+cd tracex
 
 # 2. Start the full stack
 make dev
@@ -551,7 +551,7 @@ GET    /health/ready                   Readiness probe (checks ES + Redis)
 ## Directory Structure
 
 ```
-forensicsOperator/
+tracex/
 │
 ├── api/                        FastAPI service
 │   ├── Dockerfile

@@ -5,7 +5,7 @@ TAG        ?= latest
 NAMESPACE  := forensics-operator
 
 help:
-	@echo "ForensicsOperator — Kubernetes forensics analysis platform"
+	@echo "TraceX — Kubernetes forensics analysis platform"
 	@echo ""
 	@echo "  make dev          Start local dev stack with docker-compose (no K8s needed)"
 	@echo "  make deploy       Full K8s deploy — reads config.json, sets up cluster"

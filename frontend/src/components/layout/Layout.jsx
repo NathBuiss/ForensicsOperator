@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react'
 import {
   LayoutDashboard, Puzzle, FolderOpen,
   Plus, X, ChevronRight, Bell, Sun, Moon, Cpu, PackageOpen, Layers,
-  Code2, BookOpen,
+  Code2, BookOpen, LogOut, UserCircle,
 } from 'lucide-react'
 import { api } from '../../api/client'
 
@@ -34,7 +34,7 @@ function useTheme() {
   return [dark, setDark]
 }
 
-export default function Layout() {
+export default function Layout({ user, onLogout }) {
   const [cases, setCases]             = useState([])
   const [showNewCase, setShowNewCase] = useState(false)
   const [newCaseName, setNewCaseName] = useState('')
@@ -70,7 +70,7 @@ export default function Layout() {
         <div className="px-4 py-4 border-b border-white/10 flex items-center justify-between">
           <NavLink to="/" className="flex items-center group min-w-0">
             <span className="text-sm font-bold text-white tracking-wide leading-tight truncate">
-              Forensics Operator
+              TraceX
             </span>
           </NavLink>
 
@@ -217,6 +217,25 @@ export default function Layout() {
             </div>
           </div>
         </nav>
+
+        {/* ── User / logout footer ───────────────────────────────────────── */}
+        {user && (
+          <div className="px-3 py-3 border-t border-white/10 flex items-center gap-2">
+            <UserCircle size={16} className="text-brand-sidebarmuted flex-shrink-0" />
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium text-white truncate">{user.username}</p>
+              <p className="text-[10px] text-white/40 capitalize">{user.role}</p>
+            </div>
+            <button
+              onClick={onLogout}
+              title="Sign out"
+              className="w-6 h-6 flex items-center justify-center rounded text-brand-sidebarmuted
+                         hover:text-white hover:bg-white/10 transition-colors flex-shrink-0"
+            >
+              <LogOut size={13} />
+            </button>
+          </div>
+        )}
       </aside>
 
       {/* ── Main content ─────────────────────────────────────────────────── */}

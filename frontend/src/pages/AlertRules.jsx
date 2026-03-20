@@ -39,13 +39,13 @@ export default function AlertRules({ caseId }) {
   }
 
   return (
-    <div className="p-6 max-w-3xl mx-auto">
+    <div className="p-6 max-w-4xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h2 className="text-base font-bold text-gray-100 flex items-center gap-2">
-            <AlertTriangle size={16} className="text-yellow-400" /> Alert Rules
-          </h2>
-          <p className="text-xs text-gray-500 mt-0.5">Define suspicious patterns and check them on demand</p>
+          <h1 className="text-xl font-bold text-brand-text flex items-center gap-2">
+            <AlertTriangle size={18} className="text-yellow-500" /> Alert Rules
+          </h1>
+          <p className="text-xs text-gray-500 mt-1">Define suspicious patterns and check them on demand</p>
         </div>
         <div className="flex gap-2">
           <button onClick={() => setShowForm(v => !v)} className="btn-ghost text-xs">

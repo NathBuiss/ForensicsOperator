@@ -174,7 +174,7 @@ export default function Docs() {
           {/* ── Architecture ──────────────────────────────────────────────── */}
           <Section id="architecture" title="Architecture Overview" icon={<Server size={14} className="text-brand-accent" />}>
             <P>
-              ForensicsOperator is a containerised digital forensics platform. Evidence files are
+              TraceX is a containerised digital forensics platform. Evidence files are
               uploaded to MinIO, parsed by the Processor service, stored in Elasticsearch, and
               surfaced through the React frontend.
             </P>

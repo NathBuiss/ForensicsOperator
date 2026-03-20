@@ -8,7 +8,7 @@ import {
 import { api } from '../api/client'
 
 // ── Built-in ingester registry (mirrors processor/plugins/) ──────────────────
-// available: true  → plugin ships with ForensicsOperator (active by default)
+// available: true  → plugin ships with TraceX (active by default)
 // available: false → planned / coming soon
 const BUILTIN_INGESTERS = [
   // ── Windows artifacts ───────────────────────────────────────────────────

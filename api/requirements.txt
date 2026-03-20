@@ -7,3 +7,6 @@ redis==5.0.4
 celery==5.3.6
 minio==7.2.7
 python-magic==0.4.27
+# Auth
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4

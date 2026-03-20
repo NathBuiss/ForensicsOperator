@@ -104,7 +104,7 @@ def _update(r: redis.Redis, run_id: str, **fields) -> None:
 
 # ── Celery task ────────────────────────────────────────────────────────────────
 
-@app.task(bind=True, name="module.run")
+@app.task(bind=True, name="module.run", queue="modules")
 def run_module(
     self,
     run_id: str,

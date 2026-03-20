@@ -107,7 +107,7 @@ class PlasoPlugin(BasePlugin):
         output_file.unlink(missing_ok=True)
 
     def _psort_event_to_fo(self, data: dict) -> dict[str, Any]:
-        """Convert a psort JSON Line event to a ForensicsOperator event dict."""
+        """Convert a psort JSON Line event to a TraceX event dict."""
         parser = data.get("parser", "unknown")
         artifact_type = self._resolve_artifact_type(parser)
         timestamp = data.get("datetime", "")
