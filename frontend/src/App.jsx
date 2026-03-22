@@ -12,6 +12,7 @@ import Collector    from './pages/Collector'
 import Cases        from './pages/Cases'
 import Studio       from './pages/Studio'
 import Docs         from './pages/Docs'
+import Settings     from './pages/Settings'
 import Login        from './pages/Login'
 
 import { getToken, setToken, clearToken, isAuthenticated } from './api/client'
@@ -78,6 +79,7 @@ export default function App() {
           <Route path="collector"                    element={<Collector />} />
           <Route path="studio"                       element={<Studio />} />
           <Route path="docs"                         element={<Docs />} />
+          <Route path="settings"                     element={<Settings />} />
           <Route path="plugins" element={<Navigate to="/ingesters" replace />} />
           <Route path="*"       element={<Navigate to="/" replace />} />
         </Route>

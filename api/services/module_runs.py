@@ -87,12 +87,12 @@ def _deserialize(data: dict) -> dict:
                 data[field] = json.loads(data[field])
             except (json.JSONDecodeError, TypeError):
                 data[field] = []
-    for field in ("hits_by_level",):
-        if field in data:
+    for field in ("hits_by_level", "llm_analysis"):
+        if field in data and isinstance(data[field], str):
             try:
                 data[field] = json.loads(data[field])
             except (json.JSONDecodeError, TypeError):
-                data[field] = {}
+                data[field] = {} if field == "hits_by_level" else None
     for field in ("total_hits",):
         if field in data:
             try:

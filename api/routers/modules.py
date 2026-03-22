@@ -11,6 +11,9 @@ against files already ingested into a case.  They differ from Ingesters:
 Each module run is independent: you select source files from the case,
 launch the module, and results appear in the Module Runs panel without
 affecting the main event timeline.
+
+Module definitions live in api/modules_registry/*.yaml  — add a new YAML file
+to register a new module without touching this code.
 """
 from __future__ import annotations
 
@@ -24,6 +27,12 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+try:
+    import yaml as _yaml  # type: ignore
+    _YAML_AVAILABLE = True
+except ImportError:
+    _YAML_AVAILABLE = False
+
 from services.jobs import list_case_jobs
 from services.cases import get_case
 from services import module_runs as run_svc
@@ -34,136 +43,77 @@ router = APIRouter(tags=["modules"])
 
 CUSTOM_MODULES_DIR = Path(os.getenv("MODULES_DIR", "/app/modules"))
 
-# ── Module registry ───────────────────────────────────────────────────────────
+# Module definitions are loaded from YAML files in api/modules_registry/
+_REGISTRY_DIR = Path(__file__).parent.parent / "modules_registry"
+
+
+# ── YAML registry loader ──────────────────────────────────────────────────────
 # input_extensions : list of file extensions to match (lower-case, with dot)
 # input_filenames  : list of exact basenames to match (case-insensitive)
 # Both empty       → accept ANY source file (e.g. "strings")
 # Non-empty        → match if extension OR filename matches
 
-MODULES: list[dict] = [
-    {
-        "id":               "wintriage",
-        "name":             "Windows Triage",
-        "description":      "Auto-detect and parse Windows artifacts — EVTX (35+ forensic event IDs), registry persistence keys, LNK shell-links, Prefetch execution evidence",
-        "input_extensions": [".evtx", ".dat", ".hive", ".lnk", ".pf"],
-        "input_filenames":  [
-            "NTUSER.DAT", "SYSTEM", "SOFTWARE", "SAM", "SECURITY", "USRCLASS.DAT",
-        ],
-        "available":        True,
-    },
-    {
-        "id":               "hayabusa",
-        "name":             "Hayabusa",
-        "description":      "Sigma-based EVTX threat hunting with 4 000+ built-in detection rules",
-        "input_extensions": [".evtx"],
-        "input_filenames":  [],
-        "available":        True,
-    },
-    {
-        "id":               "hindsight",
-        "name":             "Hindsight",
-        "description":      "Chrome, Firefox and Edge browser forensics — history, downloads, cookies, form data",
-        "input_extensions": [".db", ".sqlite"],
-        "input_filenames":  [
-            "History", "places.sqlite", "Cookies", "Web Data",
-            "Login Data", "Favicons", "Shortcuts", "Top Sites",
-        ],
-        "available":        True,
-    },
-    {
-        "id":               "strings",
-        "name":             "Strings",
-        "description":      "Extract printable strings (≥ 8 chars) from any file — useful for binary triage",
-        "input_extensions": [],   # empty = accept ALL files
-        "input_filenames":  [],
-        "available":        True,
-    },
-    {
-        "id":               "regripper",
-        "name":             "RegRipper",
-        "description":      "Deep Windows registry analysis — 200+ plugins covering persistence, MRU, ShimCache, UserAssist and more",
-        "input_extensions": [".dat", ".hive"],
-        "input_filenames":  [
-            "NTUSER.DAT", "SYSTEM", "SOFTWARE", "SAM",
-            "SECURITY", "USRCLASS.DAT",
-        ],
-        "available":        True,
-    },
-    {
-        "id":                  "chainsaw",
-        "name":                "Chainsaw",
-        "description":         "Rapid EVTX analysis using Sigma rules",
-        "input_extensions":    [".evtx"],
-        "input_filenames":     [],
-        "available":           False,
-        "unavailable_reason":  "Sigma rules bundle required — coming soon.",
-    },
-    {
-        "id":                  "evtxecmd",
-        "name":                "EvtxECmd",
-        "description":         "Eric Zimmermann's EVTX timeline reconstruction",
-        "input_extensions":    [".evtx"],
-        "input_filenames":     [],
-        "available":           False,
-        "unavailable_reason":  "Windows/.NET only — not supported on Linux.",
-    },
-    {
-        "id":                  "volatility3",
-        "name":                "Volatility 3",
-        "description":         "Memory forensics — processes, network, registry, malware from RAM dumps",
-        "input_extensions":    [".raw", ".vmem", ".dmp", ".mem", ".lime"],
-        "input_filenames":     [],
-        "available":           False,
-        "unavailable_reason":  "Coming soon.",
-    },
-    {
-        "id":               "yara",
-        "name":             "YARA Scanner",
-        "description":      "Scan files with a built-in ruleset of common malware, packer, "
-                            "and threat-hunting YARA signatures",
-        "input_extensions": [],   # accepts ALL files
-        "input_filenames":  [],
-        "available":        True,
-    },
-    {
-        "id":               "exiftool",
-        "name":             "ExifTool",
-        "description":      "Extract metadata from documents, images, executables and office files "
-                            "(author, timestamps, GPS, camera model, embedded macros…)",
-        "input_extensions": [
-            ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
-            ".jpg", ".jpeg", ".png", ".tiff", ".tif", ".gif", ".bmp",
-            ".exe", ".dll", ".sys", ".so",
-        ],
-        "input_filenames":  [],
-        "available":        True,
-    },
-    {
-        "id":               "bulk_extractor",
-        "name":             "Bulk Extractor",
-        "description":      "Carve forensic artifacts from raw binary images — email addresses, "
-                            "URLs, credit cards, phone numbers, GPS coordinates, domain names",
-        "input_extensions": [
-            ".dd", ".img", ".iso", ".raw", ".bin", ".vmdk",
-            ".e01", ".s01", ".ex01",
-        ],
-        "input_filenames":  [],
-        "available":        False,
-        "unavailable_reason": "Coming soon — binary packaging in progress.",
-    },
-    {
-        "id":               "capa",
-        "name":             "CAPA",
-        "description":      "Detect capabilities in PE files and shellcode — identifies malware "
-                            "behaviors mapped to MITRE ATT&CK and MBC",
-        "input_extensions": [".exe", ".dll", ".sys", ".bin", ".so"],
-        "input_filenames":  [],
-        "available":        False,
-        "unavailable_reason": "Coming soon.",
-    },
-]
+def _load_modules_from_registry() -> list[dict]:
+    """
+    Load module definitions from api/modules_registry/*.yaml.
 
-_MODULES_BY_ID: dict[str, dict] = {m["id"]: m for m in MODULES}
+    Each YAML file defines one module:
+        id: hayabusa
+        name: Hayabusa
+        description: ...
+        input_extensions: [".evtx"]
+        input_filenames: []
+        available: true
+        # optional fields:
+        unavailable_reason: "..."
+        category: "Threat Hunting"
+        tags: [sigma, evtx]
+    """
+    if not _YAML_AVAILABLE:
+        logger.warning("PyYAML not installed — module registry cannot be loaded from YAML files")
+        return []
+    if not _REGISTRY_DIR.exists():
+        logger.warning("Modules registry directory %s not found", _REGISTRY_DIR)
+        return []
+
+    modules: list[dict] = []
+    for path in sorted(_REGISTRY_DIR.glob("*.yaml")):
+        try:
+            with path.open() as fh:
+                data = _yaml.safe_load(fh)
+            if not isinstance(data, dict) or not data.get("id"):
+                logger.warning("Skipping %s — missing 'id' field", path.name)
+                continue
+            module: dict = {
+                "id":               data["id"],
+                "name":             data.get("name", data["id"]),
+                "description":      data.get("description", ""),
+                "input_extensions": data.get("input_extensions") or [],
+                "input_filenames":  data.get("input_filenames") or [],
+                "available":        bool(data.get("available", True)),
+                "category":         data.get("category", ""),
+                "tags":             data.get("tags") or [],
+            }
+            if not module["available"]:
+                module["unavailable_reason"] = data.get("unavailable_reason", "Unavailable")
+            modules.append(module)
+        except Exception as exc:
+            logger.error("Failed to load module from %s: %s", path.name, exc)
+    return modules
+
+
+_MODULES_CACHE: list[dict] | None = None
+
+
+def _get_modules() -> list[dict]:
+    global _MODULES_CACHE
+    if _MODULES_CACHE is None:
+        _MODULES_CACHE = _load_modules_from_registry()
+    return _MODULES_CACHE
+
+
+def _get_modules_by_id() -> dict[str, dict]:
+    return {m["id"]: m for m in _get_modules()}
 
 
 # ── Request models ────────────────────────────────────────────────────────────
@@ -180,7 +130,7 @@ def _get_custom_modules() -> list[dict]:
     """Scan CUSTOM_MODULES_DIR and return metadata for each *_module.py file."""
     if not CUSTOM_MODULES_DIR.exists():
         return []
-    built_in_ids = {m["id"] for m in MODULES}
+    built_in_ids = {m["id"] for m in _get_modules()}
     result = []
     for f in sorted(CUSTOM_MODULES_DIR.glob("*_module.py")):
         module_id = f.stem[: -len("_module")]  # strip trailing _module
@@ -217,7 +167,7 @@ def _get_custom_modules() -> list[dict]:
 
 @router.get("/modules")
 def list_modules():
-    return {"modules": MODULES + _get_custom_modules()}
+    return {"modules": _get_modules() + _get_custom_modules()}
 
 
 @router.get("/cases/{case_id}/sources")
@@ -248,7 +198,7 @@ def create_module_run(case_id: str, req: CreateModuleRunRequest):
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    module = _MODULES_BY_ID.get(req.module_id)
+    module = _get_modules_by_id().get(req.module_id)
     if not module:
         raise HTTPException(status_code=404, detail=f"Module '{req.module_id}' not found")
     if not module.get("available"):

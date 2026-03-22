@@ -131,6 +131,13 @@ export const api = {
     listRuns:     (caseId)       => request('GET',  `/cases/${caseId}/module-runs`),
     getRun:       (runId)        => request('GET',  `/module-runs/${runId}`),
     validateYara: (rules)        => request('POST', '/modules/yara/validate', { rules }),
+    analyze:      (runId)        => request('POST', `/module-runs/${runId}/analyze`),
+  },
+
+  llm: {
+    getConfig:    ()     => request('GET',    '/admin/llm-config'),
+    updateConfig: (data) => request('PUT',    '/admin/llm-config', data),
+    clearConfig:  ()     => request('DELETE', '/admin/llm-config'),
   },
 
   editor: {

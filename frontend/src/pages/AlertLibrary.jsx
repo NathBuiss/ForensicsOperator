@@ -3,10 +3,52 @@ import { useNavigate } from 'react-router-dom'
 import {
   Bell, Plus, Trash2, ChevronDown, ChevronUp, Pencil, Check, X,
   AlertTriangle, Loader2, Search, Play, CheckCircle, Clock, RefreshCw,
-  ExternalLink, Filter,
+  ExternalLink, Filter, Tag,
 } from 'lucide-react'
 import { api } from '../api/client'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
+
+// ── Category metadata ──────────────────────────────────────────────────────────
+const CATEGORY_ORDER = [
+  'Anti-Forensics',
+  'Authentication',
+  'Privilege Escalation',
+  'Persistence',
+  'Execution',
+  'Lateral Movement',
+  'Defense Evasion',
+  'Credential Access',
+  'Discovery',
+  'Command & Control',
+  'Exfiltration',
+  'Other',
+]
+
+const CATEGORY_STYLES = {
+  'Anti-Forensics':    { bg: 'bg-rose-100 text-rose-700 border-rose-200',    dot: 'bg-rose-400'    },
+  'Authentication':    { bg: 'bg-blue-100 text-blue-700 border-blue-200',     dot: 'bg-blue-400'    },
+  'Privilege Escalation': { bg: 'bg-orange-100 text-orange-700 border-orange-200', dot: 'bg-orange-400' },
+  'Persistence':       { bg: 'bg-yellow-100 text-yellow-700 border-yellow-200', dot: 'bg-yellow-500' },
+  'Execution':         { bg: 'bg-purple-100 text-purple-700 border-purple-200', dot: 'bg-purple-400' },
+  'Lateral Movement':  { bg: 'bg-cyan-100 text-cyan-700 border-cyan-200',     dot: 'bg-cyan-400'    },
+  'Defense Evasion':   { bg: 'bg-slate-100 text-slate-700 border-slate-200',  dot: 'bg-slate-400'   },
+  'Credential Access': { bg: 'bg-red-100 text-red-700 border-red-200',        dot: 'bg-red-400'     },
+  'Discovery':         { bg: 'bg-teal-100 text-teal-700 border-teal-200',     dot: 'bg-teal-400'    },
+  'Command & Control': { bg: 'bg-indigo-100 text-indigo-700 border-indigo-200', dot: 'bg-indigo-400' },
+  'Exfiltration':      { bg: 'bg-pink-100 text-pink-700 border-pink-200',     dot: 'bg-pink-400'    },
+  'Other':             { bg: 'bg-gray-100 text-gray-600 border-gray-200',     dot: 'bg-gray-400'    },
+}
+
+function CategoryBadge({ category }) {
+  if (!category) return null
+  const style = CATEGORY_STYLES[category] || CATEGORY_STYLES['Other']
+  return (
+    <span className={`inline-flex items-center gap-1 text-[10px] font-medium border rounded-full px-2 py-0.5 ${style.bg}`}>
+      <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${style.dot}`} />
+      {category}
+    </span>
+  )
+}
 
 // ── Run on Case modal ─────────────────────────────────────────────────────────
 function RunOnCaseModal({ rule, cases, onClose }) {
@@ -51,8 +93,11 @@ function RunOnCaseModal({ rule, cases, onClose }) {
         <div className="p-5 space-y-4">
           {/* Rule summary */}
           <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
-            <p className="text-xs font-semibold text-brand-text">{rule.name}</p>
-            <code className="block mt-1 text-xs text-gray-500 font-mono break-all">{rule.query}</code>
+            <div className="flex items-center gap-2 flex-wrap mb-1">
+              <p className="text-xs font-semibold text-brand-text">{rule.name}</p>
+              {rule.category && <CategoryBadge category={rule.category} />}
+            </div>
+            <code className="block text-xs text-gray-500 font-mono break-all">{rule.query}</code>
           </div>
 
           {/* Case picker */}
@@ -125,6 +170,7 @@ function EditRuleForm({ rule, onSaved, onCancel }) {
   const [form, setForm] = useState({
     name: rule.name,
     description: rule.description || '',
+    category: rule.category || '',
     artifact_type: rule.artifact_type || '',
     query: rule.query,
     threshold: rule.threshold,
@@ -158,6 +204,17 @@ function EditRuleForm({ rule, onSaved, onCancel }) {
           <input className="input text-xs" value={form.name} onChange={e => set('name', e.target.value)} required />
         </div>
         <div>
+          <label className="block text-xs font-medium text-gray-600 mb-1">Category</label>
+          <select className="input text-xs" value={form.category} onChange={e => set('category', e.target.value)}>
+            <option value="">Uncategorized</option>
+            {CATEGORY_ORDER.filter(c => c !== 'Other').map(c => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
           <label className="block text-xs font-medium text-gray-600 mb-1">Artifact Type</label>
           <select className="input text-xs" value={form.artifact_type} onChange={e => set('artifact_type', e.target.value)}>
             <option value="">Any</option>
@@ -169,10 +226,10 @@ function EditRuleForm({ rule, onSaved, onCancel }) {
             <option value="hayabusa">hayabusa</option>
           </select>
         </div>
-      </div>
-      <div>
-        <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
-        <input className="input text-xs" value={form.description} onChange={e => set('description', e.target.value)} />
+        <div>
+          <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
+          <input className="input text-xs" value={form.description} onChange={e => set('description', e.target.value)} />
+        </div>
       </div>
       <div>
         <label className="block text-xs font-medium text-gray-600 mb-1">ES Query *</label>
@@ -220,6 +277,7 @@ function LibraryRuleCard({ rule, cases, onDelete, onUpdated }) {
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
               <span className="font-medium text-brand-text text-sm">{rule.name}</span>
+              {rule.category && <CategoryBadge category={rule.category} />}
               {rule.artifact_type && (
                 <span className={`badge badge-${rule.artifact_type}`}>{rule.artifact_type}</span>
               )}
@@ -282,7 +340,7 @@ function LibraryRuleCard({ rule, cases, onDelete, onUpdated }) {
 // ── Create rule form ──────────────────────────────────────────────────────────
 function CreateRuleForm({ onCreated }) {
   const [form, setForm] = useState({
-    name: '', description: '', artifact_type: '', query: '', threshold: 1,
+    name: '', description: '', category: '', artifact_type: '', query: '', threshold: 1,
   })
   const [saving, setSaving] = useState(false)
   const [error, setError]   = useState('')
@@ -300,7 +358,7 @@ function CreateRuleForm({ onCreated }) {
         threshold: parseInt(form.threshold) || 1,
       })
       onCreated(rule)
-      setForm({ name: '', description: '', artifact_type: '', query: '', threshold: 1 })
+      setForm({ name: '', description: '', category: '', artifact_type: '', query: '', threshold: 1 })
     } catch (err) {
       setError(err.message)
     } finally {
@@ -322,6 +380,18 @@ function CreateRuleForm({ onCreated }) {
             value={form.name} onChange={e => set('name', e.target.value)} required />
         </div>
         <div>
+          <label className="block text-xs font-medium text-gray-600 mb-1">Category</label>
+          <select className="input" value={form.category} onChange={e => set('category', e.target.value)}>
+            <option value="">Uncategorized</option>
+            {CATEGORY_ORDER.filter(c => c !== 'Other').map(c => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div>
           <label className="block text-xs font-medium text-gray-600 mb-1">Artifact Type</label>
           <select className="input" value={form.artifact_type}
             onChange={e => set('artifact_type', e.target.value)}>
@@ -334,12 +404,11 @@ function CreateRuleForm({ onCreated }) {
             <option value="hayabusa">hayabusa</option>
           </select>
         </div>
-      </div>
-
-      <div>
-        <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
-        <input className="input" placeholder="What does this rule detect?"
-          value={form.description} onChange={e => set('description', e.target.value)} />
+        <div>
+          <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
+          <input className="input" placeholder="What does this rule detect?"
+            value={form.description} onChange={e => set('description', e.target.value)} />
+        </div>
       </div>
 
       <div>
@@ -378,9 +447,10 @@ export default function AlertLibrary() {
   const [cases, setCases]     = useState([])
   const [loading, setLoading] = useState(true)
   const [seeding, setSeeding] = useState(false)
-  const [seedMsg, setSeedMsg] = useState(null)   // {added, total} or null
-  const [search, setSearch]           = useState('')
+  const [seedMsg, setSeedMsg] = useState(null)
+  const [search, setSearch]             = useState('')
   const [artifactFilter, setArtifactFilter] = useState('all')
+  const [categoryFilter, setCategoryFilter] = useState('all')
   const searchRef = useRef(null)
 
   useKeyboardShortcuts([
@@ -392,6 +462,12 @@ export default function AlertLibrary() {
     [rules]
   )
 
+  // Distinct categories present in the current rule set, ordered by CATEGORY_ORDER
+  const presentCategories = useMemo(() => {
+    const cats = new Set(rules.map(r => r.category || 'Other').filter(Boolean))
+    return ['all', ...CATEGORY_ORDER.filter(c => cats.has(c))]
+  }, [rules])
+
   const filteredRules = useMemo(() => {
     const q = search.toLowerCase()
     return rules.filter(r => {
@@ -399,9 +475,29 @@ export default function AlertLibrary() {
         (r.name || '').toLowerCase().includes(q) ||
         (r.description || '').toLowerCase().includes(q)
       const artifactMatch = artifactFilter === 'all' || r.artifact_type === artifactFilter
-      return textMatch && artifactMatch
+      const cat = r.category || 'Other'
+      const categoryMatch = categoryFilter === 'all' || cat === categoryFilter
+      return textMatch && artifactMatch && categoryMatch
     })
-  }, [rules, search, artifactFilter])
+  }, [rules, search, artifactFilter, categoryFilter])
+
+  // Group filtered rules by category in CATEGORY_ORDER order
+  const groupedRules = useMemo(() => {
+    const groups = new Map()
+    for (const cat of CATEGORY_ORDER) {
+      const items = filteredRules.filter(r => (r.category || 'Other') === cat)
+      if (items.length > 0) groups.set(cat, items)
+    }
+    // Catch any rules with a category not in CATEGORY_ORDER
+    const known = new Set(CATEGORY_ORDER)
+    const uncategorized = filteredRules.filter(r => !known.has(r.category || 'Other'))
+    if (uncategorized.length > 0) {
+      groups.set('Other', [...(groups.get('Other') || []), ...uncategorized])
+    }
+    return groups
+  }, [filteredRules])
+
+  const hasFilters = search || artifactFilter !== 'all' || categoryFilter !== 'all'
 
   const loadRules = useCallback(() => {
     api.alertRules.listLibrary()
@@ -448,6 +544,12 @@ export default function AlertLibrary() {
     }
   }
 
+  function clearFilters() {
+    setSearch('')
+    setArtifactFilter('all')
+    setCategoryFilter('all')
+  }
+
   return (
     <div className="p-6 max-w-4xl">
 
@@ -492,6 +594,33 @@ export default function AlertLibrary() {
           </div>
         </div>
 
+        {/* Category pill filter row */}
+        {!loading && rules.length > 0 && presentCategories.length > 2 && (
+          <div className="flex items-center gap-1.5 mb-3 flex-wrap">
+            <Tag size={12} className="text-gray-400 flex-shrink-0" />
+            {presentCategories.map(cat => {
+              const isActive = categoryFilter === cat
+              const style = cat !== 'all' ? CATEGORY_STYLES[cat] || CATEGORY_STYLES['Other'] : null
+              return (
+                <button
+                  key={cat}
+                  onClick={() => setCategoryFilter(cat)}
+                  className={`inline-flex items-center gap-1 text-[11px] font-medium border rounded-full px-2.5 py-0.5 transition-colors ${
+                    isActive
+                      ? cat === 'all'
+                        ? 'bg-gray-800 text-white border-gray-800'
+                        : `${style.bg} border-current ring-1 ring-current ring-offset-1`
+                      : 'bg-white text-gray-500 border-gray-200 hover:border-gray-400'
+                  }`}
+                >
+                  {cat !== 'all' && <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${style.dot}`} />}
+                  {cat === 'all' ? 'All categories' : cat}
+                </button>
+              )
+            })}
+          </div>
+        )}
+
         {/* Filter bar */}
         {!loading && rules.length > 0 && (
           <div className="flex items-center gap-2 mb-3 flex-wrap">
@@ -530,10 +659,15 @@ export default function AlertLibrary() {
               </select>
             </div>
 
-            {/* Result count */}
+            {/* Result count + clear */}
             <span className="text-xs text-gray-400 whitespace-nowrap">
               Showing {filteredRules.length} of {rules.length} rules
             </span>
+            {hasFilters && (
+              <button onClick={clearFilters} className="btn-ghost text-xs text-gray-500">
+                <X size={11} /> Clear
+              </button>
+            )}
           </div>
         )}
 
@@ -560,24 +694,37 @@ export default function AlertLibrary() {
           <div className="card p-8 flex flex-col items-center text-center text-gray-400">
             <Search size={24} className="mb-2 opacity-30" />
             <p className="text-sm">No rules match your filters.</p>
-            <button
-              onClick={() => { setSearch(''); setArtifactFilter('all') }}
-              className="btn-ghost text-xs mt-3"
-            >
+            <button onClick={clearFilters} className="btn-ghost text-xs mt-3">
               Clear filters
             </button>
           </div>
         ) : (
-          <div className="space-y-2">
-            {filteredRules.map(r => (
-              <LibraryRuleCard
-                key={r.id}
-                rule={r}
-                cases={cases}
-                onDelete={deleteRule}
-                onUpdated={handleUpdated}
-              />
-            ))}
+          <div className="space-y-6">
+            {[...groupedRules.entries()].map(([cat, catRules]) => {
+              const style = CATEGORY_STYLES[cat] || CATEGORY_STYLES['Other']
+              return (
+                <div key={cat}>
+                  {/* Category section header */}
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className={`w-2 h-2 rounded-full flex-shrink-0 ${style.dot}`} />
+                    <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">{cat}</h3>
+                    <span className="text-xs text-gray-400">({catRules.length})</span>
+                    <div className="flex-1 border-t border-gray-100" />
+                  </div>
+                  <div className="space-y-2">
+                    {catRules.map(r => (
+                      <LibraryRuleCard
+                        key={r.id}
+                        rule={r}
+                        cases={cases}
+                        onDelete={deleteRule}
+                        onUpdated={handleUpdated}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )
+            })}
           </div>
         )}
       </div>

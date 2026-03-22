@@ -153,6 +153,9 @@ def run_module(
             "wintriage":   _run_wintriage,
             "yara":        _run_yara,
             "exiftool":    _run_exiftool,
+            "volatility3": _run_volatility3,
+            "oletools":    _run_oletools,
+            "pe_analysis": _run_pe_analysis,
         }
         runner = RUNNERS.get(module_id)
 
@@ -1980,5 +1983,675 @@ def _run_exiftool(run_id: str, work_dir: Path, sources_dir: Path, params: dict, 
                 "has_macros": has_macros,
             },
         })
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Volatility 3 — memory forensics
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Supported memory dump extensions
+_MEMORY_EXTS = frozenset({
+    ".dmp", ".vmem", ".raw", ".mem", ".img",
+    ".lime", ".dd", ".bin", ".elf", ".e01",
+})
+
+# Plugins: (plugin_name, display_label, base_level, max_rows)
+_VOL_WIN_PLUGINS = [
+    ("windows.pslist.PsList",               "Process List",           "informational", 500),
+    ("windows.cmdline.CmdLine",             "Command Lines",          "informational", 500),
+    ("windows.netscan.NetScan",             "Network Connections",    "informational", 500),
+    ("windows.malfind.Malfind",             "Injected Code (Malfind)","high",          200),
+    ("windows.svcscan.SvcScan",             "Services",               "informational", 400),
+    ("windows.dlllist.DllList",             "Loaded DLLs",            "informational", 300),
+    ("windows.registry.hivescan.HiveScan",  "Registry Hives",         "informational", 200),
+]
+
+_VOL_LINUX_PLUGINS = [
+    ("linux.pslist.PsList",   "Process List",        "informational", 500),
+    ("linux.bash.Bash",       "Bash History",        "informational", 300),
+    ("linux.netstat.Netstat", "Network Connections", "informational", 500),
+    ("linux.lsof.Lsof",      "Open Files",          "informational", 300),
+]
+
+
+def _find_vol_binary() -> tuple[str, str | None]:
+    """
+    Return (interpreter, vol_script_or_None).
+    Tries: vol3, vol, then common install paths.
+    Raises RuntimeError if not found.
+    """
+    for name in ("vol3", "vol"):
+        found = shutil.which(name)
+        if found:
+            return (found, None)
+
+    # Fallback: look for vol.py in known paths
+    candidates = [
+        "/opt/volatility3/vol.py",
+        "/usr/local/lib/volatility3/vol.py",
+        str(Path.home() / "volatility3" / "vol.py"),
+    ]
+    python3 = shutil.which("python3") or "python3"
+    for c in candidates:
+        if Path(c).exists():
+            return (python3, c)
+
+    raise RuntimeError(
+        "Volatility 3 not found in PATH. Install with:\n"
+        "  pip install volatility3\n"
+        "or place vol3/vol in PATH."
+    )
+
+
+def _run_vol_plugin(
+    vol_bin: str,
+    vol_script: str | None,
+    mem_file: Path,
+    plugin: str,
+    work_dir: Path,
+    tool_meta: dict,
+) -> tuple[list[str], list[list]]:
+    """
+    Run one Volatility 3 plugin with --renderer json.
+    Returns (columns, rows) on success, or ([], []) on failure.
+    """
+    cmd = [vol_bin]
+    if vol_script:
+        cmd.append(vol_script)
+    cmd += ["-f", str(mem_file), "--renderer", "json", plugin]
+
+    tool_meta["log"] += f"  cmd: {' '.join(cmd)}\n"
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,    # 10 min per plugin
+            cwd=str(work_dir),
+        )
+    except subprocess.TimeoutExpired:
+        tool_meta["stdout"] += f"  → TIMEOUT (>10 min)\n"
+        tool_meta["log"]    += f"  [{plugin}] timeout\n"
+        return [], []
+
+    stdout = _strip_ansi((proc.stdout or "").strip())
+    stderr = _strip_ansi((proc.stderr or "").strip())
+
+    if stderr:
+        tool_meta["log"] += f"  stderr: {stderr[:600]}\n"
+
+    if not stdout:
+        tool_meta["stdout"] += f"  → no output (code={proc.returncode})\n"
+        if stderr:
+            tool_meta["stdout"] += f"  {stderr[:200]}\n"
+        return [], []
+
+    # Find the JSON object in stdout (Volatility may print progress lines first)
+    json_start = stdout.find("{")
+    if json_start == -1:
+        tool_meta["stdout"] += f"  → no JSON found in output\n"
+        return [], []
+
+    try:
+        data = json.loads(stdout[json_start:])
+    except json.JSONDecodeError as exc:
+        tool_meta["stdout"] += f"  → JSON decode error: {exc}\n"
+        return [], []
+
+    columns = data.get("columns", [])
+    rows    = data.get("rows",    [])
+    return columns, rows
+
+
+def _volatility_rows_to_hits(
+    plugin: str,
+    label: str,
+    base_level: str,
+    columns: list[str],
+    rows: list[list],
+    source_file: str,
+) -> list[dict]:
+    """Convert Volatility 3 JSON rows into FO hit dicts."""
+    col_lower = [c.lower() for c in columns]
+
+    def _col(row: list, *names: str) -> str:
+        for name in names:
+            try:
+                idx = col_lower.index(name.lower())
+                v = row[idx]
+                return str(v) if v not in (None, "", 0) else ""
+            except (ValueError, IndexError):
+                pass
+        return ""
+
+    results: list[dict] = []
+    p_lower = plugin.lower()
+
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+
+        # Build generic details from all non-empty columns
+        parts = [f"{c}: {v}" for c, v in zip(columns, row)
+                 if v is not None and v != "" and v != 0]
+        details = " | ".join(parts[:15])
+
+        pid      = _col(row, "PID", "pid")
+        level    = base_level
+        tags     = [f"volatility.{plugin.split('.')[0]}"]
+
+        # Per-plugin rule_title and enrichment
+        if "pslist" in p_lower or "pstree" in p_lower:
+            name  = _col(row, "ImageFileName", "Name", "name")
+            ppid  = _col(row, "PPID", "ppid")
+            title = f"Process: {name or '?'}"
+            if pid:  title += f" (PID {pid})"
+            if ppid: title += f" ← {ppid}"
+
+        elif "cmdline" in p_lower:
+            name  = _col(row, "ImageFileName", "Name", "Process")
+            args  = _col(row, "Args", "CommandLine", "cmdline", "Cmd")
+            title = f"CmdLine: {name or '?'}"
+            if pid:  title += f" (PID {pid})"
+            details = args or details
+            # Flag suspicious patterns
+            for pattern in ("encodedcommand", "frombase64", "invoke-expression", "iex(", "bypass"):
+                if pattern in (args or "").lower():
+                    level = "high"
+                    tags.append("suspicious.cmdline")
+                    break
+
+        elif "netscan" in p_lower or "netstat" in p_lower:
+            proto  = _col(row, "Proto", "Type", "proto")
+            local  = _col(row, "LocalAddr", "LocalIp", "local_addr")
+            lport  = _col(row, "LocalPort", "lport")
+            remote = _col(row, "ForeignAddr", "ForeignIp", "RemoteAddr", "remote_addr")
+            rport  = _col(row, "ForeignPort", "rport", "RemotePort")
+            state  = _col(row, "State", "state")
+            owner  = _col(row, "Owner", "ImageFileName")
+            laddr  = f"{local}:{lport}" if lport else local
+            raddr  = f"{remote}:{rport}" if rport else remote
+            title  = f"Network: {proto} {laddr} → {raddr}"
+            if state:  title += f" [{state}]"
+            if owner:  title += f" ({owner})"
+
+        elif "malfind" in p_lower:
+            name      = _col(row, "ImageFileName", "Process", "Name")
+            protection= _col(row, "Protection", "Vad Tag", "VadTag")
+            title     = f"Malfind: {name or '?'}"
+            if pid:   title += f" (PID {pid})"
+            if protection: title += f" [{protection}]"
+            level = "high"
+            tags.append("malware.injected-code")
+
+        elif "svcscan" in p_lower or "services" in p_lower:
+            svc   = _col(row, "ServiceName", "Name", "DisplayName")
+            state = _col(row, "State", "state")
+            start = _col(row, "Start", "StartType")
+            title = f"Service: {svc or '?'}"
+            if state: title += f" [{state}]"
+            if start: title += f" ({start})"
+
+        elif "dlllist" in p_lower:
+            proc = _col(row, "ImageFileName", "Name", "Process")
+            path = _col(row, "Path", "FullDllName", "Base")
+            title = f"DLL: {proc or '?'} → {Path(path).name if path else '?'}"
+
+        elif "bash" in p_lower:
+            cmd   = _col(row, "Command", "command", "History")
+            uname = _col(row, "Name", "Process", "pid")
+            title = f"Bash: {(cmd or '?')[:80]}"
+            details = cmd or details
+
+        elif "hive" in p_lower:
+            hive  = _col(row, "Name", "HiveName", "FileFullPath", "File")
+            title = f"Registry Hive: {hive or '?'}"
+
+        elif "lsof" in p_lower:
+            proc  = _col(row, "Name", "ImageFileName", "pid")
+            fpath = _col(row, "File", "Path", "FdType")
+            title = f"Open File: {proc or '?'} → {fpath or '?'}"
+
+        else:
+            title = label
+
+        try:
+            pid_int = int(pid) if pid and str(pid).isdigit() else None
+        except (ValueError, TypeError):
+            pid_int = None
+
+        results.append({
+            "id":          str(uuid.uuid4()),
+            "timestamp":   "",
+            "level":       level,
+            "level_int":   LEVEL_INT.get(level, 1),
+            "rule_title":  title[:200],
+            "computer":    source_file,
+            "channel":     plugin,
+            "event_id":    pid_int,
+            "details_raw": details[:2000],
+            "tags":        tags,
+        })
+
+    return results
+
+
+def _run_volatility3(
+    run_id: str,
+    work_dir: Path,
+    sources_dir: Path,
+    params: dict,
+    tool_meta: dict,
+) -> list[dict]:
+    """
+    Run Volatility 3 memory forensics against an uploaded memory dump.
+
+    Params:
+      os:      "windows" (default) | "linux"
+      plugins: comma-separated short plugin names to override the default set
+               e.g. "pslist,cmdline,malfind"
+    """
+    vol_bin, vol_script = _find_vol_binary()
+
+    # Find the memory dump — prefer files with known extensions, fall back to largest
+    mem_files = [p for p in sources_dir.iterdir()
+                 if p.is_file() and p.suffix.lower() in _MEMORY_EXTS]
+    if not mem_files:
+        all_files = [p for p in sources_dir.iterdir() if p.is_file()]
+        if not all_files:
+            raise RuntimeError("No source files found for Volatility analysis.")
+        # Use the largest file as a heuristic for the memory image
+        mem_files = sorted(all_files, key=lambda p: p.stat().st_size, reverse=True)[:1]
+
+    mem_file = mem_files[0]
+    size_mb  = mem_file.stat().st_size / (1024 * 1024)
+    logger.info("[%s] Volatility: %s (%.0f MB)", run_id, mem_file.name, size_mb)
+    tool_meta["log"]    += f"Memory file: {mem_file.name} ({size_mb:.0f} MB)\n"
+    tool_meta["stdout"] += (
+        f"=== Volatility 3 Memory Forensics ===\n"
+        f"File : {mem_file.name}  ({size_mb:.0f} MB)\n"
+        f"Tool : {vol_script or vol_bin}\n\n"
+    )
+
+    os_hint = (params.get("os") or "windows").lower()
+    all_plugins = _VOL_WIN_PLUGINS if os_hint != "linux" else _VOL_LINUX_PLUGINS
+
+    # Allow user to restrict plugins via params
+    plugin_filter = [p.strip().lower() for p in (params.get("plugins") or "").split(",") if p.strip()]
+    if plugin_filter:
+        all_plugins = [
+            (p, lbl, lvl, mr) for p, lbl, lvl, mr in all_plugins
+            if any(f in p.lower() for f in plugin_filter)
+        ]
+        if not all_plugins:
+            raise RuntimeError(
+                f"No matching plugins for filter {plugin_filter}. "
+                f"Available: {[p for p, *_ in (_VOL_WIN_PLUGINS if os_hint != 'linux' else _VOL_LINUX_PLUGINS)]}"
+            )
+
+    results: list[dict] = []
+
+    for plugin, label, base_level, max_rows in all_plugins:
+        tool_meta["stdout"] += f"\n--- {label} ({plugin}) ---\n"
+        tool_meta["log"]    += f"\n[{plugin}]\n"
+
+        columns, rows = _run_vol_plugin(vol_bin, vol_script, mem_file, plugin, work_dir, tool_meta)
+
+        if not rows:
+            tool_meta["stdout"] += "  0 rows\n"
+            continue
+
+        tool_meta["stdout"] += f"  {len(rows):,} rows\n"
+        hits = _volatility_rows_to_hits(plugin, label, base_level, columns, rows[:max_rows], mem_file.name)
+        results.extend(hits)
+        logger.info("[%s] %s → %d hits", run_id, plugin, len(hits))
+
+    tool_meta["stdout"] += f"\n=== Total: {len(results):,} hits across {len(all_plugins)} plugins ===\n"
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Oletools — Office macro / VBA / OLE analysis
+# ─────────────────────────────────────────────────────────────────────────────
+
+_OFFICE_EXTS = frozenset({
+    '.doc', '.docx', '.docm', '.dot', '.dotm',
+    '.xls', '.xlsx', '.xlsm', '.xla', '.xlam',
+    '.ppt', '.pptx', '.pptm',
+    '.rtf', '.mht',
+})
+
+# Oletools risk level → FO level
+_OLE_RISK_MAP = {
+    "HIGH":   "high",
+    "MEDIUM": "medium",
+    "LOW":    "low",
+    "ERROR":  "medium",
+}
+
+# Keywords that escalate a hit to high
+_VBA_SUSPICIOUS_KEYWORDS = {
+    "shell", "createobject", "wscript", "powershell", "cmd.exe",
+    "regwrite", "environ", "shlobj", "dde", "autoopen", "autoclose",
+    "document_open", "workbook_open", "auto_open", "auto_close",
+    "download", "urldownloadtofile", "winexec", "shellexecute",
+}
+
+
+def _run_oletools(
+    run_id: str,
+    work_dir: Path,
+    sources_dir: Path,
+    params: dict,
+    tool_meta: dict,
+) -> list[dict]:
+    """Analyse Office documents with oletools (olevba + oleid)."""
+    try:
+        import oletools.olevba as _olevba  # type: ignore
+        import oletools.oleid as _oleid    # type: ignore
+        _OT_AVAILABLE = True
+    except ImportError:
+        _OT_AVAILABLE = False
+
+    if not _OT_AVAILABLE:
+        # Try CLI fallback
+        olevba_bin = shutil.which("olevba") or shutil.which("olevba3")
+        if not olevba_bin:
+            raise RuntimeError(
+                "oletools not installed. Run: pip install oletools  in the processor image."
+            )
+        return _run_oletools_cli(run_id, sources_dir, olevba_bin, tool_meta)
+
+    results: list[dict] = []
+    doc_files = [
+        p for p in sorted(sources_dir.iterdir())
+        if p.is_file() and p.suffix.lower() in _OFFICE_EXTS
+    ]
+    if not doc_files:
+        tool_meta["log"] += "No Office files found in source set.\n"
+        return []
+
+    for doc in doc_files:
+        tool_meta["stdout"] += f"\n=== {doc.name} ===\n"
+        try:
+            # ── olevba ───────────────────────────────────────────────────────
+            vba_parser = _olevba.VBA_Parser(str(doc))
+            if vba_parser.detect_vba_macros():
+                for (filename, stream_path, vba_filename, vba_code) in vba_parser.extract_macros():
+                    if not vba_code:
+                        continue
+                    # Scan for IOCs
+                    analysis = vba_parser.analyze_macros()
+                    for kw_type, keyword, description in analysis:
+                        level = "high" if keyword.lower() in _VBA_SUSPICIOUS_KEYWORDS else "medium"
+                        results.append({
+                            "id":          str(uuid.uuid4()),
+                            "timestamp":   "",
+                            "level":       level,
+                            "level_int":   LEVEL_INT.get(level, 1),
+                            "rule_title":  f"VBA Macro — {kw_type}: {keyword}",
+                            "computer":    doc.name,
+                            "details_raw": description[:1000],
+                            "filename":    doc.name,
+                            "vba_keyword": keyword,
+                            "vba_type":    kw_type,
+                        })
+                    # Add summary hit for each macro module found
+                    results.append({
+                        "id":          str(uuid.uuid4()),
+                        "timestamp":   "",
+                        "level":       "medium",
+                        "level_int":   LEVEL_INT.get("medium", 3),
+                        "rule_title":  f"VBA Module: {vba_filename or stream_path}",
+                        "computer":    doc.name,
+                        "details_raw": vba_code[:2000],
+                        "filename":    doc.name,
+                        "stream_path": stream_path,
+                    })
+                tool_meta["stdout"] += f"  VBA macros detected in {doc.name}\n"
+            else:
+                tool_meta["stdout"] += f"  No VBA macros in {doc.name}\n"
+                results.append({
+                    "id":          str(uuid.uuid4()),
+                    "timestamp":   "",
+                    "level":       "informational",
+                    "level_int":   1,
+                    "rule_title":  "No Macros Detected",
+                    "computer":    doc.name,
+                    "details_raw": f"No VBA macros found in {doc.name}",
+                    "filename":    doc.name,
+                })
+        except Exception as exc:
+            logger.warning("[%s] oletools error on %s: %s", run_id, doc.name, exc)
+            results.append({
+                "id":          str(uuid.uuid4()),
+                "timestamp":   "",
+                "level":       "medium",
+                "level_int":   3,
+                "rule_title":  "Oletools Parse Error",
+                "computer":    doc.name,
+                "details_raw": str(exc)[:500],
+                "filename":    doc.name,
+            })
+
+    tool_meta["log"] += f"\nProcessed {len(doc_files)} Office file(s), {len(results)} hits\n"
+    return results
+
+
+def _run_oletools_cli(
+    run_id: str,
+    sources_dir: Path,
+    olevba_bin: str,
+    tool_meta: dict,
+) -> list[dict]:
+    """CLI fallback for oletools when the Python library is not importable."""
+    results: list[dict] = []
+    doc_files = [
+        p for p in sorted(sources_dir.iterdir())
+        if p.is_file() and p.suffix.lower() in _OFFICE_EXTS
+    ]
+    for doc in doc_files:
+        try:
+            proc = subprocess.run(
+                [olevba_bin, "--json", str(doc)],
+                capture_output=True, text=True, timeout=120,
+            )
+            if proc.stdout:
+                try:
+                    data = json.loads(proc.stdout)
+                    for item in (data if isinstance(data, list) else [data]):
+                        for macro in item.get("macros", []):
+                            keyword = macro.get("keyword", "")
+                            level = "high" if keyword.lower() in _VBA_SUSPICIOUS_KEYWORDS else "medium"
+                            results.append({
+                                "id":          str(uuid.uuid4()),
+                                "timestamp":   "",
+                                "level":       level,
+                                "level_int":   LEVEL_INT.get(level, 1),
+                                "rule_title":  f"VBA Macro — {macro.get('type', 'unknown')}: {keyword}",
+                                "computer":    doc.name,
+                                "details_raw": macro.get("description", "")[:1000],
+                                "filename":    doc.name,
+                                "vba_keyword": keyword,
+                            })
+                except json.JSONDecodeError:
+                    if "VBA" in proc.stdout or "macro" in proc.stdout.lower():
+                        results.append({
+                            "id":          str(uuid.uuid4()),
+                            "timestamp":   "",
+                            "level":       "medium",
+                            "level_int":   3,
+                            "rule_title":  "VBA Macros Detected",
+                            "computer":    doc.name,
+                            "details_raw": proc.stdout[:2000],
+                            "filename":    doc.name,
+                        })
+        except subprocess.TimeoutExpired:
+            logger.warning("[%s] olevba timed out on %s", run_id, doc.name)
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PE Analysis — pefile-based executable inspection
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PE_EXTS = frozenset({'.exe', '.dll', '.sys', '.ocx', '.scr', '.drv', '.cpl', '.com'})
+
+# Entropy thresholds
+_ENTROPY_HIGH   = 7.0   # likely packed / encrypted section
+_ENTROPY_MEDIUM = 6.0
+
+# Suspicious imported functions
+_SUSPICIOUS_IMPORTS = {
+    "virtualalloc", "virtualallocex", "writeprocessmemory",
+    "createremotethread", "openprocess", "ntunmapviewofsection",
+    "rtldecompressbuffer", "rtlmovememory",
+    "loadlibrarya", "loadlibraryexw", "getprocaddress",
+    "createprocessw", "createprocessa", "shellexecutea", "shellexecutew",
+    "winexec", "system", "isdebuggerpresent", "checkremotedebuggerpresent",
+    "ntqueryinformationprocess", "gettickcount", "sleep",
+    "regsetvalueexa", "regcreatekeyexa",
+    "internetopena", "internetconnecta", "httpopenrequesta",
+    "wsastartup", "socket", "connect", "send", "recv",
+}
+
+
+def _entropy(data: bytes) -> float:
+    if not data:
+        return 0.0
+    import math
+    freq = [0] * 256
+    for b in data:
+        freq[b] += 1
+    n = len(data)
+    return -sum((c / n) * math.log2(c / n) for c in freq if c)
+
+
+def _run_pe_analysis(
+    run_id: str,
+    work_dir: Path,
+    sources_dir: Path,
+    params: dict,
+    tool_meta: dict,
+) -> list[dict]:
+    """Analyse PE files with pefile."""
+    try:
+        import pefile as _pefile  # type: ignore
+    except ImportError:
+        raise RuntimeError(
+            "pefile not installed. Run: pip install pefile  in the processor image."
+        )
+
+    results: list[dict] = []
+    pe_files = [
+        p for p in sorted(sources_dir.iterdir())
+        if p.is_file() and p.suffix.lower() in _PE_EXTS
+    ]
+    if not pe_files:
+        tool_meta["log"] += "No PE files (exe/dll/sys) found in source set.\n"
+        return []
+
+    for pe_path in pe_files:
+        tool_meta["stdout"] += f"\n=== {pe_path.name} ===\n"
+        try:
+            pe = _pefile.PE(str(pe_path), fast_load=False)
+        except Exception as exc:
+            results.append({
+                "id":          str(uuid.uuid4()),
+                "timestamp":   "",
+                "level":       "medium",
+                "level_int":   3,
+                "rule_title":  "PE Parse Error",
+                "computer":    pe_path.name,
+                "details_raw": str(exc)[:500],
+                "filename":    pe_path.name,
+            })
+            continue
+
+        # ── PE Header summary ─────────────────────────────────────────────
+        try:
+            machine     = pe.FILE_HEADER.Machine
+            num_sects   = pe.FILE_HEADER.NumberOfSections
+            ts          = getattr(pe.FILE_HEADER, "TimeDateStamp", 0)
+            compile_ts  = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else ""
+            subsystem   = getattr(pe.OPTIONAL_HEADER, "Subsystem", 0)
+            entry_point = hex(getattr(pe.OPTIONAL_HEADER, "AddressOfEntryPoint", 0))
+            arch        = "x86" if machine == 0x014c else ("x64" if machine == 0x8664 else hex(machine))
+        except Exception:
+            arch, num_sects, compile_ts, entry_point = "unknown", 0, "", ""
+
+        results.append({
+            "id":          str(uuid.uuid4()),
+            "timestamp":   compile_ts,
+            "level":       "informational",
+            "level_int":   1,
+            "rule_title":  f"PE Header — {pe_path.name}",
+            "computer":    pe_path.name,
+            "details_raw": (
+                f"Architecture: {arch}  |  Sections: {num_sects}  |  "
+                f"Compile time: {compile_ts or 'unknown'}  |  EntryPoint: {entry_point}"
+            ),
+            "filename":    pe_path.name,
+            "pe_arch":     arch,
+        })
+        tool_meta["stdout"] += f"  Arch: {arch}, Sections: {num_sects}, Compile: {compile_ts or '?'}\n"
+
+        # ── Section entropy ───────────────────────────────────────────────
+        try:
+            for section in pe.sections:
+                name = section.Name.decode("utf-8", errors="replace").rstrip("\x00")
+                data = section.get_data()
+                ent  = _entropy(data)
+                if ent >= _ENTROPY_HIGH:
+                    level = "high"
+                elif ent >= _ENTROPY_MEDIUM:
+                    level = "medium"
+                else:
+                    level = "informational"
+                results.append({
+                    "id":          str(uuid.uuid4()),
+                    "timestamp":   "",
+                    "level":       level,
+                    "level_int":   LEVEL_INT.get(level, 1),
+                    "rule_title":  f"Section Entropy — {name.strip() or '(unnamed)'}",
+                    "computer":    pe_path.name,
+                    "details_raw": f"Entropy: {ent:.2f}  |  Size: {len(data):,} bytes",
+                    "filename":    pe_path.name,
+                    "entropy":     round(ent, 3),
+                })
+                if ent >= _ENTROPY_HIGH:
+                    tool_meta["stdout"] += f"  HIGH ENTROPY section {name}: {ent:.2f}\n"
+        except Exception:
+            pass
+
+        # ── Suspicious imports ────────────────────────────────────────────
+        try:
+            if hasattr(pe, "DIRECTORY_ENTRY_IMPORT"):
+                for entry in pe.DIRECTORY_ENTRY_IMPORT:
+                    dll = entry.dll.decode("utf-8", errors="replace") if entry.dll else ""
+                    for imp in entry.imports:
+                        fn_name = (imp.name or b"").decode("utf-8", errors="replace")
+                        if fn_name.lower() in _SUSPICIOUS_IMPORTS:
+                            results.append({
+                                "id":          str(uuid.uuid4()),
+                                "timestamp":   "",
+                                "level":       "medium",
+                                "level_int":   3,
+                                "rule_title":  f"Suspicious Import — {fn_name}",
+                                "computer":    pe_path.name,
+                                "details_raw": f"{dll}::{fn_name}",
+                                "filename":    pe_path.name,
+                                "import_dll":  dll,
+                                "import_fn":   fn_name,
+                            })
+        except Exception:
+            pass
+
+        pe.close()
+        tool_meta["log"] += f"{pe_path.name}: {len(results)} hits\n"
 
     return results

@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react'
 import {
   LayoutDashboard, Puzzle, FolderOpen,
   Plus, X, ChevronRight, Bell, Sun, Moon, Cpu, PackageOpen, Layers,
-  Code2, BookOpen, LogOut, UserCircle,
+  Code2, BookOpen, LogOut, UserCircle, Settings2,
 } from 'lucide-react'
 import { api } from '../../api/client'
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts'
@@ -161,6 +161,17 @@ export default function Layout({ user, onLogout }) {
             isActive ? 'nav-item-active' : 'nav-item-inactive'}>
             <BookOpen size={15} />
             Docs
+          </NavLink>
+
+          {/* ── Admin ─────────────────────────────────── */}
+          <p className="px-2 mb-1.5 mt-4 text-[10px] font-semibold text-white/30 uppercase tracking-widest">
+            Admin
+          </p>
+
+          <NavLink to="/settings" className={({ isActive }) =>
+            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
+            <Settings2 size={15} />
+            Settings
           </NavLink>
 
           {/* Cases section */}

@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from routers import (
     cases, ingest, jobs, search, plugins, health,
     saved_searches, alert_rules, export, global_alert_rules,
-    modules, collector, editor,
+    modules, collector, editor, llm_config,
 )
 from routers import auth as auth_router
 from auth.dependencies import get_current_user
@@ -71,3 +71,4 @@ app.include_router(global_alert_rules.router, prefix="/api/v1", dependencies=_pr
 app.include_router(modules.router,            prefix="/api/v1", dependencies=_protected)
 app.include_router(collector.router,          prefix="/api/v1", dependencies=_protected)
 app.include_router(editor.router,             prefix="/api/v1", dependencies=_protected)
+app.include_router(llm_config.router,         prefix="/api/v1", dependencies=_protected)

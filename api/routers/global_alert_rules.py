@@ -4,140 +4,108 @@ Global Alert Rule Library.
 Rules are stored in Redis at fo:alert_rules:_global and are not tied to any
 specific case. They can be run on demand against any case's Elasticsearch data
 via the /cases/{case_id}/alert-rules/run-library endpoint.
+
+Built-in default rules are loaded from YAML files in api/alert_rules/.
+Each file covers one MITRE-aligned category and contains a list of rule
+definitions. To add new default rules, create or edit YAML files in that
+directory — no code changes required.
 """
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 import redis as redis_lib
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+
+try:
+    import yaml  # type: ignore
+    _YAML_AVAILABLE = True
+except ImportError:
+    _YAML_AVAILABLE = False
 
 from config import settings
 from services.elasticsearch import _request as es_req
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["global-alert-rules"])
 
 GLOBAL_KEY        = "fo:alert_rules:_global"
 GLOBAL_SEEDED_KEY = "fo:alert_rules:_global:seeded"
 
-# ── Built-in detection rules ──────────────────────────────────────────────────
-# Queries use Lucene query_string syntax against the indexed event fields.
-# Fields reference:
-#   evtx.*            — Windows Event Log fields (evtx.event_id, evtx.event_data.*)
-#   suricata.*        — Suricata EVE JSON fields (suricata.event_type, suricata.alert.*)
-#   network.*         — Network fields (src_ip, dest_ip, src_port, dest_port)
-#   user.*            — User fields (user.name, user.domain)
-#   process.*         — Process fields (process.name, process.cmdline)
-#   message           — Human-readable event description (full-text search)
-#   artifact_type     — Ingester that produced the event (evtx, suricata, syslog…)
+# Alert rules YAML directory — relative to this file's parent (api/)
+_RULES_DIR = Path(__file__).parent.parent / "alert_rules"
 
-DEFAULT_RULES: list[dict] = [
-    # ── Anti-forensics ─────────────────────────────────────────────────────────
-    {
-        "name":          "Windows Event Log Cleared",
-        "description":   "The Windows Security (EID 1102) or System (EID 104) audit log was cleared. "
-                         "A strong anti-forensics indicator — always investigate immediately.",
-        "artifact_type": "evtx",
-        "query":         "evtx.event_id:1102 OR evtx.event_id:104",
-        "threshold":     1,
-    },
-    {
-        "name":          "Audit Policy Modified",
-        "description":   "The system audit policy was changed (EID 4719). Attackers disable auditing "
-                         "before carrying out malicious actions to evade detection.",
-        "artifact_type": "evtx",
-        "query":         "evtx.event_id:4719",
-        "threshold":     1,
-    },
-    # ── Authentication ─────────────────────────────────────────────────────────
-    {
-        "name":          "Brute Force — Multiple Failed Logons",
-        "description":   "More than 10 failed authentication attempts (EID 4625). Indicates a "
-                         "password spray or brute-force attack against local or network accounts.",
-        "artifact_type": "evtx",
-        "query":         "evtx.event_id:4625",
-        "threshold":     10,
-    },
-    {
-        "name":          "Explicit Credential Use (Pass-the-Hash / RunAs)",
-        "description":   "A process authenticated using explicitly supplied credentials (EID 4648). "
-                         "Common during lateral movement, pass-the-hash, or RunAs abuse.",
-        "artifact_type": "evtx",
-        "query":         "evtx.event_id:4648",
-        "threshold":     1,
-    },
-    # ── Privilege & Group changes ───────────────────────────────────────────────
-    {
-        "name":          "Account Added to Privileged Group",
-        "description":   "A user was added to a Global (4728), Local (4732), or Universal (4756) "
-                         "security group — common persistence or privilege escalation step.",
-        "artifact_type": "evtx",
-        "query":         "evtx.event_id:4728 OR evtx.event_id:4732 OR evtx.event_id:4756",
-        "threshold":     1,
-    },
-    # ── Persistence ────────────────────────────────────────────────────────────
-    {
-        "name":          "New Service Installed",
-        "description":   "A new Windows service was installed (EID 7045). Malware frequently uses "
-                         "services for persistence (e.g. malicious drivers, RAT services).",
-        "artifact_type": "evtx",
-        "query":         "evtx.event_id:7045",
-        "threshold":     1,
-    },
-    {
-        "name":          "Scheduled Task Created",
-        "description":   "A scheduled task was registered (EID 4698). Review the task action — "
-                         "one of the most common persistence mechanisms.",
-        "artifact_type": "evtx",
-        "query":         "evtx.event_id:4698",
-        "threshold":     1,
-    },
-    # ── Execution ──────────────────────────────────────────────────────────────
-    {
-        "name":          "PowerShell Script Block Logged",
-        "description":   "PowerShell script block logging captured executed code (EID 4104). "
-                         "Search for encoded commands, download cradles, and Invoke-Expression.",
-        "artifact_type": "evtx",
-        "query":         "evtx.event_id:4104",
-        "threshold":     1,
-    },
-    {
-        "name":          "Process Spawned by Office Application",
-        "description":   "A child process was created (EID 4688) whose parent is a Microsoft Office "
-                         "application — the classic macro-based initial access pattern.",
-        "artifact_type": "evtx",
-        "query":         "evtx.event_id:4688 AND (message:*winword* OR message:*excel* OR message:*powerpnt* OR message:*outlook*)",
-        "threshold":     1,
-    },
-    # ── Network (Suricata) ─────────────────────────────────────────────────────
-    {
-        "name":          "Suricata — Critical Alert (Severity 1)",
-        "description":   "Suricata fired a severity-1 alert. Review the signature and investigate "
-                         "the involved hosts immediately.",
-        "artifact_type": "suricata",
-        "query":         "suricata.event_type:alert AND suricata.alert.severity:1",
-        "threshold":     1,
-    },
-    {
-        "name":          "Suricata — Malware Signature Match",
-        "description":   "Suricata detected traffic matching a known malware signature (ET MALWARE "
-                         "category). Indicates active infection or C2 communication.",
-        "artifact_type": "suricata",
-        "query":         "suricata.event_type:alert AND message:*ET\\ MALWARE*",
-        "threshold":     1,
-    },
-]
 
+# ── YAML rule loader ──────────────────────────────────────────────────────────
+
+def _load_default_rules() -> list[dict]:
+    """
+    Load built-in detection rules from YAML files in api/alert_rules/.
+
+    Each file must have the structure:
+        category: <Category Name>
+        rules:
+          - name: ...
+            description: ...
+            artifact_type: ...
+            query: ...
+            threshold: 1
+
+    Falls back to an empty list if PyYAML is unavailable or no files exist.
+    """
+    if not _YAML_AVAILABLE:
+        logger.warning("PyYAML not installed — default rules cannot be loaded from YAML files")
+        return []
+    if not _RULES_DIR.exists():
+        logger.warning("Alert rules directory %s not found", _RULES_DIR)
+        return []
+
+    rules: list[dict] = []
+    for path in sorted(_RULES_DIR.glob("*.yaml")):
+        try:
+            with path.open() as fh:
+                data = yaml.safe_load(fh)
+            if not isinstance(data, dict) or "rules" not in data:
+                logger.warning("Skipping %s — missing 'rules' key", path.name)
+                continue
+            category = data.get("category", "")
+            for rule in data["rules"]:
+                rules.append({
+                    "name":          rule.get("name", ""),
+                    "category":      rule.get("category", category),
+                    "description":   rule.get("description", ""),
+                    "artifact_type": rule.get("artifact_type", ""),
+                    "query":         rule.get("query", ""),
+                    "threshold":     int(rule.get("threshold", 1)),
+                })
+        except Exception as exc:
+            logger.error("Failed to load alert rules from %s: %s", path.name, exc)
+    return rules
+
+
+_DEFAULT_RULES_CACHE: list[dict] | None = None
+
+
+def _get_default_rules() -> list[dict]:
+    global _DEFAULT_RULES_CACHE
+    if _DEFAULT_RULES_CACHE is None:
+        _DEFAULT_RULES_CACHE = _load_default_rules()
+    return _DEFAULT_RULES_CACHE
+
+
+# ── Redis helpers ─────────────────────────────────────────────────────────────
 
 def _redis() -> redis_lib.Redis:
     return redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
 
 
 def _make_rule(template: dict) -> dict:
-    """Stamp a DEFAULT_RULES template with a fresh id and created_at."""
+    """Stamp a rule template with a fresh id and created_at."""
     return {
         "id":         str(uuid.uuid4())[:8],
         "created_at": datetime.utcnow().isoformat(),
@@ -146,19 +114,22 @@ def _make_rule(template: dict) -> dict:
 
 
 def _seed_defaults_if_empty(r: redis_lib.Redis) -> None:
-    """Populate the library with DEFAULT_RULES the very first time it is accessed."""
+    """Populate the library with default rules the very first time it is accessed."""
     if r.get(GLOBAL_SEEDED_KEY):
         return
     existing = json.loads(r.get(GLOBAL_KEY) or "[]")
     if not existing:
-        rules = [_make_rule(t) for t in DEFAULT_RULES]
+        rules = [_make_rule(t) for t in _get_default_rules()]
         r.set(GLOBAL_KEY, json.dumps(rules))
     r.set(GLOBAL_SEEDED_KEY, "1")
 
 
+# ── Pydantic models ───────────────────────────────────────────────────────────
+
 class AlertRuleIn(BaseModel):
     name: str
     description: str = ""
+    category: str = ""
     artifact_type: str = ""
     query: str
     threshold: int = 1
@@ -167,6 +138,7 @@ class AlertRuleIn(BaseModel):
 class AlertRuleUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
+    category: str | None = None
     artifact_type: str | None = None
     query: str | None = None
     threshold: int | None = None
@@ -192,16 +164,18 @@ def seed_library(replace: bool = False):
     replace=true            — clear the library and reload all defaults fresh.
     """
     r = _redis()
+    defaults = _get_default_rules()
     existing: list[dict] = json.loads(r.get(GLOBAL_KEY) or "[]")
+
     if replace:
-        rules = [_make_rule(t) for t in DEFAULT_RULES]
+        rules = [_make_rule(t) for t in defaults]
         r.set(GLOBAL_KEY, json.dumps(rules))
         r.set(GLOBAL_SEEDED_KEY, "1")
         return {"added": len(rules), "total": len(rules)}
 
     existing_names = {rl["name"].lower() for rl in existing}
     added = []
-    for template in DEFAULT_RULES:
+    for template in defaults:
         if template["name"].lower() not in existing_names:
             new_rule = _make_rule(template)
             existing.append(new_rule)
@@ -240,7 +214,6 @@ def update_library_rule(rule_id: str, body: AlertRuleUpdate):
             updated = rl
             break
     if updated is None:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Rule not found")
     r.set(GLOBAL_KEY, json.dumps(rules))
     return updated
@@ -260,7 +233,6 @@ def delete_library_rule(rule_id: str):
 def run_library_against_case(case_id: str):
     """
     Execute every rule in the global library against the given case's data.
-
     Returns a list of matches (rules that fired) with sample events.
     """
     r = _redis()
@@ -279,7 +251,6 @@ def run_library_against_case(case_id: str):
             if artifact_type
             else f"fo-case-{case_id}-*"
         )
-
         body = {
             "query": {
                 "query_string": {
@@ -291,7 +262,6 @@ def run_library_against_case(case_id: str):
             "_source": ["timestamp", "message", "host", "user", "fo_id", "artifact_type"],
             "sort": [{"timestamp": {"order": "desc"}}],
         }
-
         try:
             resp = es_req("POST", f"/{index}/_search", body)
             count = resp["hits"]["total"]["value"]
@@ -302,7 +272,6 @@ def run_library_against_case(case_id: str):
                     "sample_events": [h["_source"] for h in resp["hits"]["hits"]],
                 })
         except Exception:
-            # Index may not exist yet for this artifact type — skip silently
             pass
 
     return {"matches": matches, "rules_checked": len(rules)}
@@ -310,14 +279,11 @@ def run_library_against_case(case_id: str):
 
 @router.post("/cases/{case_id}/alert-rules/library/{rule_id}/run")
 def run_single_rule_against_case(case_id: str, rule_id: str):
-    """
-    Execute a single rule from the global library against the given case.
-    """
+    """Execute a single rule from the global library against the given case."""
     r = _redis()
     rules: list[dict] = json.loads(r.get(GLOBAL_KEY) or "[]")
     rule = next((rl for rl in rules if rl["id"] == rule_id), None)
     if rule is None:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Rule not found")
 
     artifact_type = rule.get("artifact_type", "").strip()
@@ -326,7 +292,6 @@ def run_single_rule_against_case(case_id: str, rule_id: str):
         if artifact_type
         else f"fo-case-{case_id}-*"
     )
-
     body = {
         "query": {
             "query_string": {
@@ -338,7 +303,6 @@ def run_single_rule_against_case(case_id: str, rule_id: str):
         "_source": ["timestamp", "message", "host", "user", "fo_id", "artifact_type"],
         "sort": [{"timestamp": {"order": "desc"}}],
     }
-
     try:
         resp = es_req("POST", f"/{index}/_search", body)
         count = resp["hits"]["total"]["value"]
@@ -348,7 +312,6 @@ def run_single_rule_against_case(case_id: str, rule_id: str):
             "sample_events": [h["_source"] for h in resp["hits"]["hits"]],
         } if count >= int(rule.get("threshold", 1)) else None
     except Exception as exc:
-        from fastapi import HTTPException
         raise HTTPException(status_code=500, detail=str(exc))
 
     return {

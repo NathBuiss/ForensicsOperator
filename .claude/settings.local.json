@@ -7,7 +7,26 @@
       "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\(''''scripts'''', {}\\), indent=2\\)\\)\")",
       "Bash(npm install:*)",
       "Bash(command -v fnm)",
-      "Bash(command -v volta)"
+      "Bash(command -v volta)",
+      "Bash(for dir:*)",
+      "Bash(do echo:*)",
+      "Read(//Users/nbuisson/Tools/Custom_tools/forensicsOperator/plugins/**)",
+      "Bash(done)",
+      "Bash(chmod +x /Users/nbuisson/Tools/Custom_tools/forensicsOperator/collector/build.sh)",
+      "Bash(grep -rn \"PLUGIN_NAME\\\\|DEFAULT_ARTIFACT_TYPE\" /Users/nbuisson/Tools/Custom_tools/forensicsOperator/plugins/*/)",
+      "Bash(for d:*)",
+      "Bash(do)",
+      "Bash(touch /Users/nbuisson/Tools/Custom_tools/forensicsOperator/plugins/$d/__init__.py)",
+      "Bash(python3 -c \":*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebSearch",
+      "Bash(node -e \"const l = require\\(''/Users/nbuisson/Tools/Custom_tools/forensicsOperator/frontend/node_modules/lucide-react''\\); console.log\\(Object.keys\\(l\\).filter\\(k => k.toLowerCase\\(\\).includes\\(''hist''\\) || k === ''ClipboardList'' || k === ''ListChecks'' || k === ''ScrollText''\\)\\)\")",
+      "Bash(ls -la /Users/nbuisson/Tools/Custom_tools/forensicsOperator/*.json)",
+      "Bash(chmod +x /Users/nbuisson/Tools/Custom_tools/forensicsOperator/manage_users.py)",
+      "Bash(find /Users/nbuisson/Tools/Custom_tools/forensicsOperator/frontend -type f \\\\\\(-name *.ico -o -name *.svg -o -name *.png \\\\\\))",
+      "Bash(grep -r \"ForensicsOperator\\\\|forensicsOperator\\\\|forensics-operator\\\\|Forensics.Operator\\\\|Forensics_Operator\" /Users/nbuisson/Tools/Custom_tools/forensicsOperator --include=*.jsx --include=*.js --include=*.py --include=*.html --include=*.json --include=*.md --include=*.css -l)",
+      "Bash(grep -E \"\\\\.\\(py|ts|tsx\\)$\")"
     ]
   }
 }

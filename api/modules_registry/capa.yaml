@@ -1,0 +1,17 @@
+id: capa
+name: CAPA
+description: >-
+  Detect capabilities in PE files and shellcode. Identifies malware behaviors
+  (keylogging, process injection, C2 beaconing) mapped to MITRE ATT&CK,
+  Malware Behavior Catalog (MBC), and CAPE sandbox signatures.
+input_extensions:
+  - .exe
+  - .dll
+  - .sys
+  - .bin
+  - .so
+input_filenames: []
+available: false
+unavailable_reason: "Coming soon — binary packaging in progress."
+category: Binary Analysis
+tags: [capa, capabilities, mitre, malware, pe]

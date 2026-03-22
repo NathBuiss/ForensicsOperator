@@ -55,6 +55,8 @@ BANNER = f"""
 # Default collection sets — all enabled when nothing is specified
 DEFAULT_WINDOWS = {"evtx", "registry", "prefetch", "lnk", "browser", "tasks", "triage"}
 DEFAULT_LINUX   = {"logs", "history", "config", "cron", "ssh", "triage"}
+# "memory" is intentionally NOT in the defaults — dumps are multi-GB.
+# Add explicitly with --collect memory or --collect memory,evtx,...
 
 # Human-readable names (used in the header printout)
 ARTIFACT_LABELS = {
@@ -70,6 +72,7 @@ ARTIFACT_LABELS = {
     "config":   "System Configuration",
     "cron":     "Cron Jobs",
     "ssh":      "SSH Artifacts",
+    "memory":   "Physical Memory Dump (live acquisition)",
 }
 
 
@@ -182,6 +185,7 @@ class WindowsCollector(Collector):
         if self._want("browser"):  self._browser()
         if self._want("tasks"):    self._scheduled_tasks()
         if self._want("triage"):   self._system_triage()
+        if self._want("memory"):   self._memory()
 
     def _evtx(self) -> None:
         print("  [*] Event Logs (EVTX)")
@@ -337,6 +341,63 @@ class WindowsCollector(Collector):
             lines.append(self._run_cmd(cmd, timeout=45))
         self._write_text("system_triage.txt", "\n".join(lines), "system_triage.txt")
 
+    def _memory(self) -> None:
+        print("  [*] Physical Memory Dump (live acquisition)")
+        print("  [!] Note: Memory dumps are typically 4–64 GB — this may take a while")
+
+        dump_path = self.staging / f"memory-{HOSTNAME}-{TS_NOW}.dmp"
+
+        # Locate WinPmem — check PATH, then script directory, then CWD
+        winpmem: str | None = (
+            shutil.which("winpmem")
+            or shutil.which("winpmem_mini_x64_rc2")
+        )
+        if not winpmem:
+            script_dir = Path(sys.argv[0]).resolve().parent
+            for name in [
+                "winpmem_mini_x64_rc2.exe", "winpmem.exe",
+                "winpmem_x64.exe", "winpmem_mini_x64.exe",
+            ]:
+                for search_dir in (script_dir, Path.cwd()):
+                    candidate = search_dir / name
+                    if candidate.exists():
+                        winpmem = str(candidate)
+                        break
+                if winpmem:
+                    break
+
+        if not winpmem:
+            self._warn(
+                "winpmem not found. Download the latest release from:\n"
+                "      https://github.com/Velocidex/WinPmem/releases\n"
+                "      Then place winpmem_mini_x64_rc2.exe next to this collector and re-run."
+            )
+            return
+
+        self._log(f"Using: {winpmem}")
+        print(f"      winpmem: {winpmem}")
+        print(f"      Output : {dump_path}")
+
+        try:
+            r = subprocess.run(
+                [winpmem, str(dump_path)],
+                capture_output=True,
+                timeout=7200,   # 2 hours
+            )
+            if r.returncode == 0:
+                self._add(dump_path, f"memory/{dump_path.name}")
+                size_gb = dump_path.stat().st_size / (1024 ** 3)
+                print(f"  [+] Memory dump complete ({size_gb:.1f} GB)")
+            else:
+                err = (r.stderr or r.stdout or b"").decode(errors="replace")[:400]
+                self._warn(f"winpmem failed (code {r.returncode}) — run as Administrator?\n      {err}")
+        except subprocess.TimeoutExpired:
+            self._warn("Memory acquisition timed out (>2 hours)")
+        except FileNotFoundError:
+            self._warn(f"winpmem binary not executable: {winpmem}")
+        except Exception as exc:
+            self._warn(f"Memory acquisition error: {exc}")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Linux Collector
@@ -351,6 +412,7 @@ class LinuxCollector(Collector):
         if self._want("cron"):    self._cron()
         if self._want("ssh"):     self._ssh_artifacts()
         if self._want("triage"):  self._system_triage()
+        if self._want("memory"):  self._memory()
 
     def _logs(self) -> None:
         print("  [*] System Logs")
@@ -443,6 +505,62 @@ class LinuxCollector(Collector):
             lines.append(self._run_cmd(cmd, timeout=30))
         self._write_text("system_triage.txt", "\n".join(lines), "system_triage.txt")
 
+    def _memory(self) -> None:
+        print("  [*] Physical Memory Dump (live acquisition)")
+        print("  [!] Note: Memory dumps are typically 4–64 GB — this may take a while")
+        print("  [!] Root privileges are required for memory acquisition")
+
+        dump_path = self.staging / f"memory-{HOSTNAME}-{TS_NOW}.lime"
+
+        # 1. Try avml (Microsoft's user-space memory acquisition tool)
+        avml = shutil.which("avml")
+        if avml:
+            self._log(f"Using avml: {avml}")
+            print(f"      avml : {avml}")
+            print(f"      Output: {dump_path}")
+            try:
+                r = subprocess.run(
+                    [avml, str(dump_path)],
+                    capture_output=True,
+                    timeout=7200,
+                )
+                if r.returncode == 0 and dump_path.exists() and dump_path.stat().st_size > 0:
+                    self._add(dump_path, f"memory/{dump_path.name}")
+                    size_gb = dump_path.stat().st_size / (1024 ** 3)
+                    print(f"  [+] Memory dump complete ({size_gb:.1f} GB)")
+                    return
+                err = (r.stderr or r.stdout or b"").decode(errors="replace")[:400]
+                self._warn(f"avml failed (code {r.returncode}): {err}")
+            except subprocess.TimeoutExpired:
+                self._warn("avml timed out (>2 hours)")
+            except Exception as exc:
+                self._warn(f"avml error: {exc}")
+
+        # 2. Try fmem / dd /dev/fmem
+        for mem_dev in ("/dev/fmem", "/dev/mem"):
+            if Path(mem_dev).exists():
+                raw_path = self.staging / f"memory-{HOSTNAME}-{TS_NOW}.raw"
+                print(f"      Trying {mem_dev} → {raw_path}")
+                try:
+                    r = subprocess.run(
+                        ["dd", f"if={mem_dev}", f"of={raw_path}", "bs=1M"],
+                        capture_output=True, timeout=7200,
+                    )
+                    if r.returncode == 0 and raw_path.stat().st_size > 0:
+                        self._add(raw_path, f"memory/{raw_path.name}")
+                        size_gb = raw_path.stat().st_size / (1024 ** 3)
+                        print(f"  [+] Memory image via {mem_dev} ({size_gb:.1f} GB)")
+                        return
+                except Exception as exc:
+                    self._log(f"{mem_dev} dd error: {exc}")
+
+        self._warn(
+            "No memory acquisition tool found.\n"
+            "      Install avml for user-space acquisition:\n"
+            "        https://github.com/microsoft/avml/releases\n"
+            "      Or load the LiME kernel module for full physical memory."
+        )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Upload helper
@@ -525,12 +643,16 @@ def main() -> None:
     output   = Path(cfg["output"]) if cfg.get("output") else \
                Path.cwd() / f"fo-artifacts-{HOSTNAME}-{TS_NOW}.zip"
 
-    # Resolve collect set
+    # Resolve collect set.
+    # "memory" is opt-in only (large dumps) so it's never added by default,
+    # but is always accepted when the user explicitly names it.
     raw_collect = cfg.get("collect", [])
     if IS_WINDOWS:
-        collect_set = (set(raw_collect) & DEFAULT_WINDOWS) if raw_collect else DEFAULT_WINDOWS
+        allowed = DEFAULT_WINDOWS | {"memory"}
+        collect_set = (set(raw_collect) & allowed) if raw_collect else DEFAULT_WINDOWS
     else:
-        collect_set = (set(raw_collect) & DEFAULT_LINUX)   if raw_collect else DEFAULT_LINUX
+        allowed = DEFAULT_LINUX | {"memory"}
+        collect_set = (set(raw_collect) & allowed) if raw_collect else DEFAULT_LINUX
 
     print(BANNER)
     print(f"  Host     : {HOSTNAME}")

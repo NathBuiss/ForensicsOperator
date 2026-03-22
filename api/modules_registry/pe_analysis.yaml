@@ -1,0 +1,21 @@
+id: pe_analysis
+name: PE Analysis
+description: >-
+  Portable Executable deep inspection using pefile. Extracts PE headers, sections
+  (entropy, characteristics), import/export tables, resources, digital signatures,
+  and TLS callbacks. Flags suspicious traits: high entropy, few imports, missing
+  standard sections, known packer signatures.
+input_extensions:
+  - .exe
+  - .dll
+  - .sys
+  - .ocx
+  - .scr
+  - .drv
+  - .cpl
+  - .com
+  - .bin
+input_filenames: []
+available: true
+category: Binary Analysis
+tags: [pe, windows, executable, imports, entropy, packer]
