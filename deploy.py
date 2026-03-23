@@ -410,10 +410,11 @@ def ensure_traefik_ingress():
 # ── TLS certificate ───────────────────────────────────────────────────────────
 
 def _ensure_namespace():
-    """Apply namespace.yaml so the namespace exists before we create Secrets."""
+    """Create the target namespace if it doesn't already exist."""
+    manifest = f"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {NS}\n"
     subprocess.run(
-        ["kubectl", "apply", "-f", str(K8S / "namespace.yaml")],
-        capture_output=True, text=True,
+        ["kubectl", "apply", "-f", "-"],
+        input=manifest, capture_output=True, text=True,
     )
 
 
