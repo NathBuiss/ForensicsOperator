@@ -112,6 +112,7 @@ export const api = {
     seedLibrary:     (replace=false)  => request('POST',   `/alert-rules/library/seed?replace=${replace}`),
     runLibrary:      (caseId)         => request('POST',   `/cases/${caseId}/alert-rules/run-library`),
     runSingleRule:   (caseId, ruleId) => request('POST',   `/cases/${caseId}/alert-rules/library/${ruleId}/run`),
+    importSigma:     (data)           => request('POST',   '/alert-rules/library/sigma', data),
   },
 
   export: {
@@ -138,6 +139,7 @@ export const api = {
     getConfig:    ()     => request('GET',    '/admin/llm-config'),
     updateConfig: (data) => request('PUT',    '/admin/llm-config', data),
     clearConfig:  ()     => request('DELETE', '/admin/llm-config'),
+    testConfig:   ()     => request('POST',   '/admin/llm-config/test'),
   },
 
   editor: {

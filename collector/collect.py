@@ -55,24 +55,26 @@ BANNER = f"""
 # Default collection sets — all enabled when nothing is specified
 DEFAULT_WINDOWS = {"evtx", "registry", "prefetch", "lnk", "browser", "tasks", "triage"}
 DEFAULT_LINUX   = {"logs", "history", "config", "cron", "ssh", "triage"}
+DEFAULT_MACOS   = {"logs", "history", "config", "launchagents", "browser", "triage"}
 # "memory" is intentionally NOT in the defaults — dumps are multi-GB.
 # Add explicitly with --collect memory or --collect memory,evtx,...
 
 # Human-readable names (used in the header printout)
 ARTIFACT_LABELS = {
-    "evtx":     "Event Logs (EVTX)",
-    "registry": "Registry Hives",
-    "prefetch": "Prefetch Files",
-    "lnk":      "LNK / Recent Items",
-    "browser":  "Browser Artifacts",
-    "tasks":    "Scheduled Tasks",
-    "triage":   "System Triage (live)",
-    "logs":     "System Logs",
-    "history":  "Shell Histories",
-    "config":   "System Configuration",
-    "cron":     "Cron Jobs",
-    "ssh":      "SSH Artifacts",
-    "memory":   "Physical Memory Dump (live acquisition)",
+    "evtx":         "Event Logs (EVTX)",
+    "registry":     "Registry Hives",
+    "prefetch":     "Prefetch Files",
+    "lnk":          "LNK / Recent Items",
+    "browser":      "Browser Artifacts",
+    "tasks":        "Scheduled Tasks",
+    "triage":       "System Triage (live)",
+    "logs":         "System Logs",
+    "history":      "Shell Histories",
+    "config":       "System Configuration",
+    "cron":         "Cron Jobs",
+    "ssh":          "SSH Artifacts",
+    "launchagents": "Launch Agents / Daemons",
+    "memory":       "Physical Memory Dump (live acquisition)",
 }
 
 
@@ -563,6 +565,211 @@ class LinuxCollector(Collector):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# macOS Collector
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MacOSCollector(Collector):
+
+    def collect_all(self) -> None:
+        if self._want("logs"):         self._logs()
+        if self._want("history"):      self._shell_history()
+        if self._want("config"):       self._system_config()
+        if self._want("launchagents"): self._launch_agents()
+        if self._want("browser"):      self._browser()
+        if self._want("triage"):       self._system_triage()
+        if self._want("memory"):       self._memory()
+
+    # ── Logs ──────────────────────────────────────────────────────────────────
+
+    def _logs(self) -> None:
+        print("  [*] System Logs")
+        # Traditional syslog-style files
+        for name in ["system.log", "install.log", "fsck_apfs.log", "wifi.log"]:
+            self._add(Path("/var/log") / name, f"logs/{name}")
+        # Compress rotated logs
+        for p in sorted(Path("/var/log").glob("*.gz"))[:30]:
+            self._add(p, f"logs/{p.name}")
+        # Unified Logging System — export last 7 days as JSON
+        out = self._run_cmd(
+            ["log", "show", "--style", "json", "--last", "7d", "--info"],
+            timeout=120,
+        )
+        if out:
+            tmp = self.staging / "unified_logs.ndjson"
+            # 'log show --style json' returns a JSON array; save as-is
+            tmp.write_text(out, encoding="utf-8", errors="replace")
+            self._add(tmp, "logs/unified_logs.ndjson")
+        else:
+            # Fallback: human-readable text
+            out_text = self._run_cmd(
+                ["log", "show", "--last", "7d", "--info"], timeout=120,
+            )
+            if out_text:
+                tmp = self.staging / "unified_logs.log"
+                tmp.write_text(out_text, encoding="utf-8", errors="replace")
+                self._add(tmp, "logs/unified_logs.log")
+
+    # ── Shell history (same as Linux) ─────────────────────────────────────────
+
+    def _shell_history(self) -> None:
+        print("  [*] Shell Histories")
+        HIST = [".bash_history", ".zsh_history", ".sh_history", ".python_history"]
+        home = Path.home().parent  # /Users
+        candidates = [Path("/var/root")]
+        if home.exists():
+            candidates += sorted(home.iterdir())
+        for user_dir in candidates:
+            if user_dir.is_dir():
+                for h in HIST:
+                    self._add(user_dir / h, f"history/{user_dir.name}/{h}")
+
+    # ── System config ─────────────────────────────────────────────────────────
+
+    def _system_config(self) -> None:
+        print("  [*] System Configuration")
+        for p in [
+            "/etc/passwd", "/etc/group", "/etc/hosts",
+            "/etc/resolv.conf", "/etc/ssh/sshd_config",
+            "/private/etc/sudoers",
+            "/System/Library/CoreServices/SystemVersion.plist",
+        ]:
+            self._add(Path(p), f"config/{Path(p).name}")
+        # sudoers.d
+        for d in ["/etc/sudoers.d", "/private/etc/sudoers.d"]:
+            if Path(d).exists():
+                for f in sorted(Path(d).iterdir()):
+                    if f.is_file():
+                        self._add(f, f"config/sudoers.d/{f.name}")
+
+    # ── LaunchAgents / LaunchDaemons (macOS persistence) ─────────────────────
+
+    def _launch_agents(self) -> None:
+        print("  [*] Launch Agents / Daemons")
+        dirs = [
+            "/Library/LaunchAgents",
+            "/Library/LaunchDaemons",
+            "/System/Library/LaunchAgents",
+            "/System/Library/LaunchDaemons",
+        ]
+        # Per-user LaunchAgents
+        home = Path.home().parent
+        if home.exists():
+            for user_dir in sorted(home.iterdir()):
+                dirs.append(str(user_dir / "Library" / "LaunchAgents"))
+
+        for d in dirs:
+            dp = Path(d)
+            if dp.exists():
+                for f in sorted(dp.glob("*.plist"))[:200]:
+                    rel = f.relative_to(dp.parent)
+                    self._add(f, f"launchagents/{dp.name}/{f.name}")
+
+    # ── Browser artifacts ─────────────────────────────────────────────────────
+
+    def _browser(self) -> None:
+        print("  [*] Browser Artifacts")
+        home = Path.home().parent
+        candidates = sorted(home.iterdir()) if home.exists() else []
+        for user_dir in candidates:
+            if not user_dir.is_dir():
+                continue
+            lib = user_dir / "Library"
+            # Chrome
+            chrome_profile = lib / "Application Support" / "Google" / "Chrome" / "Default"
+            for db in ["History", "Cookies", "Web Data", "Login Data"]:
+                self._add(chrome_profile / db, f"browser/{user_dir.name}/chrome/{db}")
+            # Safari
+            safari_dir = lib / "Safari"
+            for sf in ["History.db", "Downloads.plist", "Bookmarks.plist",
+                       "RecentlyClosedTabs.plist", "LastSession.plist"]:
+                self._add(safari_dir / sf, f"browser/{user_dir.name}/safari/{sf}")
+            # Firefox
+            ff_profiles = lib / "Application Support" / "Firefox" / "Profiles"
+            if ff_profiles.exists():
+                for profile in sorted(ff_profiles.iterdir()):
+                    for db in ["places.sqlite", "cookies.sqlite", "logins.json"]:
+                        self._add(profile / db, f"browser/{user_dir.name}/firefox/{profile.name}/{db}")
+            # Quarantine database (file download history)
+            quarantine = lib / "Preferences" / "com.apple.LaunchServices.QuarantineEventsV2"
+            self._add(quarantine, f"browser/{user_dir.name}/quarantine_events.sqlite")
+
+    # ── System triage ─────────────────────────────────────────────────────────
+
+    def _system_triage(self) -> None:
+        print("  [*] System Triage (live commands)")
+        lines: list[str] = []
+        for header, cmd in [
+            ("OS VERSION",       ["sw_vers"]),
+            ("UNAME",            ["uname", "-a"]),
+            ("PROCESSES",        ["ps", "auxww"]),
+            ("NETWORK SOCKETS",  ["netstat", "-anv"]),
+            ("NETWORK IFACEs",   ["ifconfig"]),
+            ("ROUTING TABLE",    ["netstat", "-rn"]),
+            ("ARP CACHE",        ["arp", "-an"]),
+            ("CURRENT USERS",    ["who"]),
+            ("LAST LOGINS",      ["last", "-n", "200"]),
+            ("MOUNTS",           ["mount"]),
+            ("DISK USAGE",       ["df", "-h"]),
+            ("LOADED KEXTS",     ["kextstat"]),
+            ("LAUNCH DAEMONS",   ["launchctl", "list"]),
+            ("INSTALLED APPS",   ["system_profiler", "SPApplicationsDataType"]),
+            ("NETWORK SERVICES", ["networksetup", "-listallnetworkservices"]),
+            ("FIREWALL",         ["socketfilterfw", "--getglobalstate"]),
+            ("SUID FILES",       ["find", "/", "-perm", "-4000", "-type", "f", "-ls"]),
+            ("ENVIRONMENT",      ["env"]),
+        ]:
+            lines.append(f"\n{'='*60}\n{header}\n{'='*60}")
+            lines.append(self._run_cmd(cmd, timeout=60))
+        self._write_text("system_triage.txt", "\n".join(lines), "system_triage.txt")
+
+    # ── Memory acquisition ────────────────────────────────────────────────────
+
+    def _memory(self) -> None:
+        print("  [*] Physical Memory Dump (live acquisition)")
+        print("  [!] Note: Memory dumps are typically 4–64 GB — this may take a while")
+        print("  [!] Root privileges are required for memory acquisition")
+
+        dump_path = self.staging / f"memory-{HOSTNAME}-{TS_NOW}.raw"
+
+        # osxpmem (most reliable tool for macOS)
+        osxpmem = shutil.which("osxpmem")
+        if not osxpmem:
+            # Check common locations
+            for loc in ["/usr/local/bin/osxpmem", Path.cwd() / "osxpmem",
+                        Path(__file__).parent / "osxpmem"]:
+                if Path(loc).exists():
+                    osxpmem = str(loc)
+                    break
+
+        if osxpmem:
+            self._log(f"Using osxpmem: {osxpmem}")
+            print(f"      Output: {dump_path}")
+            try:
+                r = subprocess.run(
+                    [osxpmem, str(dump_path)],
+                    capture_output=True, timeout=7200,
+                )
+                if r.returncode == 0 and dump_path.exists() and dump_path.stat().st_size > 0:
+                    self._add(dump_path, f"memory/{dump_path.name}")
+                    size_gb = dump_path.stat().st_size / (1024 ** 3)
+                    print(f"  [+] Memory dump complete ({size_gb:.1f} GB)")
+                    return
+                err = (r.stderr or r.stdout or b"").decode(errors="replace")[:400]
+                self._warn(f"osxpmem failed (code {r.returncode}): {err}")
+            except subprocess.TimeoutExpired:
+                self._warn("osxpmem timed out (>2 hours)")
+            except Exception as exc:
+                self._warn(f"osxpmem error: {exc}")
+
+        self._warn(
+            "No memory acquisition tool found.\n"
+            "      Download osxpmem for macOS memory acquisition:\n"
+            "        https://github.com/google/rekall/releases\n"
+            "      Run: sudo osxpmem memory.raw"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Upload helper
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -650,6 +857,9 @@ def main() -> None:
     if IS_WINDOWS:
         allowed = DEFAULT_WINDOWS | {"memory"}
         collect_set = (set(raw_collect) & allowed) if raw_collect else DEFAULT_WINDOWS
+    elif IS_MACOS:
+        allowed = DEFAULT_MACOS | {"memory"}
+        collect_set = (set(raw_collect) & allowed) if raw_collect else DEFAULT_MACOS
     else:
         allowed = DEFAULT_LINUX | {"memory"}
         collect_set = (set(raw_collect) & allowed) if raw_collect else DEFAULT_LINUX
@@ -665,7 +875,9 @@ def main() -> None:
 
     if IS_WINDOWS:
         collector: Collector = WindowsCollector(output, collect_set, args.verbose, args.dry_run)
-    elif IS_LINUX or IS_MACOS:
+    elif IS_MACOS:
+        collector = MacOSCollector(output, collect_set, args.verbose, args.dry_run)
+    elif IS_LINUX:
         collector = LinuxCollector(output, collect_set, args.verbose, args.dry_run)
     else:
         print(f"  [!] Unsupported OS: {platform.system()}", file=sys.stderr)

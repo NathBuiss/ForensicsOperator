@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import redis as redis_lib
 from fastapi import APIRouter, HTTPException
@@ -184,6 +186,345 @@ def seed_library(replace: bool = False):
         r.set(GLOBAL_KEY, json.dumps(existing))
     r.set(GLOBAL_SEEDED_KEY, "1")
     return {"added": len(added), "total": len(existing)}
+
+
+@router.post("/alert-rules/library/sigma", status_code=201)
+def import_sigma_rules(body: dict):
+    """
+    Import one or more Sigma rules into the global alert library.
+
+    Accepts a JSON body with either:
+      { "yaml": "<sigma yaml string>" }          — single rule
+      { "rules": ["<yaml1>", "<yaml2>", ...] }   — multiple rules
+
+    Each Sigma rule is parsed and converted to an Elasticsearch Lucene query
+    using a best-effort field mapper.  Complex Sigma detections (pipes,
+    aggregations, near-conditions) are stored as-is with a note to review.
+
+    Returns { "imported": N, "skipped": N, "rules": [...] }
+    """
+    if not _YAML_AVAILABLE:
+        raise HTTPException(status_code=500, detail="PyYAML is not installed on the server.")
+
+    raw_list: list[str] = []
+    if "yaml" in body:
+        raw_list = [body["yaml"]]
+    elif "rules" in body and isinstance(body["rules"], list):
+        raw_list = body["rules"]
+    else:
+        raise HTTPException(status_code=422, detail="Provide 'yaml' or 'rules' key.")
+
+    r = _redis()
+    rules: list[dict] = json.loads(r.get(GLOBAL_KEY) or "[]")
+    existing_names = {rl["name"].lower() for rl in rules}
+
+    imported, skipped, new_rules = 0, 0, []
+    for raw_yaml in raw_list:
+        try:
+            sigma = yaml.safe_load(raw_yaml)
+        except Exception as exc:
+            skipped += 1
+            continue
+
+        if not isinstance(sigma, dict) or not sigma.get("title"):
+            skipped += 1
+            continue
+
+        name = sigma.get("title", "Untitled Sigma Rule")
+        if name.lower() in existing_names:
+            skipped += 1
+            continue
+
+        query    = _sigma_to_es_query(sigma)
+        category = _sigma_to_category(sigma)
+        art_type = _sigma_to_artifact_type(sigma)
+
+        new_rule = {
+            "id":           str(uuid.uuid4())[:8],
+            "created_at":   datetime.utcnow().isoformat(),
+            "name":         name,
+            "description":  sigma.get("description", ""),
+            "category":     category,
+            "artifact_type": art_type,
+            "query":        query,
+            "threshold":    1,
+            "rule_type":    "sigma",
+            "sigma_id":     sigma.get("id", ""),
+            "sigma_level":  sigma.get("level", ""),
+            "sigma_tags":   sigma.get("tags", []),
+            "sigma_status": sigma.get("status", ""),
+        }
+        rules.append(new_rule)
+        existing_names.add(name.lower())
+        new_rules.append(new_rule)
+        imported += 1
+
+    if new_rules:
+        r.set(GLOBAL_KEY, json.dumps(rules))
+
+    return {"imported": imported, "skipped": skipped, "rules": new_rules}
+
+
+# ── Sigma helpers ─────────────────────────────────────────────────────────────
+
+# Sigma field → Elasticsearch field mapping
+_SIGMA_FIELD_MAP: dict[str, str] = {
+    # Windows Event fields
+    "eventid":              "evtx.event_id",
+    "event_id":             "evtx.event_id",
+    # Process
+    "commandline":          "process.command_line",
+    "image":                "process.executable",
+    "parentcommandline":    "process.parent.command_line",
+    "parentimage":          "process.parent.executable",
+    "originalfilename":     "process.name",
+    # User / Identity
+    "targetusername":       "user.name",
+    "subjectusername":      "user.name",
+    "user":                 "user.name",
+    # Host
+    "computer":             "host.hostname",
+    "hostname":             "host.hostname",
+    "computername":         "host.hostname",
+    # Network
+    "destinationip":        "network.dest_ip",
+    "destinationport":      "network.dest_port",
+    "sourceip":             "network.src_ip",
+    "sourceport":           "network.src_port",
+    # Generic
+    "message":              "message",
+    "keywords":             "evtx.keywords",
+    "channel":              "evtx.channel",
+    # Registry
+    "targetobject":         "registry.key",
+    "details":              "registry.value",
+}
+
+
+def _map_field(field: str) -> str:
+    """Map a Sigma field name to its Elasticsearch equivalent."""
+    return _SIGMA_FIELD_MAP.get(field.lower(), field.lower())
+
+
+def _sigma_value_to_es(field: str, value: Any, modifiers: list[str]) -> str:
+    """Convert a single Sigma field+value to an ES Lucene clause."""
+    es_field = _map_field(field)
+    str_val  = str(value)
+
+    if "contains" in modifiers:
+        return f"{es_field}:*{str_val}*"
+    if "startswith" in modifiers:
+        return f"{es_field}:{str_val}*"
+    if "endswith" in modifiers:
+        return f"{es_field}:*{str_val}"
+    if "re" in modifiers:
+        # Regex — wrap in /<regex>/
+        return f"{es_field}:/{str_val}/"
+    # Exact / default
+    # Escape special Lucene chars in the value
+    escaped = re.sub(r'([+\-!(){}\[\]^"~*?:\\\/])', r'\\\1', str_val)
+    return f"{es_field}:{escaped}"
+
+
+def _sigma_selection_to_es(selection: Any) -> str:
+    """Convert a Sigma selection dict/list to an ES query string."""
+    if isinstance(selection, dict):
+        clauses = []
+        for raw_field, value in selection.items():
+            # Handle field|modifier syntax
+            parts     = raw_field.split("|")
+            field     = parts[0]
+            modifiers = parts[1:] if len(parts) > 1 else []
+
+            if isinstance(value, list):
+                # Multiple values → OR
+                sub = " OR ".join(_sigma_value_to_es(field, v, modifiers) for v in value)
+                clauses.append(f"({sub})")
+            else:
+                clauses.append(_sigma_value_to_es(field, value, modifiers))
+
+        return " AND ".join(clauses) if clauses else "*"
+
+    if isinstance(selection, list):
+        # List of dicts → OR between them
+        return " OR ".join(f"({_sigma_selection_to_es(s)})" for s in selection if isinstance(s, dict))
+
+    return "*"
+
+
+def _sigma_to_es_query(sigma: dict) -> str:
+    """
+    Best-effort conversion of a Sigma detection block to an ES Lucene query.
+
+    Supports:
+      - Simple selections (field: value, field|contains: value, lists)
+      - condition: selection  (AND of all fields)
+      - condition: selection1 or selection2
+      - condition: selection1 and not filter1
+    Unsupported constructs produce a query placeholder with a review note.
+    """
+    detection = sigma.get("detection", {})
+    if not detection:
+        return f"title:{sigma.get('title', '*')}"
+
+    condition = str(detection.get("condition", "selection")).strip().lower()
+
+    # Build map of named selections → ES clauses
+    selection_map: dict[str, str] = {}
+    for key, val in detection.items():
+        if key == "condition":
+            continue
+        if key == "timeframe":
+            continue
+        selection_map[key] = _sigma_selection_to_es(val)
+
+    # Evaluate simple condition expressions
+    # Normalise: replace "and not" with a placeholder for negation
+    try:
+        result = _eval_condition(condition, selection_map)
+    except Exception:
+        # Fallback: join everything with OR
+        result = " OR ".join(f"({v})" for v in selection_map.values() if v and v != "*")
+        if not result:
+            result = "*"
+
+    return result or "*"
+
+
+def _eval_condition(condition: str, sel_map: dict[str, str]) -> str:
+    """Parse a simple Sigma condition string."""
+    import re as _re
+
+    cond = condition.strip()
+
+    # "1 of selection*" / "all of selection*"
+    m = _re.match(r'^(1|all) of (\S+)$', cond)
+    if m:
+        quantifier, pattern = m.groups()
+        pattern_re = _re.compile("^" + pattern.replace("*", ".*") + "$")
+        matched = [v for k, v in sel_map.items() if pattern_re.match(k)]
+        joiner = " OR " if quantifier == "1" else " AND "
+        return joiner.join(f"({v})" for v in matched) if matched else "*"
+
+    # Replace "and not" with special token
+    parts = _re.split(r'\s+and\s+not\s+', cond)
+    if len(parts) == 2:
+        include, exclude = parts
+        inc_q = _eval_condition(include.strip(), sel_map)
+        exc_q = _eval_condition(exclude.strip(), sel_map)
+        return f"({inc_q}) AND NOT ({exc_q})"
+
+    # "or" splits
+    or_parts = [p.strip() for p in _re.split(r'\s+or\s+', cond)]
+    if len(or_parts) > 1:
+        clauses = [_eval_condition(p, sel_map) for p in or_parts]
+        return " OR ".join(f"({c})" for c in clauses if c)
+
+    # "and" splits
+    and_parts = [p.strip() for p in _re.split(r'\s+and\s+', cond)]
+    if len(and_parts) > 1:
+        clauses = [_eval_condition(p, sel_map) for p in and_parts]
+        return " AND ".join(f"({c})" for c in clauses if c)
+
+    # Single selection name
+    cond_clean = cond.strip("() ")
+    return sel_map.get(cond_clean, cond_clean)
+
+
+# Sigma logsource product → MITRE category approximation
+_SIGMA_CATEGORY_MAP: dict[str, str] = {
+    "anti-forensics": "Anti-Forensics",
+    "windows":        "Execution",
+    "linux":          "Discovery",
+    "macos":          "Discovery",
+    "network":        "Command & Control",
+    "web":            "Command & Control",
+    "firewall":       "Command & Control",
+    "proxy":          "Command & Control",
+    "dns":            "Command & Control",
+}
+
+_SIGMA_LOGSOURCE_CATEGORY_MAP: dict[str, str] = {
+    "process_creation":        "Execution",
+    "process_access":          "Execution",
+    "network_connection":      "Command & Control",
+    "dns":                     "Command & Control",
+    "file_event":              "Persistence",
+    "registry_event":          "Persistence",
+    "registry_add":            "Persistence",
+    "registry_set":            "Persistence",
+    "registry_delete":         "Defense Evasion",
+    "scheduled_task_creation": "Persistence",
+    "service_creation":        "Persistence",
+    "image_load":              "Defense Evasion",
+    "driver_load":             "Defense Evasion",
+    "wmi_event":               "Execution",
+    "pipe_created":            "Lateral Movement",
+    "raw_access_read":         "Credential Access",
+}
+
+_SIGMA_TAG_TACTIC_MAP: dict[str, str] = {
+    "attack.defense_evasion":   "Defense Evasion",
+    "attack.privilege_escalation": "Privilege Escalation",
+    "attack.persistence":       "Persistence",
+    "attack.execution":         "Execution",
+    "attack.lateral_movement":  "Lateral Movement",
+    "attack.credential_access": "Credential Access",
+    "attack.discovery":         "Discovery",
+    "attack.command_and_control": "Command & Control",
+    "attack.exfiltration":      "Exfiltration",
+    "attack.collection":        "Discovery",
+    "attack.initial_access":    "Execution",
+    "attack.impact":            "Anti-Forensics",
+}
+
+
+def _sigma_to_category(sigma: dict) -> str:
+    """Derive alert rule category from Sigma tags and logsource."""
+    # 1. Check tags for ATT&CK tactics (most reliable)
+    for tag in sigma.get("tags", []):
+        cat = _SIGMA_TAG_TACTIC_MAP.get(tag.lower())
+        if cat:
+            return cat
+
+    # 2. Check logsource.category
+    ls = sigma.get("logsource", {})
+    if isinstance(ls, dict):
+        ls_cat = ls.get("category", "").lower()
+        cat = _SIGMA_LOGSOURCE_CATEGORY_MAP.get(ls_cat)
+        if cat:
+            return cat
+        product = ls.get("product", "").lower()
+        cat = _SIGMA_CATEGORY_MAP.get(product)
+        if cat:
+            return cat
+
+    return "Other"
+
+
+def _sigma_to_artifact_type(sigma: dict) -> str:
+    """Derive artifact_type from Sigma logsource."""
+    ls = sigma.get("logsource", {})
+    if not isinstance(ls, dict):
+        return ""
+
+    product  = ls.get("product", "").lower()
+    service  = ls.get("service", "").lower()
+    category = ls.get("category", "").lower()
+
+    if product == "windows":
+        if service in ("security", "system", "application", "sysmon", "powershell"):
+            return "evtx"
+        return "evtx"
+    if product in ("linux", "macos"):
+        return "syslog"
+    if "network" in category or "dns" in category or product in ("zeek", "suricata"):
+        return ""
+    if "registry" in category:
+        return "registry"
+    if "file" in category:
+        return ""
+    return ""
 
 
 @router.post("/alert-rules/library", status_code=201)

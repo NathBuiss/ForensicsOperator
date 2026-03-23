@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import {
   Bell, Plus, Trash2, ChevronDown, ChevronUp, Pencil, Check, X,
   AlertTriangle, Loader2, Search, Play, CheckCircle, Clock, RefreshCw,
-  ExternalLink, Filter, Tag,
+  ExternalLink, Filter, Tag, Upload, FileCode,
 } from 'lucide-react'
 import { api } from '../api/client'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
@@ -441,13 +441,121 @@ function CreateRuleForm({ onCreated }) {
   )
 }
 
+// ── Sigma import modal ────────────────────────────────────────────────────────
+function SigmaImportModal({ onClose, onImported }) {
+  const [yamlText, setYamlText] = useState('')
+  const [importing, setImporting] = useState(false)
+  const [result, setResult]       = useState(null)
+  const [error, setError]         = useState('')
+  const fileRef = useRef(null)
+
+  function handleFile(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = ev => setYamlText(ev.target.result || '')
+    reader.readAsText(file)
+  }
+
+  async function doImport() {
+    if (!yamlText.trim()) return
+    setImporting(true)
+    setError('')
+    setResult(null)
+    try {
+      const res = await api.alertRules.importSigma({ yaml: yamlText })
+      setResult(res)
+      if (res.imported > 0) onImported(res.rules)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+      onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="bg-white border border-gray-200 rounded-xl w-full max-w-xl shadow-2xl flex flex-col"
+        style={{ maxHeight: '85vh' }}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 flex-shrink-0">
+          <div className="flex items-center gap-2">
+            <FileCode size={16} className="text-brand-accent" />
+            <span className="font-semibold text-brand-text text-sm">Import Sigma Rule</span>
+          </div>
+          <button onClick={onClose} className="btn-ghost p-1"><X size={14} /></button>
+        </div>
+
+        {/* Body */}
+        <div className="p-5 space-y-3 overflow-y-auto flex-1">
+          <p className="text-xs text-gray-500">
+            Paste a Sigma rule YAML below, or upload a <code>.yml</code> / <code>.yaml</code> file.
+            The rule will be converted to an Elasticsearch query and added to the library.
+          </p>
+
+          {/* File upload */}
+          <div>
+            <input ref={fileRef} type="file" accept=".yml,.yaml" className="hidden" onChange={handleFile} />
+            <button
+              onClick={() => fileRef.current?.click()}
+              className="btn-outline text-xs w-full justify-center"
+            >
+              <Upload size={13} /> Upload .yml / .yaml file
+            </button>
+          </div>
+
+          {/* YAML textarea */}
+          <textarea
+            value={yamlText}
+            onChange={e => setYamlText(e.target.value)}
+            placeholder={`title: Suspicious PowerShell Execution\nstatus: stable\nlogsource:\n  product: windows\n  service: security\ndetection:\n  selection:\n    EventID: 4688\n    CommandLine|contains: 'powershell'\n  condition: selection\nlevel: medium\ntags:\n  - attack.execution\n  - attack.t1059.001`}
+            className="input font-mono text-xs w-full resize-none"
+            rows={14}
+            spellCheck={false}
+          />
+
+          {error && (
+            <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-center gap-1.5">
+              <X size={12} /> {error}
+            </p>
+          )}
+
+          {result && (
+            <div className={`text-xs rounded-lg border px-3 py-2 ${result.imported > 0 ? 'bg-green-50 border-green-200 text-green-700' : 'bg-amber-50 border-amber-200 text-amber-700'}`}>
+              {result.imported > 0
+                ? <><Check size={12} className="inline mr-1" />{result.imported} rule{result.imported > 1 ? 's' : ''} imported.</>
+                : <><AlertTriangle size={12} className="inline mr-1" />Rule already exists or could not be parsed (skipped: {result.skipped}).</>
+              }
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="px-5 py-4 border-t border-gray-200 flex-shrink-0 flex items-center gap-2">
+          <button
+            onClick={doImport}
+            disabled={!yamlText.trim() || importing}
+            className="btn-primary text-xs"
+          >
+            {importing ? <Loader2 size={13} className="animate-spin" /> : <FileCode size={13} />}
+            Import Rule
+          </button>
+          <button onClick={onClose} className="btn-ghost text-xs">Close</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function AlertLibrary() {
   const [rules, setRules]     = useState([])
   const [cases, setCases]     = useState([])
   const [loading, setLoading] = useState(true)
-  const [seeding, setSeeding] = useState(false)
-  const [seedMsg, setSeedMsg] = useState(null)
+  const [seeding, setSeeding]   = useState(false)
+  const [seedMsg, setSeedMsg]   = useState(null)
+  const [showSigma, setShowSigma] = useState(false)
   const [search, setSearch]             = useState('')
   const [artifactFilter, setArtifactFilter] = useState('all')
   const [categoryFilter, setCategoryFilter] = useState('all')
@@ -583,6 +691,13 @@ export default function AlertLibrary() {
               </span>
             )}
             <button
+              onClick={() => setShowSigma(true)}
+              className="btn-outline text-xs"
+              title="Import a Sigma detection rule (YAML)"
+            >
+              <FileCode size={13} /> Import Sigma
+            </button>
+            <button
               onClick={() => seedDefaults(false)}
               disabled={seeding}
               className="btn-outline text-xs"
@@ -593,6 +708,16 @@ export default function AlertLibrary() {
             </button>
           </div>
         </div>
+
+        {showSigma && (
+          <SigmaImportModal
+            onClose={() => setShowSigma(false)}
+            onImported={newRules => {
+              setRules(prev => [...prev, ...newRules])
+              setShowSigma(false)
+            }}
+          />
+        )}
 
         {/* Category pill filter row */}
         {!loading && rules.length > 0 && presentCategories.length > 2 && (

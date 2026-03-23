@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Settings2, Sparkles, Check, X, Loader2, Trash2, Eye, EyeOff, AlertCircle } from 'lucide-react'
+import { Settings2, Sparkles, Check, X, Loader2, Trash2, Eye, EyeOff, AlertCircle, Wifi } from 'lucide-react'
 import { api } from '../api/client'
 
 const PROVIDERS = [
@@ -31,7 +31,8 @@ const PROVIDERS = [
     id: 'custom',
     name: 'Custom (OpenAI-compatible)',
     placeholder_model: 'local-model',
-    needs_key: false,
+    needs_key: true,
+    key_optional: true,
     default_url: 'http://localhost:8000/v1',
     hint: 'LiteLLM, vLLM, LM Studio, LocalAI, Jan — any /chat/completions endpoint',
   },
@@ -43,7 +44,9 @@ export default function Settings() {
   const [saving, setSaving]   = useState(false)
   const [saved, setSaved]     = useState(false)
   const [error, setError]     = useState('')
-  const [showKey, setShowKey] = useState(false)
+  const [showKey, setShowKey]         = useState(false)
+  const [testing, setTesting]         = useState(false)
+  const [testResult, setTestResult]   = useState(null)  // null | {ok, response} | {error}
 
   const [form, setForm] = useState({
     provider: 'openai',
@@ -101,6 +104,19 @@ export default function Settings() {
       setForm({ provider: 'openai', model: '', api_key: '', base_url: '', enabled: true })
     } catch (err) {
       setError(err.message)
+    }
+  }
+
+  async function testConnection() {
+    setTesting(true)
+    setTestResult(null)
+    try {
+      const res = await api.llm.testConfig()
+      setTestResult({ ok: true, response: res.response })
+    } catch (err) {
+      setTestResult({ ok: false, error: err.message })
+    } finally {
+      setTesting(false)
     }
   }
 
@@ -184,8 +200,13 @@ export default function Settings() {
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">
                   API Key
-                  {config?.api_key_set && (
+                  {provider.key_optional && <span className="ml-1 text-gray-400 font-normal">(optional — for authenticated endpoints)</span>}
+                  {!provider.key_optional && config?.api_key_set && (
                     <span className="ml-1 text-green-600 font-normal">(key already set — leave blank to keep)</span>
+                  )}
+                  {!provider.key_optional && !config?.api_key_set && null}
+                  {provider.key_optional && config?.api_key_set && (
+                    <span className="ml-1 text-green-600 font-normal">(key set — leave blank to keep)</span>
                   )}
                 </label>
                 <div className="relative">
@@ -241,17 +262,28 @@ export default function Settings() {
               </p>
             )}
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <button type="submit" disabled={saving} className="btn-primary text-xs">
                 {saving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
-                Save Configuration
+                Save
               </button>
+              {config?.provider && (
+                <button
+                  type="button"
+                  onClick={testConnection}
+                  disabled={testing}
+                  className="btn-outline text-xs"
+                >
+                  {testing ? <Loader2 size={13} className="animate-spin" /> : <Wifi size={13} />}
+                  Test Connection
+                </button>
+              )}
               {saved && (
                 <span className="text-xs text-green-600 flex items-center gap-1">
                   <Check size={11} /> Saved
                 </span>
               )}
-              {config?.api_key_set && (
+              {config?.provider && (
                 <button
                   type="button"
                   onClick={clearConfig}
@@ -261,6 +293,20 @@ export default function Settings() {
                 </button>
               )}
             </div>
+
+            {testResult && (
+              testResult.ok ? (
+                <div className="text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2 flex items-start gap-1.5">
+                  <Check size={12} className="mt-0.5 flex-shrink-0" />
+                  <span><strong>Connected.</strong> Model replied: <em className="font-mono">{testResult.response}</em></span>
+                </div>
+              ) : (
+                <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-start gap-1.5">
+                  <X size={12} className="mt-0.5 flex-shrink-0" />
+                  <span><strong>Failed:</strong> {testResult.error}</span>
+                </div>
+              )
+            )}
           </form>
         )}
       </section>

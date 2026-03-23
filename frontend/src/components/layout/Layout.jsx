@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react'
 import {
   LayoutDashboard, Puzzle, FolderOpen,
   Plus, X, ChevronRight, Bell, Sun, Moon, Cpu, PackageOpen, Layers,
-  Code2, BookOpen, LogOut, UserCircle, Settings2,
+  Code2, BookOpen, LogOut, UserCircle, Settings2, Stars,
 } from 'lucide-react'
 import { api } from '../../api/client'
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts'
@@ -15,32 +15,35 @@ const STATUS_DOT = {
   closed:   'status-dot-closed',
 }
 
+const THEMES = ['light', 'dark', 'midnight']
+
 function useTheme() {
-  const [dark, setDark] = useState(() => {
-    if (typeof window === 'undefined') return false
+  const [theme, setTheme] = useState(() => {
+    if (typeof window === 'undefined') return 'light'
     const saved = localStorage.getItem('fo-theme')
-    if (saved) return saved === 'dark'
-    return window.matchMedia('(prefers-color-scheme: dark)').matches
+    if (saved && THEMES.includes(saved)) return saved
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
   })
 
   useEffect(() => {
     const root = document.documentElement
-    if (dark) {
-      root.classList.add('dark')
-    } else {
-      root.classList.remove('dark')
-    }
-    localStorage.setItem('fo-theme', dark ? 'dark' : 'light')
-  }, [dark])
+    THEMES.forEach(t => root.classList.remove(t))
+    if (theme !== 'light') root.classList.add(theme)
+    localStorage.setItem('fo-theme', theme)
+  }, [theme])
 
-  return [dark, setDark]
+  function cycleTheme() {
+    setTheme(t => THEMES[(THEMES.indexOf(t) + 1) % THEMES.length])
+  }
+
+  return [theme, cycleTheme]
 }
 
 export default function Layout({ user, onLogout }) {
   const [cases, setCases]             = useState([])
   const [showNewCase, setShowNewCase] = useState(false)
   const [newCaseName, setNewCaseName] = useState('')
-  const [dark, setDark]               = useTheme()
+  const [theme, cycleTheme]            = useTheme()
   const [showShortcuts, setShowShortcuts] = useState(false)
   const navigate = useNavigate()
 
@@ -88,13 +91,15 @@ export default function Layout({ user, onLogout }) {
             </span>
           </NavLink>
 
-          {/* Theme toggle */}
+          {/* Theme toggle — cycles: light → dark → midnight */}
           <button
-            onClick={() => setDark(d => !d)}
+            onClick={cycleTheme}
             className="w-6 h-6 flex items-center justify-center rounded text-brand-sidebarmuted hover:text-white hover:bg-white/10 transition-colors flex-shrink-0 ml-1"
-            title={dark ? 'Switch to light mode' : 'Switch to dark mode'}
+            title={`Theme: ${theme} (click to cycle)`}
           >
-            {dark ? <Sun size={13} /> : <Moon size={13} />}
+            {theme === 'light'    && <Moon size={13} />}
+            {theme === 'dark'     && <Stars size={13} />}
+            {theme === 'midnight' && <Sun size={13} />}
           </button>
         </div>
 

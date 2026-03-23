@@ -110,6 +110,26 @@ def clear_llm_config():
     _redis().delete(_LLM_CONFIG_KEY)
 
 
+@router.post("/admin/llm-config/test")
+def test_llm_config():
+    """
+    Send a trivial one-token prompt to verify the LLM backend is reachable.
+    Uses the saved configuration; save first, then test.
+    Returns {"ok": true, "response": "..."} on success, HTTP 502 on failure.
+    """
+    r = _redis()
+    cfg = _get_config(r)
+    if not cfg or not cfg.get("provider"):
+        raise HTTPException(status_code=400, detail="No LLM configuration saved yet.")
+
+    try:
+        reply = _call_llm_test(cfg)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LLM test failed: {exc}")
+
+    return {"ok": True, "provider": cfg.get("provider"), "model": cfg.get("model"), "response": reply[:300]}
+
+
 # ── Analysis endpoint ─────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """You are an expert digital forensic analyst reviewing the output of an automated analysis module.
@@ -128,6 +148,68 @@ Your response MUST be a JSON object with exactly these keys:
 
 Be concise and actionable. Focus on what matters for incident response.
 Do not include markdown, only return the raw JSON object."""
+
+
+def _call_llm_test(cfg: dict) -> str:
+    """Send a minimal prompt with a short timeout to verify connectivity."""
+    provider = cfg.get("provider", "").lower()
+    model    = cfg.get("model", "")
+    api_key  = cfg.get("api_key", "")
+    base_url = cfg.get("base_url", "").rstrip("/")
+
+    msg = "Reply with exactly the word: OK"
+
+    if provider == "anthropic":
+        import urllib.request
+        headers = {
+            "Content-Type":      "application/json",
+            "x-api-key":         api_key,
+            "anthropic-version": "2023-06-01",
+        }
+        body = json.dumps({
+            "model": model, "max_tokens": 10,
+            "messages": [{"role": "user", "content": msg}],
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=body, headers=headers, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read())
+        return data["content"][0]["text"]
+
+    elif provider == "ollama":
+        import urllib.request
+        url = base_url or "http://localhost:11434"
+        body = json.dumps({
+            "model": model, "stream": False,
+            "messages": [{"role": "user", "content": msg}],
+        }).encode()
+        req = urllib.request.Request(
+            f"{url}/api/chat", data=body,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+        return data["message"]["content"]
+
+    else:  # openai or custom
+        import urllib.request
+        url = base_url or "https://api.openai.com/v1"
+        headers = {
+            "Content-Type":  "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        body = json.dumps({
+            "model": model, "max_tokens": 10,
+            "messages": [{"role": "user", "content": msg}],
+        }).encode()
+        req = urllib.request.Request(
+            f"{url}/chat/completions", data=body, headers=headers, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read())
+        return data["choices"][0]["message"]["content"]
 
 
 def _call_llm(cfg: dict, prompt: str) -> str:
