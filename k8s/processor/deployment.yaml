@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: processor
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
 spec:
   replicas: 2
   selector:

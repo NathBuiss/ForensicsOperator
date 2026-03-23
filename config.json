@@ -1,6 +1,9 @@
 {
   "_readme": "Edit this file then run: python3 deploy.py",
 
+  "_comment_namespace": "Kubernetes namespace for all deployed resources. Use different values for prod vs dev.",
+  "namespace": "forensics-operator",
+
   "cluster": {
     "_comment_context": "The kubectl context to use. Leave empty to use whatever kubectl is currently pointing at.",
     "context": "",

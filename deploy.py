@@ -29,7 +29,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 K8S  = ROOT / "k8s"
-NS   = "forensics-operator"
+NS   = "forensics-operator"   # overwritten by load_config()
 
 APPLY_ORDER = [
     K8S / "namespace.yaml",
@@ -95,7 +95,11 @@ def load_config():
         if isinstance(d, dict):
             return {k: clean(v) for k, v in d.items() if not k.startswith("_")}
         return d
-    return clean(raw)
+    cfg = clean(raw)
+    # Expose namespace globally so all helpers can reference it
+    global NS
+    NS = cfg.get("namespace", "forensics-operator")
+    return cfg
 
 
 def image_name(svc, cfg):
@@ -108,6 +112,7 @@ def build_substitutions(cfg, pull_policy):
     es_heap = cfg["resources"]["elasticsearch_heap_mb"]
     auth    = cfg.get("auth", {})
     return {
+        "__FO_NAMESPACE__":        NS,
         "__FO_API_IMAGE__":        image_name("api",       cfg),
         "__FO_PROCESSOR_IMAGE__":  image_name("processor", cfg),
         "__FO_FRONTEND_IMAGE__":   image_name("frontend",  cfg),

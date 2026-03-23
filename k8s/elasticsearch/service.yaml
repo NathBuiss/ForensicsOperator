@@ -2,7 +2,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: elasticsearch-service
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
 spec:
   selector:
     app: elasticsearch
@@ -19,7 +19,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: elasticsearch
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
 spec:
   selector:
     app: elasticsearch
