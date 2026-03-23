@@ -143,15 +143,20 @@ export const api = {
   },
 
   editor: {
-    listIngesters:  ()            => request('GET',    '/editor/ingesters'),
-    getIngester:    (name)        => request('GET',    `/editor/ingesters/${name}`),
-    saveIngester:   (name, data)  => request('PUT',    `/editor/ingesters/${name}`, data),
-    deleteIngester: (name)        => request('DELETE', `/editor/ingesters/${name}`),
-    listModules:    ()            => request('GET',    '/editor/modules'),
-    getModule:      (name)        => request('GET',    `/editor/modules/${name}`),
-    saveModule:     (name, data)  => request('PUT',    `/editor/modules/${name}`, data),
-    deleteModule:   (name)        => request('DELETE', `/editor/modules/${name}`),
-    validate:       (code)        => request('POST',   '/editor/validate', { code }),
+    listIngesters:        ()            => request('GET',    '/editor/ingesters'),
+    getIngester:          (name)        => request('GET',    `/editor/ingesters/${name}`),
+    saveIngester:         (name, data)  => request('PUT',    `/editor/ingesters/${name}`, data),
+    deleteIngester:       (name)        => request('DELETE', `/editor/ingesters/${name}`),
+    listModules:          ()            => request('GET',    '/editor/modules'),
+    getModule:            (name)        => request('GET',    `/editor/modules/${name}`),
+    saveModule:           (name, data)  => request('PUT',    `/editor/modules/${name}`, data),
+    deleteModule:         (name)        => request('DELETE', `/editor/modules/${name}`),
+    validate:             (code)        => request('POST',   '/editor/validate', { code }),
+    // Built-in reference files (read-only)
+    listBuiltinIngesters: ()            => request('GET',    '/editor/builtin-ingesters'),
+    getBuiltinIngester:   (name)        => request('GET',    `/editor/builtin-ingesters/${name}`),
+    listBuiltinModules:   ()            => request('GET',    '/editor/builtin-modules'),
+    getBuiltinModule:     (name)        => request('GET',    `/editor/builtin-modules/${name}`),
   },
 
   collector: {

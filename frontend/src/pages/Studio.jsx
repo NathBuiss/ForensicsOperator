@@ -10,7 +10,7 @@ import { useLocation } from 'react-router-dom'
 import {
   Code2, Plus, Save, Trash2, CheckCircle, AlertCircle,
   RefreshCw, FileCode2, X, ChevronRight, Cpu, Puzzle,
-  Play, BookOpen, Copy, Check,
+  Play, BookOpen, Copy, Check, Lock,
 } from 'lucide-react'
 import { api } from '../api/client'
 
@@ -305,12 +305,15 @@ export default function Studio() {
 
   const loadLists = useCallback(async () => {
     try {
-      const [ing, mod] = await Promise.all([
+      const [ing, mod, ingBuiltin, modBuiltin] = await Promise.all([
         api.editor.listIngesters(),
         api.editor.listModules(),
+        api.editor.listBuiltinIngesters().catch(() => ({ files: [] })),
+        api.editor.listBuiltinModules().catch(() => ({ files: [] })),
       ])
-      setIngFiles(ing.files || [])
-      setModFiles(mod.files || [])
+      // Built-ins first (read-only), then custom (editable)
+      setIngFiles([...(ingBuiltin.files || []), ...(ing.files || [])])
+      setModFiles([...(modBuiltin.files || []), ...(mod.files || [])])
     } catch (_) {}
   }, [])
 
@@ -341,7 +344,7 @@ export default function Studio() {
 
   // ── Open a file (or switch to existing tab) ───────────────────────────────
 
-  async function openFile(type, name) {
+  async function openFile(type, name, builtin = false) {
     const key = fileId(type, name)
 
     // Already open? Just switch to it
@@ -352,7 +355,7 @@ export default function Studio() {
 
     // Add a new loading tab and make it active
     const newTab = {
-      type, name,
+      type, name, builtin,
       code: '', originalCode: '',
       loading: true, saving: false, validating: false,
       validation: null, saveMsg: null, copied: false,
@@ -361,9 +364,16 @@ export default function Studio() {
     setActiveTabKey(key)
 
     try {
-      const res = type === 'ingester'
-        ? await api.editor.getIngester(name)
-        : await api.editor.getModule(name)
+      let res
+      if (builtin) {
+        res = type === 'ingester'
+          ? await api.editor.getBuiltinIngester(name)
+          : await api.editor.getBuiltinModule(name)
+      } else {
+        res = type === 'ingester'
+          ? await api.editor.getIngester(name)
+          : await api.editor.getModule(name)
+      }
       updateTab(type, name, {
         code: res.content,
         originalCode: res.content,
@@ -520,6 +530,7 @@ export default function Studio() {
 
   const sidebarFiles    = sidebarTab === 'ingesters' ? ingesterFiles : moduleFiles
   const sidebarFileType = sidebarTab === 'ingesters' ? 'ingester' : 'module'
+  // NewFileModal only cares about custom file names (no collisions with built-ins expected)
   const existingNames   = sidebarFiles.map(f => f.name)
 
   return (
@@ -569,27 +580,33 @@ export default function Studio() {
               <FileCode2 size={20} className="text-gray-300 mx-auto mb-2" />
               <p className="text-[11px] text-gray-400">No files yet</p>
             </div>
-          ) : (
-            sidebarFiles.map(f => {
+          ) : (() => {
+            const builtins = sidebarFiles.filter(f => f.builtin)
+            const customs  = sidebarFiles.filter(f => !f.builtin)
+            const renderFile = f => {
               const key        = fileId(sidebarFileType, f.name)
               const isActive   = activeTabKey === key
               const openTab    = openTabs.find(t => fileId(t.type, t.name) === key)
               const isOpen     = Boolean(openTab)
-              const isDirtyTab = isOpen && openTab.code !== openTab.originalCode
-
+              const isDirtyTab = isOpen && !f.builtin && openTab.code !== openTab.originalCode
               return (
                 <button
                   key={f.name}
-                  onClick={() => openFile(sidebarFileType, f.name)}
+                  onClick={() => openFile(sidebarFileType, f.name, !!f.builtin)}
                   className={`w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors ${
                     isActive
                       ? 'bg-brand-accentlight text-brand-accent'
                       : isOpen
                         ? 'bg-blue-50/50 text-gray-700 hover:bg-blue-50'
-                        : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+                        : f.builtin
+                          ? 'text-gray-400 hover:bg-gray-50 hover:text-gray-600'
+                          : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
                   }`}
                 >
-                  <FileCode2 size={13} className="flex-shrink-0 opacity-60" />
+                  {f.builtin
+                    ? <Lock size={11} className="flex-shrink-0 opacity-50" />
+                    : <FileCode2 size={13} className="flex-shrink-0 opacity-60" />
+                  }
                   <span className="text-[11px] font-mono truncate flex-1">{f.name}</span>
                   {isDirtyTab && (
                     <span className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0" title="Unsaved changes" />
@@ -599,8 +616,28 @@ export default function Studio() {
                   )}
                 </button>
               )
-            })
-          )}
+            }
+            return (
+              <>
+                {builtins.length > 0 && (
+                  <>
+                    <p className="px-3 pt-2 pb-1 text-[9px] font-semibold text-gray-400 uppercase tracking-widest">
+                      Built-in
+                    </p>
+                    {builtins.map(renderFile)}
+                  </>
+                )}
+                {customs.length > 0 && (
+                  <>
+                    <p className="px-3 pt-3 pb-1 text-[9px] font-semibold text-gray-400 uppercase tracking-widest">
+                      Custom
+                    </p>
+                    {customs.map(renderFile)}
+                  </>
+                )}
+              </>
+            )
+          })()}
         </div>
       </aside>
 
@@ -680,6 +717,13 @@ export default function Studio() {
               </div>
 
               <div className="flex items-center gap-1.5 flex-shrink-0">
+                {/* Read-only badge for built-in files */}
+                {activeTab.builtin && (
+                  <span className="flex items-center gap-1 text-[11px] text-gray-500 bg-gray-100 border border-gray-200 rounded-lg px-2 py-0.5">
+                    <Lock size={10} /> Read-only
+                  </span>
+                )}
+
                 {/* Validation result badge */}
                 {activeTab.validation && (
                   activeTab.validation.valid
@@ -707,32 +751,38 @@ export default function Studio() {
                     ? <><Check size={12} className="text-green-600" /> Copied</>
                     : <><Copy size={12} /> Copy</>}
                 </button>
-                <button
-                  onClick={handleValidate}
-                  disabled={activeTab.validating}
-                  className="btn-outline text-xs py-1 px-2"
-                >
-                  {activeTab.validating
-                    ? <RefreshCw size={12} className="animate-spin" />
-                    : <Play size={12} />}
-                  {activeTab.validating ? 'Checking…' : 'Validate'}
-                </button>
-                <button
-                  onClick={handleSave}
-                  disabled={activeTab.saving || !isDirty}
-                  className="btn-primary text-xs py-1 px-2"
-                >
-                  {activeTab.saving
-                    ? <RefreshCw size={12} className="animate-spin" />
-                    : <Save size={12} />}
-                  {activeTab.saving ? 'Saving…' : 'Save'}
-                </button>
-                <button
-                  onClick={() => setShowDelete(true)}
-                  className="btn-danger text-xs py-1 px-2"
-                >
-                  <Trash2 size={12} />
-                </button>
+                {!activeTab.builtin && (
+                  <button
+                    onClick={handleValidate}
+                    disabled={activeTab.validating}
+                    className="btn-outline text-xs py-1 px-2"
+                  >
+                    {activeTab.validating
+                      ? <RefreshCw size={12} className="animate-spin" />
+                      : <Play size={12} />}
+                    {activeTab.validating ? 'Checking…' : 'Validate'}
+                  </button>
+                )}
+                {!activeTab.builtin && (
+                  <button
+                    onClick={handleSave}
+                    disabled={activeTab.saving || !isDirty}
+                    className="btn-primary text-xs py-1 px-2"
+                  >
+                    {activeTab.saving
+                      ? <RefreshCw size={12} className="animate-spin" />
+                      : <Save size={12} />}
+                    {activeTab.saving ? 'Saving…' : 'Save'}
+                  </button>
+                )}
+                {!activeTab.builtin && (
+                  <button
+                    onClick={() => setShowDelete(true)}
+                    className="btn-danger text-xs py-1 px-2"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                )}
               </div>
             </div>
 
@@ -756,7 +806,8 @@ export default function Studio() {
                 <CodeEditor
                   key={activeTabKey}
                   value={activeTab.code}
-                  onChange={v => updateTab(activeTab.type, activeTab.name, { code: v })}
+                  onChange={v => !activeTab.builtin && updateTab(activeTab.type, activeTab.name, { code: v })}
+                  readOnly={activeTab.builtin}
                 />
               )}
             </div>
@@ -791,7 +842,7 @@ export default function Studio() {
           onCreate={handleCreate}
         />
       )}
-      {showDelete && activeTab && (
+      {showDelete && activeTab && !activeTab.builtin && (
         <DeleteConfirmModal
           file={activeTab.name}
           onClose={() => setShowDelete(false)}

@@ -18,6 +18,7 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -93,6 +94,30 @@ def get_minio():
     return Minio(MINIO_ENDPOINT, access_key=MINIO_ACCESS, secret_key=MINIO_SECRET, secure=False)
 
 
+_CONN_ERRORS = ("connection refused", "max retries", "timeout", "connect", "reset by peer",
+                "broken pipe", "connection reset", "econnrefused")
+
+
+def _minio_op(fn, max_tries: int = 4, base_delay: float = 3.0):
+    """Execute fn(), retrying on transient MinIO connectivity errors with exponential backoff."""
+    last_exc = None
+    for attempt in range(max_tries):
+        try:
+            return fn()
+        except Exception as exc:
+            msg = str(exc).lower()
+            if any(k in msg for k in _CONN_ERRORS):
+                last_exc = exc
+                if attempt < max_tries - 1:
+                    wait = base_delay * (2 ** attempt)
+                    logger.warning("MinIO attempt %d/%d failed (%s). Retrying in %.0fs…",
+                                   attempt + 1, max_tries, exc, wait)
+                    time.sleep(wait)
+                    continue
+            raise
+    raise last_exc  # type: ignore[misc]
+
+
 def _update(r: redis.Redis, run_id: str, **fields) -> None:
     key = f"fo:module_run:{run_id}"
     r.hset(key, mapping={
@@ -136,7 +161,7 @@ def run_module(
         for sf in source_files:
             dest = sources_dir / sf["filename"]
             logger.info("[%s] Downloading %s", run_id, sf["minio_key"])
-            minio.fget_object(MINIO_BUCKET, sf["minio_key"], str(dest))
+            _minio_op(lambda d=dest, k=sf["minio_key"]: minio.fget_object(MINIO_BUCKET, k, str(d)))
 
         logger.info("[%s] Sources: %s", run_id,
                     [p.name for p in sorted(sources_dir.iterdir()) if p.is_file()])
@@ -182,8 +207,8 @@ def run_module(
         results_json = work_dir / "results.json"
         results_json.write_text(json.dumps(results, ensure_ascii=False))
         output_key = f"cases/{case_id}/modules/{run_id}/results.json"
-        minio.fput_object(MINIO_BUCKET, output_key, str(results_json),
-                          content_type="application/json")
+        _minio_op(lambda: minio.fput_object(MINIO_BUCKET, output_key, str(results_json),
+                                            content_type="application/json"))
         logger.info("[%s] Uploaded %d hits to MinIO", run_id, len(results))
 
         # ── 4. Level summary ─────────────────────────────────────────────────

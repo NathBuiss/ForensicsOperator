@@ -137,7 +137,7 @@ export default function Settings() {
         <div className="flex items-center gap-2">
           <Sparkles size={15} className="text-purple-500" />
           <h2 className="font-semibold text-brand-text">AI Analysis</h2>
-          {!loading && config?.api_key_set && (
+          {!loading && config?.provider && (
             <span className="text-xs text-green-600 bg-green-50 border border-green-200 rounded-full px-2 py-0.5 flex items-center gap-1">
               <Check size={10} /> Configured
             </span>
@@ -166,15 +166,21 @@ export default function Settings() {
                     type="button"
                     onClick={() => {
                       set('provider', p.id)
-                      if (p.default_url && !form.base_url) set('base_url', p.default_url)
+                      set('base_url', p.default_url || '')
                     }}
-                    className={`text-xs py-2 px-3 rounded-lg border transition-colors text-left font-medium ${
+                    className={`relative text-xs py-2 px-3 rounded-lg border transition-colors text-left font-medium ${
                       form.provider === p.id
                         ? 'bg-brand-accent text-white border-brand-accent'
                         : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
                     }`}
                   >
                     {p.name}
+                    {config?.provider === p.id && (
+                      <span
+                        className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-green-400 border-2 border-white"
+                        title="Currently saved"
+                      />
+                    )}
                   </button>
                 ))}
               </div>
@@ -228,30 +234,30 @@ export default function Settings() {
               </div>
             )}
 
-            {/* Base URL (ollama / custom always; openai/anthropic optional override) */}
-            {(!provider.needs_key || form.base_url) && (
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">
-                  Base URL
-                  {provider.needs_key && <span className="text-gray-400 font-normal ml-1">(optional — override default endpoint)</span>}
-                </label>
-                <input
-                  className="input text-xs font-mono"
-                  placeholder={provider.default_url || 'https://api.openai.com/v1'}
-                  value={form.base_url}
-                  onChange={e => set('base_url', e.target.value)}
-                />
-              </div>
-            )}
-            {!provider.needs_key && !form.base_url && (
+            {/* Base URL — required for Ollama / Custom; optional override for OpenAI / Anthropic */}
+            {(provider.id === 'ollama' || provider.id === 'custom') && (
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Base URL</label>
                 <input
                   className="input text-xs font-mono"
-                  placeholder={provider.default_url || 'http://localhost:11434'}
+                  placeholder={provider.default_url}
                   value={form.base_url}
                   onChange={e => set('base_url', e.target.value)}
                   required
+                />
+              </div>
+            )}
+            {(provider.id === 'openai' || provider.id === 'anthropic') && form.base_url && (
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Base URL
+                  <span className="text-gray-400 font-normal ml-1">(optional — override default endpoint)</span>
+                </label>
+                <input
+                  className="input text-xs font-mono"
+                  placeholder="https://api.openai.com/v1"
+                  value={form.base_url}
+                  onChange={e => set('base_url', e.target.value)}
                 />
               </div>
             )}

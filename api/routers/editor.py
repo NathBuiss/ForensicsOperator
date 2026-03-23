@@ -21,11 +21,14 @@ from pydantic import BaseModel
 
 router = APIRouter(tags=["editor"])
 
-INGESTER_DIR = Path(os.getenv("INGESTER_DIR", "/app/ingester"))
-MODULES_DIR  = Path(os.getenv("MODULES_DIR",  "/app/modules"))
+INGESTER_DIR      = Path(os.getenv("INGESTER_DIR",  "/app/ingester"))
+MODULES_DIR       = Path(os.getenv("MODULES_DIR",   "/app/modules"))
+PLUGINS_DIR       = Path(os.getenv("PLUGINS_DIR",   "/app/plugins"))
+MODULES_REG_DIR   = Path(__file__).parent.parent / "modules_registry"
 
 INGESTER_SUFFIX = "_ingester.py"
 MODULE_SUFFIX   = "_module.py"
+PLUGIN_SUFFIX   = "_plugin.py"
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -144,6 +147,43 @@ def delete_module_editor(name: str):
     if not path.exists():
         raise HTTPException(404, "File not found")
     path.unlink()
+
+
+# ── Built-in ingester files (read-only reference) ─────────────────────────────
+
+@router.get("/editor/builtin-ingesters")
+def list_builtin_ingesters():
+    """List built-in plugin Python files (read-only reference)."""
+    return {"files": [dict(f, builtin=True) for f in _list(PLUGINS_DIR, PLUGIN_SUFFIX)]}
+
+
+@router.get("/editor/builtin-ingesters/{name}")
+def get_builtin_ingester(name: str):
+    path = _safe(PLUGINS_DIR, name, PLUGIN_SUFFIX)
+    return {"name": name, "content": _read(path), "builtin": True}
+
+
+# ── Built-in module YAML registry files (read-only reference) ─────────────────
+
+@router.get("/editor/builtin-modules")
+def list_builtin_modules():
+    """List module YAML registry files (read-only reference)."""
+    if not MODULES_REG_DIR.exists():
+        return {"files": []}
+    files = []
+    for f in sorted(MODULES_REG_DIR.glob("*.yaml")):
+        files.append({"name": f.name, "size": f.stat().st_size, "modified": f.stat().st_mtime, "builtin": True})
+    return {"files": files}
+
+
+@router.get("/editor/builtin-modules/{name}")
+def get_builtin_module_file(name: str):
+    if not name.endswith(".yaml") or "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(400, "Invalid file name")
+    path = MODULES_REG_DIR / name
+    if not path.exists():
+        raise HTTPException(404, "File not found")
+    return {"name": name, "content": path.read_text(encoding="utf-8"), "builtin": True}
 
 
 # ── Shared: syntax validation ──────────────────────────────────────────────────
