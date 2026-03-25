@@ -10,8 +10,7 @@ input_filenames:
   - access.log
   - access_log
   - error.log
-available: false
-unavailable_reason: Module not yet implemented — contribute at plugins/access_log/
+available: true
 category: Network
 tags:
   - web

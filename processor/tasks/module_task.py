@@ -271,19 +271,22 @@ def run_module(
         tool_meta: dict[str, str] = {"stdout": "", "stderr": "", "log": ""}
 
         RUNNERS = {
-            "hayabusa":         _run_hayabusa,
-            "strings":          _run_strings,
-            "hindsight":        _run_hindsight,
-            "regripper":        _run_regripper,
-            "wintriage":        _run_wintriage,
-            "yara":             _run_yara,
-            "exiftool":         _run_exiftool,
-            "volatility3":      _run_volatility3,
-            "oletools":         _run_oletools,
-            "pe_analysis":      _run_pe_analysis,
-            "strings_analysis": _run_strings_analysis,
-            "grep_search":      _run_grep_search,
-            "ole_analysis":     _run_oletools,  # alias — same engine as oletools
+            "hayabusa":            _run_hayabusa,
+            "strings":             _run_strings,
+            "hindsight":           _run_hindsight,
+            "regripper":           _run_regripper,
+            "wintriage":           _run_wintriage,
+            "yara":                _run_yara,
+            "exiftool":            _run_exiftool,
+            "volatility3":         _run_volatility3,
+            "oletools":            _run_oletools,
+            "pe_analysis":         _run_pe_analysis,
+            "strings_analysis":    _run_strings_analysis,
+            "grep_search":         _run_grep_search,
+            "ole_analysis":        _run_oletools,        # alias
+            "access_log_analysis": _run_access_log_analysis,
+            "cuckoo":              _run_cuckoo,
+            "de4dot":              _run_de4dot,
         }
         runner = RUNNERS.get(module_id)
 
@@ -2978,4 +2981,458 @@ def _run_grep_search(
                 tool_meta["stdout"] += f"  [{pat[:40]}…] → {count} match(es)\n"
 
     tool_meta["log"] += f"\nScanned {len(list(sources_dir.iterdir()))} file(s), {len(results)} pattern hits\n"
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Access Log Analysis
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ACCESS_LOG_RE = re.compile(
+    r'(?P<ip>\S+) \S+ \S+ \[(?P<ts>[^\]]+)\] "(?P<method>\S+) (?P<path>\S+) [^"]*" '
+    r'(?P<status>\d{3}) (?P<size>\S+)(?: "(?P<referer>[^"]*)" "(?P<ua>[^"]*)")?'
+)
+
+_SCANNER_UAS = re.compile(
+    r'sqlmap|nikto|nmap|masscan|dirbuster|wfuzz|gobuster|burpsuite|nessus|openvas'
+    r'|acunetix|w3af|nuclei|metasploit|zgrab|shodan|censys|internetmeasurement',
+    re.IGNORECASE,
+)
+
+_PATH_TRAVERSAL_RE = re.compile(
+    r'(?:\.\./|%2e%2e|%252e%252e|/etc/passwd|/etc/shadow|/proc/self|/windows/system32)',
+    re.IGNORECASE,
+)
+
+_ADMIN_PATHS_RE = re.compile(
+    r'(?:/wp-admin|/wp-login|/admin|/administrator|/phpmyadmin|/\.env|/\.git/|/config\.php'
+    r'|/shell\.php|/cmd\.php|/webshell)',
+    re.IGNORECASE,
+)
+
+_CMD_INJECT_RE = re.compile(r'(?:;ls|;id|;cat|%7cid|%3bls|\$\(|`cmd|%7C|union\s+select)', re.IGNORECASE)
+
+
+def _run_access_log_analysis(
+    run_id: str, work_dir: Path, sources_dir: Path, params: dict, tool_meta: dict
+) -> list[dict]:
+    """
+    Parse Apache / Nginx access logs and detect suspicious patterns:
+    path traversal, scanner user-agents, brute force, admin probing,
+    command injection, high error rates per IP.
+    """
+    results: list[dict] = []
+    files_processed = 0
+
+    for log_path in sorted(sources_dir.rglob("*")):
+        if not log_path.is_file():
+            continue
+        ext = log_path.suffix.lower()
+        if ext not in (".log", ".txt", "") and log_path.name.lower() not in (
+            "access.log", "access_log", "error.log"
+        ):
+            continue
+
+        tool_meta["stdout"] += f"\n=== Analysing {log_path.name} ===\n"
+        files_processed += 1
+
+        # Per-IP counters  {ip: {"4xx": N, "5xx": N, "req": N}}
+        ip_stats: dict[str, dict] = {}
+        # Auth brute force: {ip: {path: count}}
+        auth_attempts: dict[str, dict] = {}
+
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as fh:
+                for line_no, line in enumerate(fh, 1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    m = _ACCESS_LOG_RE.match(line)
+                    if not m:
+                        continue
+
+                    ip       = m.group("ip")
+                    ts_raw   = m.group("ts")
+                    method   = m.group("method")
+                    path     = m.group("path")
+                    status   = int(m.group("status"))
+                    size_raw = m.group("size")
+                    ua       = m.group("ua") or ""
+                    size     = int(size_raw) if size_raw.isdigit() else 0
+
+                    # Parse timestamp (Apache format: 01/Jan/2024:12:00:00 +0000)
+                    try:
+                        ts = datetime.strptime(ts_raw[:20], "%d/%b/%Y:%H:%M:%S").isoformat() + "Z"
+                    except ValueError:
+                        ts = ""
+
+                    # IP stats
+                    stat = ip_stats.setdefault(ip, {"4xx": 0, "5xx": 0, "req": 0})
+                    stat["req"] += 1
+                    if 400 <= status < 500:
+                        stat["4xx"] += 1
+                    elif 500 <= status < 600:
+                        stat["5xx"] += 1
+
+                    # Auth brute force (401 responses)
+                    if status == 401:
+                        auth_attempts.setdefault(ip, {}).setdefault(path, 0)
+                        auth_attempts[ip][path] += 1
+
+                    details_extra = {"ip": ip, "method": method, "path": path[:256],
+                                     "status": status, "ua": ua[:200]}
+
+                    # 1. Path traversal
+                    if _PATH_TRAVERSAL_RE.search(path):
+                        results.append({
+                            "id":          str(uuid.uuid4()),
+                            "timestamp":   ts,
+                            "level":       "high",
+                            "level_int":   LEVEL_INT["high"],
+                            "rule_title":  "Path Traversal Attempt",
+                            "computer":    log_path.name,
+                            "details_raw": json.dumps({**details_extra, "matched": path[:200]}),
+                            "message":     f"{ip} → {method} {path[:200]} ({status})",
+                        })
+
+                    # 2. Scanner user-agent
+                    if _SCANNER_UAS.search(ua):
+                        results.append({
+                            "id":          str(uuid.uuid4()),
+                            "timestamp":   ts,
+                            "level":       "high",
+                            "level_int":   LEVEL_INT["high"],
+                            "rule_title":  "Known Scanner User-Agent",
+                            "computer":    log_path.name,
+                            "details_raw": json.dumps({**details_extra, "ua": ua[:200]}),
+                            "message":     f"{ip} → Scanner detected: {ua[:100]}",
+                        })
+
+                    # 3. Admin path probing
+                    if _ADMIN_PATHS_RE.search(path) and status not in (200, 301, 302):
+                        results.append({
+                            "id":          str(uuid.uuid4()),
+                            "timestamp":   ts,
+                            "level":       "medium",
+                            "level_int":   LEVEL_INT["medium"],
+                            "rule_title":  "Admin/Sensitive Path Probe",
+                            "computer":    log_path.name,
+                            "details_raw": json.dumps(details_extra),
+                            "message":     f"{ip} → Probed {path[:200]} ({status})",
+                        })
+
+                    # 4. Command injection in URL
+                    if _CMD_INJECT_RE.search(path):
+                        results.append({
+                            "id":          str(uuid.uuid4()),
+                            "timestamp":   ts,
+                            "level":       "critical",
+                            "level_int":   LEVEL_INT["critical"],
+                            "rule_title":  "Command Injection Attempt in URL",
+                            "computer":    log_path.name,
+                            "details_raw": json.dumps(details_extra),
+                            "message":     f"{ip} → Injection payload in {path[:200]}",
+                        })
+
+        except Exception as exc:
+            tool_meta["stderr"] += f"\nError reading {log_path.name}: {exc}\n"
+            continue
+
+        # Post-scan: emit aggregate findings
+
+        # 5. Brute force: IP with ≥10 auth failures on same path
+        for ip, paths in auth_attempts.items():
+            for path, count in paths.items():
+                if count >= 10:
+                    level = "critical" if count >= 50 else "high"
+                    results.append({
+                        "id":          str(uuid.uuid4()),
+                        "timestamp":   "",
+                        "level":       level,
+                        "level_int":   LEVEL_INT[level],
+                        "rule_title":  "Authentication Brute Force",
+                        "computer":    log_path.name,
+                        "details_raw": json.dumps({"ip": ip, "path": path[:200], "401_count": count}),
+                        "message":     f"{ip} → {count} failed auth attempts on {path[:200]}",
+                    })
+
+        # 6. High error rate: IP with ≥20 4xx/5xx out of ≥30 total requests
+        for ip, stat in ip_stats.items():
+            errors = stat["4xx"] + stat["5xx"]
+            total  = stat["req"]
+            if total >= 30 and errors / total >= 0.5:
+                level = "high" if errors >= 100 else "medium"
+                results.append({
+                    "id":          str(uuid.uuid4()),
+                    "timestamp":   "",
+                    "level":       level,
+                    "level_int":   LEVEL_INT[level],
+                    "rule_title":  "High Error Rate from Single IP",
+                    "computer":    log_path.name,
+                    "details_raw": json.dumps({"ip": ip, "requests": total, "errors": errors,
+                                               "4xx": stat["4xx"], "5xx": stat["5xx"]}),
+                    "message":     f"{ip} → {errors}/{total} error responses ({int(100*errors/total)}%)",
+                })
+
+        tool_meta["stdout"] += f"  {files_processed} log file(s) — {len(results)} finding(s) so far\n"
+
+    tool_meta["log"] += f"\nAccess log analysis: {files_processed} file(s), {len(results)} findings\n"
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cuckoo Sandbox
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_cuckoo(
+    run_id: str, work_dir: Path, sources_dir: Path, params: dict, tool_meta: dict
+) -> list[dict]:
+    """
+    Submit files to a Cuckoo Sandbox instance and collect behavioral reports.
+    Requires CUCKOO_API_URL (and optionally CUCKOO_API_TOKEN) env vars.
+    """
+    import urllib.parse
+
+    api_url   = os.getenv("CUCKOO_API_URL", "").rstrip("/")
+    api_token = os.getenv("CUCKOO_API_TOKEN", "")
+
+    if not api_url:
+        raise RuntimeError(
+            "Cuckoo not configured — set CUCKOO_API_URL (e.g. http://cuckoo:8090). "
+            "See Settings → Integrations to configure."
+        )
+
+    def _cuckoo_req(path: str, method: str = "GET", data=None, files=None):
+        """Simple urllib-based Cuckoo API request."""
+        url     = f"{api_url}{path}"
+        headers = {}
+        if api_token:
+            headers["Authorization"] = f"Bearer {api_token}"
+
+        if files:
+            # Multipart form — build manually
+            boundary  = f"----FormBoundary{uuid.uuid4().hex}"
+            body_parts: list[bytes] = []
+            for field_name, (fname, fdata, ctype) in files.items():
+                body_parts.append(
+                    f"--{boundary}\r\nContent-Disposition: form-data; name=\"{field_name}\"; "
+                    f"filename=\"{fname}\"\r\nContent-Type: {ctype}\r\n\r\n".encode()
+                )
+                body_parts.append(fdata if isinstance(fdata, bytes) else fdata.read())
+                body_parts.append(b"\r\n")
+            body_parts.append(f"--{boundary}--\r\n".encode())
+            body = b"".join(body_parts)
+            headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+            req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        elif data is not None:
+            body = json.dumps(data).encode()
+            headers["Content-Type"] = "application/json"
+            req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        else:
+            req = urllib.request.Request(url, headers=headers, method=method)
+
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read())
+
+    results: list[dict] = []
+
+    for file_path in sorted(sources_dir.rglob("*")):
+        if not file_path.is_file():
+            continue
+
+        tool_meta["stdout"] += f"\n=== Submitting {file_path.name} to Cuckoo ===\n"
+
+        try:
+            # Submit file
+            with open(file_path, "rb") as fh:
+                resp = _cuckoo_req(
+                    "/tasks/create/file",
+                    method="POST",
+                    files={"file": (file_path.name, fh, "application/octet-stream")},
+                )
+            task_id = resp.get("task_id")
+            if not task_id:
+                tool_meta["stderr"] += f"No task_id returned for {file_path.name}\n"
+                continue
+
+            tool_meta["stdout"] += f"  Task ID: {task_id} — polling for completion…\n"
+
+            # Poll for completion (max 10 min)
+            max_wait = 600
+            waited   = 0
+            while waited < max_wait:
+                time.sleep(15)
+                waited += 15
+                status_resp = _cuckoo_req(f"/tasks/view/{task_id}")
+                status = (status_resp.get("task") or {}).get("status", "")
+                if status == "reported":
+                    break
+                if status in ("failed_analysis", "failed_processing"):
+                    raise RuntimeError(f"Cuckoo task {task_id} failed: {status}")
+
+            # Fetch report
+            report = _cuckoo_req(f"/tasks/report/{task_id}")
+
+            # Parse behavioral indicators
+            info      = report.get("info", {})
+            behavior  = report.get("behavior", {})
+            network   = report.get("network", {})
+            signatures = report.get("signatures", [])
+            score     = info.get("score", 0)
+
+            level = "critical" if score >= 8 else ("high" if score >= 5 else
+                    "medium" if score >= 3 else "low")
+
+            # One hit per signature detected
+            for sig in signatures:
+                sig_name = sig.get("name", "Unknown")
+                sig_desc = sig.get("description", "")
+                sig_severity = sig.get("severity", 1)
+                sig_level = "critical" if sig_severity >= 3 else ("high" if sig_severity == 2 else "medium")
+                results.append({
+                    "id":          str(uuid.uuid4()),
+                    "timestamp":   "",
+                    "level":       sig_level,
+                    "level_int":   LEVEL_INT.get(sig_level, 2),
+                    "rule_title":  f"Cuckoo: {sig_name}",
+                    "computer":    file_path.name,
+                    "details_raw": json.dumps({"description": sig_desc, "file": file_path.name,
+                                               "task_id": task_id, "score": score}),
+                    "message":     f"{file_path.name} — {sig_desc[:200]}",
+                })
+
+            # Network indicators
+            domains  = [d.get("domain", "") for d in network.get("domains", [])][:20]
+            hosts    = [h.get("ip", "") for h in network.get("hosts", [])][:20]
+            if domains or hosts:
+                results.append({
+                    "id":          str(uuid.uuid4()),
+                    "timestamp":   "",
+                    "level":       "medium",
+                    "level_int":   LEVEL_INT["medium"],
+                    "rule_title":  "Cuckoo: Network Activity",
+                    "computer":    file_path.name,
+                    "details_raw": json.dumps({"domains": domains, "hosts": hosts,
+                                               "task_id": task_id}),
+                    "message":     f"{file_path.name} — contacted {len(domains)} domain(s), {len(hosts)} host(s)",
+                })
+
+            # Summary hit
+            results.append({
+                "id":          str(uuid.uuid4()),
+                "timestamp":   "",
+                "level":       level,
+                "level_int":   LEVEL_INT.get(level, 1),
+                "rule_title":  f"Cuckoo: Analysis Score {score}/10",
+                "computer":    file_path.name,
+                "details_raw": json.dumps({"score": score, "task_id": task_id,
+                                           "file": file_path.name}),
+                "message":     f"{file_path.name} — Cuckoo score {score}/10",
+            })
+
+            tool_meta["stdout"] += f"  Score: {score}/10 — {len(signatures)} signature(s)\n"
+
+        except Exception as exc:
+            tool_meta["stderr"] += f"Cuckoo error for {file_path.name}: {exc}\n"
+            results.append({
+                "id":          str(uuid.uuid4()),
+                "timestamp":   "",
+                "level":       "low",
+                "level_int":   LEVEL_INT["low"],
+                "rule_title":  "Cuckoo: Submission Error",
+                "computer":    file_path.name,
+                "details_raw": json.dumps({"error": str(exc), "file": file_path.name}),
+                "message":     f"{file_path.name} — {exc}",
+            })
+
+    tool_meta["log"] += f"\nCuckoo analysis: {len(results)} findings\n"
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# de4dot — .NET Deobfuscator
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_de4dot(
+    run_id: str, work_dir: Path, sources_dir: Path, params: dict, tool_meta: dict
+) -> list[dict]:
+    """
+    Deobfuscate .NET assemblies using de4dot.
+    Looks for de4dot binary (native Linux build) or de4dot.exe via mono.
+    Reports the detected obfuscator type and deobfuscated output filename.
+    """
+    # Locate binary — native Linux build first, then Mono fallback
+    de4dot_bin  = shutil.which("de4dot")
+    mono_bin    = shutil.which("mono")
+    de4dot_exe  = shutil.which("de4dot.exe") or "/usr/local/bin/de4dot.exe"
+
+    if de4dot_bin:
+        cmd_prefix = [de4dot_bin]
+    elif mono_bin and Path(de4dot_exe).exists():
+        cmd_prefix = [mono_bin, de4dot_exe]
+    else:
+        raise RuntimeError(
+            "de4dot binary not found. Install de4dot (Linux build) or Mono + de4dot.exe. "
+            "See the Studio docs for setup instructions."
+        )
+
+    results: list[dict] = []
+
+    for file_path in sorted(sources_dir.rglob("*")):
+        if not file_path.is_file():
+            continue
+        if file_path.suffix.lower() not in (".exe", ".dll"):
+            continue
+
+        out_path = work_dir / f"{file_path.stem}_deob{file_path.suffix}"
+        cmd = cmd_prefix + [str(file_path), "-o", str(out_path)]
+        tool_meta["stdout"] += f"\n=== de4dot: {file_path.name} ===\n"
+
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120,
+            )
+            stdout = _strip_ansi(proc.stdout)
+            stderr = _strip_ansi(proc.stderr)
+            tool_meta["stdout"] += stdout
+            tool_meta["stderr"] += stderr
+
+            # Parse detected obfuscator from output
+            # de4dot prints: "Detected: Dotfuscator v4.x (7a8b...)"
+            obf_match = re.search(r'Detected:\s*(.+)', stdout, re.IGNORECASE)
+            obfuscator = obf_match.group(1).strip() if obf_match else "Unknown"
+
+            level     = "high" if obfuscator != "Unknown" else "medium"
+            success   = out_path.exists()
+
+            results.append({
+                "id":          str(uuid.uuid4()),
+                "timestamp":   "",
+                "level":       level,
+                "level_int":   LEVEL_INT.get(level, 2),
+                "rule_title":  f"Obfuscated .NET Assembly — {obfuscator}",
+                "computer":    file_path.name,
+                "details_raw": json.dumps({
+                    "file":         file_path.name,
+                    "obfuscator":   obfuscator,
+                    "deobfuscated": out_path.name if success else None,
+                    "exit_code":    proc.returncode,
+                }),
+                "message": (
+                    f"{file_path.name} — obfuscated with {obfuscator}; "
+                    f"{'deobfuscated OK' if success else 'deobfuscation failed'}"
+                ),
+            })
+
+            if success:
+                tool_meta["stdout"] += f"  → Deobfuscated output: {out_path.name}\n"
+            else:
+                tool_meta["stderr"] += f"  Deobfuscation may have failed (exit {proc.returncode})\n"
+
+        except subprocess.TimeoutExpired:
+            tool_meta["stderr"] += f"de4dot timed out for {file_path.name}\n"
+        except Exception as exc:
+            tool_meta["stderr"] += f"de4dot error for {file_path.name}: {exc}\n"
+
+    tool_meta["log"] += f"\nde4dot: {len(results)} file(s) processed\n"
     return results

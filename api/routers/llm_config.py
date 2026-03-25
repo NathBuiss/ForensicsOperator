@@ -598,3 +598,214 @@ def analyze_module_run(run_id: str) -> Any:
     run_svc.update_module_run(run_id, llm_analysis=json.dumps(analysis))
 
     return {"analysis": analysis, "run_id": run_id}
+
+
+# ── Event / log explanation ───────────────────────────────────────────────────
+
+_EVENT_EXPLAIN_PROMPT = """You are an expert digital forensic analyst.
+Explain the following forensic event(s) in plain language for an incident responder.
+For each event state:
+  • What happened (the action/activity)
+  • Why it matters (threat relevance or expected behaviour)
+  • Key fields (highlight the most important values)
+
+Be concise (3-6 sentences total). If you detect MITRE ATT&CK techniques, list their IDs.
+Respond in plain text — no JSON, no markdown headers."""
+
+
+class EventExplainRequest(BaseModel):
+    events: list              # list of event dicts from ES
+    context: str = ""         # optional analyst context ("this host was compromised")
+
+
+@router.post("/events/explain")
+def explain_events(req: EventExplainRequest) -> Any:
+    """
+    Use the configured LLM to explain one or more timeline events in plain language.
+
+    Designed for the Timeline view: analyst selects events → clicks "Explain" →
+    gets a human-readable interpretation.
+    """
+    r = _redis()
+    cfg = _get_config(r)
+    if not cfg or not cfg.get("enabled"):
+        raise HTTPException(
+            status_code=400,
+            detail="LLM not configured. Go to Settings → AI Analysis.",
+        )
+
+    # Build a compact event summary for the prompt
+    events_text = ""
+    for i, ev in enumerate(req.events[:20], 1):
+        ts   = ev.get("timestamp", "")
+        msg  = ev.get("message", "")[:400]
+        host = (ev.get("host") or {}).get("hostname", "")
+        user = (ev.get("user") or {}).get("name", "")
+        atype = ev.get("artifact_type", "")
+        events_text += f"{i}. [{atype}] {ts}"
+        if host: events_text += f" | host:{host}"
+        if user: events_text += f" | user:{user}"
+        events_text += f"\n   {msg}\n"
+
+    user_msg = f"Forensic events to explain:\n\n{events_text}"
+    if req.context:
+        user_msg += f"\nAnalyst context: {req.context}"
+
+    try:
+        provider = cfg.get("provider", "").lower()
+        model    = cfg.get("model", "")
+        api_key  = cfg.get("api_key", "")
+        base_url = cfg.get("base_url", "").rstrip("/")
+
+        import urllib.request as _ur
+
+        if provider == "anthropic":
+            body = json.dumps({
+                "model": model, "max_tokens": 800,
+                "system": _EVENT_EXPLAIN_PROMPT,
+                "messages": [{"role": "user", "content": user_msg}],
+            }).encode()
+            req_http = _ur.Request(
+                "https://api.anthropic.com/v1/messages", data=body,
+                headers={"Content-Type": "application/json", "x-api-key": api_key,
+                         "anthropic-version": "2023-06-01"}, method="POST",
+            )
+            with _ur.urlopen(req_http, timeout=60) as resp:
+                explanation = json.loads(resp.read())["content"][0]["text"]
+
+        elif provider == "ollama":
+            url = base_url or "http://localhost:11434"
+            body = json.dumps({
+                "model": model, "stream": False,
+                "messages": [{"role": "system", "content": _EVENT_EXPLAIN_PROMPT},
+                             {"role": "user", "content": user_msg}],
+            }).encode()
+            req_http = _ur.Request(f"{url}/api/chat", data=body,
+                                   headers={"Content-Type": "application/json"}, method="POST")
+            with _ur.urlopen(req_http, timeout=90) as resp:
+                explanation = json.loads(resp.read())["message"]["content"]
+
+        else:  # openai / custom
+            url = base_url or "https://api.openai.com/v1"
+            body = json.dumps({
+                "model": model, "max_tokens": 800, "temperature": 0.2,
+                "messages": [{"role": "system", "content": _EVENT_EXPLAIN_PROMPT},
+                             {"role": "user", "content": user_msg}],
+            }).encode()
+            req_http = _ur.Request(f"{url}/chat/completions", data=body,
+                                   headers={"Content-Type": "application/json",
+                                            "Authorization": f"Bearer {api_key}"}, method="POST")
+            with _ur.urlopen(req_http, timeout=60) as resp:
+                explanation = json.loads(resp.read())["choices"][0]["message"]["content"]
+
+    except Exception as exc:
+        logger.error("LLM call failed for event explanation: %s", exc)
+        raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}")
+
+    return {
+        "explanation": explanation,
+        "model_used": f"{cfg.get('provider', '?')}/{cfg.get('model', '?')}",
+        "events_count": len(req.events),
+    }
+
+
+# ── Sigma rule generation ─────────────────────────────────────────────────────
+
+class GenerateRuleRequest(BaseModel):
+    description: str          # "detect failed logon attempts above threshold"
+    context: str = ""         # optional: artifact type, log source, example event
+
+
+@router.post("/alert-rules/generate")
+def generate_alert_rule(req: GenerateRuleRequest) -> Any:
+    """
+    Use the configured LLM to generate an Elasticsearch query_string for an alert rule.
+
+    Returns {query, name, description, artifact_type} ready to prefill the rule form.
+    """
+    r = _redis()
+    cfg = _get_config(r)
+    if not cfg or not cfg.get("enabled"):
+        raise HTTPException(
+            status_code=400,
+            detail="LLM not configured. Go to Settings → AI Analysis.",
+        )
+
+    _RULE_GEN_PROMPT = (
+        "You are an expert Elasticsearch query builder for a digital forensics SIEM.\n"
+        "Generate an Elasticsearch query_string (not Sigma YAML) that detects the described threat.\n"
+        "Return ONLY a JSON object with these exact keys:\n"
+        '{"name": "Short rule name", "description": "One sentence description", '
+        '"artifact_type": "evtx|prefetch|access_log|... (leave empty for all)", '
+        '"query": "field:value AND field2:value2 (query_string syntax)", '
+        '"threshold": 1}\n'
+        "For EVTX rules use evtx.event_id, evtx.channel, evtx.provider_name.\n"
+        "For access logs use access_log.status, access_log.method, access_log.uri.\n"
+        "No markdown, no explanation — raw JSON only."
+    )
+
+    user_msg = f"Write a detection rule for: {req.description}"
+    if req.context:
+        user_msg += f"\nContext: {req.context}"
+
+    try:
+        raw = _call_llm_with_system(cfg, _RULE_GEN_PROMPT, user_msg)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}")
+
+    try:
+        clean = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        result = json.loads(clean)
+    except (json.JSONDecodeError, ValueError):
+        result = {"query": raw[:500], "name": req.description[:60], "description": "", "artifact_type": "", "threshold": 1}
+
+    result["generated_at"] = datetime.now(timezone.utc).isoformat()
+    result["model_used"]   = f"{cfg.get('provider', '?')}/{cfg.get('model', '?')}"
+    return result
+
+
+def _call_llm_with_system(cfg: dict, system_prompt: str, user_msg: str) -> str:
+    """Generic LLM call with a custom system prompt."""
+    provider = cfg.get("provider", "").lower()
+    model    = cfg.get("model", "")
+    api_key  = cfg.get("api_key", "")
+    base_url = cfg.get("base_url", "").rstrip("/")
+
+    import urllib.request as _ur
+
+    if provider == "anthropic":
+        body = json.dumps({
+            "model": model, "max_tokens": 600,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_msg}],
+        }).encode()
+        req_http = _ur.Request(
+            "https://api.anthropic.com/v1/messages", data=body,
+            headers={"Content-Type": "application/json", "x-api-key": api_key,
+                     "anthropic-version": "2023-06-01"}, method="POST",
+        )
+        with _ur.urlopen(req_http, timeout=60) as resp:
+            return json.loads(resp.read())["content"][0]["text"]
+    elif provider == "ollama":
+        url = base_url or "http://localhost:11434"
+        body = json.dumps({
+            "model": model, "stream": False,
+            "messages": [{"role": "system", "content": system_prompt},
+                         {"role": "user", "content": user_msg}],
+        }).encode()
+        req_http = _ur.Request(f"{url}/api/chat", data=body,
+                               headers={"Content-Type": "application/json"}, method="POST")
+        with _ur.urlopen(req_http, timeout=90) as resp:
+            return json.loads(resp.read())["message"]["content"]
+    else:
+        url = base_url or "https://api.openai.com/v1"
+        body = json.dumps({
+            "model": model, "max_tokens": 600, "temperature": 0.2,
+            "messages": [{"role": "system", "content": system_prompt},
+                         {"role": "user", "content": user_msg}],
+        }).encode()
+        req_http = _ur.Request(f"{url}/chat/completions", data=body,
+                               headers={"Content-Type": "application/json",
+                                        "Authorization": f"Bearer {api_key}"}, method="POST")
+        with _ur.urlopen(req_http, timeout=60) as resp:
+            return json.loads(resp.read())["choices"][0]["message"]["content"]

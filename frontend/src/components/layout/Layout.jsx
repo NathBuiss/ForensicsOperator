@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Puzzle, FolderOpen,
   Plus, X, ChevronRight, Bell, Sun, Moon, Cpu, PackageOpen, Layers,
   Code2, BookOpen, LogOut, UserCircle, Settings2, Stars,
-  Activity, Shield, Users, Database,
+  Activity, Shield, Users, FlaskConical,
 } from 'lucide-react'
 import { api } from '../../api/client'
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts'
@@ -55,6 +55,7 @@ export default function Layout({ user, onLogout }) {
     { key: 'g a', handler: () => navigate('/alert-rules') },
     { key: 'g i', handler: () => navigate('/ingesters') },
     { key: 'g s', handler: () => navigate('/studio') },
+    { key: 'g x', handler: () => navigate('/malware') },
     { key: 'shift+/', handler: () => setShowShortcuts(v => !v), skipInputs: false },
     { key: 'escape', handler: () => setShowShortcuts(false) },
   ])
@@ -150,6 +151,12 @@ export default function Layout({ user, onLogout }) {
             isActive ? 'nav-item-active' : 'nav-item-inactive'}>
             <Shield size={15} />
             Threat Intel
+          </NavLink>
+
+          <NavLink to="/malware" className={({ isActive }) =>
+            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
+            <FlaskConical size={15} />
+            Malware Analysis
           </NavLink>
 
           {/* ── Developer ────────────────────────────── */}

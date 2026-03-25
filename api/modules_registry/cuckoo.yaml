@@ -17,8 +17,7 @@ input_extensions:
   - .jar
   - .apk
   - .zip
-available: false
-unavailable_reason: "Requires a Cuckoo Sandbox instance. Configure the Cuckoo API URL in Settings → Integrations."
+available: true
 run_on_files: true
 config_keys:
   - cuckoo_api_url

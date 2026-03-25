@@ -70,6 +70,14 @@ def get_job(job_id: str) -> dict | None:
     return data
 
 
+def update_job(job_id: str, **fields) -> None:
+    """Patch arbitrary fields on an existing job hash."""
+    r = get_redis()
+    key = f"job:{job_id}"
+    r.hset(key, mapping={k: str(v) for k, v in fields.items()})
+    r.expire(key, JOB_TTL)
+
+
 def reset_job_for_retry(job_id: str) -> None:
     """Reset a FAILED job back to PENDING so it can be re-dispatched."""
     r = get_redis()

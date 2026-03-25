@@ -1,4 +1,5 @@
 """TraceX API — FastAPI entrypoint."""
+import asyncio
 import logging
 
 from fastapi import Depends, FastAPI, Request
@@ -97,6 +98,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def _on_startup():
     _bootstrap_admin()
+    asyncio.create_task(cti.start_cti_scheduler())
 
 
 # ── Auth dependencies for route protection ────────────────────────────────────

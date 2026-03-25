@@ -69,14 +69,23 @@ function StatBox({ icon: Icon, label, value, color }) {
 
 // ── Add / Edit Feed Modal ────────────────────────────────────────────────────
 
+const POLL_UNITS = [
+  { value: 'minutes', label: 'Minutes' },
+  { value: 'hours',   label: 'Hours'   },
+  { value: 'days',    label: 'Days'    },
+]
+
 function FeedModal({ feed, onClose, onSaved }) {
   const [form, setForm] = useState({
-    name:       feed?.name || '',
-    type:       feed?.type || 'taxii',
-    url:        feed?.url || '',
-    api_key:    '',
-    collection: feed?.collection || '',
-    enabled:    feed?.enabled !== false,
+    name:                 feed?.name || '',
+    type:                 feed?.type || 'taxii',
+    url:                  feed?.url || '',
+    api_key:              '',
+    collection:           feed?.collection || '',
+    poll_interval_value:  feed?.poll_interval_value ?? 24,
+    poll_interval_unit:   feed?.poll_interval_unit  ?? 'hours',
+    auto_pull:            feed?.auto_pull !== false,
+    enabled:              feed?.enabled   !== false,
   })
   const [saving, setSaving] = useState(false)
 
@@ -160,6 +169,37 @@ function FeedModal({ feed, onClose, onSaved }) {
               </label>
               <input value={form.collection} onChange={e => set('collection', e.target.value)}
                 placeholder="Collection ID or name" className="input text-xs font-mono" />
+            </div>
+          )}
+
+          {/* Auto-pull schedule (not for manual feeds) */}
+          {form.type !== 'manual' && (
+            <div className="space-y-2 p-3 border border-gray-200 rounded-lg bg-gray-50">
+              <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer select-none">
+                <input type="checkbox" checked={form.auto_pull} onChange={e => set('auto_pull', e.target.checked)}
+                  className="rounded border-gray-300 accent-brand-accent" />
+                <span className="font-medium">Auto-pull on schedule</span>
+              </label>
+              {form.auto_pull && (
+                <div className="flex items-center gap-2 pl-5">
+                  <span className="text-xs text-gray-500 whitespace-nowrap">Every</span>
+                  <input
+                    type="number" min="1" max="9999"
+                    value={form.poll_interval_value}
+                    onChange={e => set('poll_interval_value', parseInt(e.target.value) || 1)}
+                    className="input text-xs w-20 py-1"
+                  />
+                  <select
+                    value={form.poll_interval_unit}
+                    onChange={e => set('poll_interval_unit', e.target.value)}
+                    className="input text-xs py-1"
+                  >
+                    {POLL_UNITS.map(u => (
+                      <option key={u.value} value={u.value}>{u.label}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
           )}
 
@@ -440,9 +480,18 @@ export default function ThreatIntel() {
                     {feed.url && (
                       <p className="text-[11px] text-gray-500 font-mono truncate mb-0.5">{feed.url}</p>
                     )}
-                    <div className="flex items-center gap-3 text-[10px] text-gray-400">
+                    <div className="flex items-center gap-3 text-[10px] text-gray-400 flex-wrap">
                       <span>Last pull: {fmtDate(feed.last_pull)}</span>
                       <span>{(feed.ioc_count ?? 0).toLocaleString()} IOCs</span>
+                      {feed.type !== 'manual' && feed.auto_pull !== false && (
+                        <span className="flex items-center gap-1 text-green-600">
+                          <RefreshCw size={9} />
+                          Every {feed.poll_interval_value ?? feed.poll_interval_hours ?? 24} {feed.poll_interval_unit ?? 'hours'}
+                        </span>
+                      )}
+                      {feed.type !== 'manual' && feed.auto_pull === false && (
+                        <span className="text-gray-400">Manual pull only</span>
+                      )}
                     </div>
                   </div>
 

@@ -24,7 +24,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 try:
@@ -35,7 +35,8 @@ except ImportError:
 
 from services.jobs import list_case_jobs
 from services.cases import get_case
-from services import module_runs as run_svc
+from services import module_runs as run_svc, storage
+from services.module_runs import MALWARE_CASE_ID
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -268,6 +269,81 @@ def get_module_run(run_id: str):
     if not run:
         raise HTTPException(status_code=404, detail="Module run not found")
     return run
+
+
+# ── Standalone malware analysis (no case required) ────────────────────────────
+
+class StandaloneRunRequest(BaseModel):
+    module_id: str
+    files: list[dict]   # [{filename: str, minio_key: str}]
+    params: dict[str, Any] = {}
+
+
+@router.post("/malware-analysis/upload", status_code=201)
+async def upload_malware_file(file: UploadFile = File(...)):
+    """
+    Upload a file directly for standalone malware analysis.
+    Returns the MinIO key so it can be referenced in a subsequent /malware-analysis/runs call.
+    """
+    upload_id = uuid.uuid4().hex
+    filename = file.filename or "upload"
+    minio_key = f"malware_analysis/uploads/{upload_id}/{filename}"
+
+    content = await file.read()
+    size = len(content)
+    storage.upload_file(minio_key, content)
+
+    logger.info("Malware upload: %s → %s (%d bytes)", filename, minio_key, size)
+    return {"upload_id": upload_id, "filename": filename, "minio_key": minio_key, "size": size}
+
+
+@router.post("/malware-analysis/runs", status_code=201)
+def create_standalone_run(req: StandaloneRunRequest):
+    """
+    Create a standalone malware analysis run (Cuckoo, de4dot, …).
+    Files are either directly-uploaded artifacts or MinIO keys from an existing case.
+    """
+    # Resolve module
+    module = _get_modules_by_id().get(req.module_id)
+    if not module:
+        custom_by_id = {m["id"]: m for m in _get_custom_modules()}
+        module = custom_by_id.get(req.module_id)
+    if not module:
+        raise HTTPException(status_code=404, detail=f"Module '{req.module_id}' not found")
+    if not module.get("available"):
+        raise HTTPException(status_code=400, detail=module.get("unavailable_reason", "Module unavailable"))
+    if not req.files:
+        raise HTTPException(status_code=400, detail="At least one file is required")
+
+    source_files = [
+        {"job_id": "", "filename": f.get("filename", ""), "minio_key": f.get("minio_key", "")}
+        for f in req.files
+    ]
+
+    run_id = uuid.uuid4().hex
+    run_svc.create_module_run(run_id, MALWARE_CASE_ID, req.module_id, source_files)
+
+    try:
+        from celery import Celery
+        celery_app = Celery(broker=settings.REDIS_URL)
+        celery_app.send_task(
+            "module.run",
+            args=[run_id, MALWARE_CASE_ID, req.module_id, source_files, req.params],
+            task_id=run_id,
+            queue="modules",
+        )
+    except Exception as exc:
+        logger.error("Celery dispatch failed for standalone run %s: %s", run_id, exc)
+        run_svc.update_module_run(run_id, status="FAILED", error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Task dispatch failed: {exc}")
+
+    return {"run_id": run_id, "status": "PENDING"}
+
+
+@router.get("/malware-analysis/runs")
+def list_standalone_runs():
+    """List all standalone malware analysis runs (newest first)."""
+    return {"runs": run_svc.list_malware_runs()}
 
 
 # ── YARA utilities ────────────────────────────────────────────────────────────

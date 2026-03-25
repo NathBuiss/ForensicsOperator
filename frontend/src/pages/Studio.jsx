@@ -308,6 +308,9 @@ export default function Studio() {
   const [sidebarTab, setSidebarTab]     = useState('ingesters')
   const [ingesterFiles, setIngFiles]    = useState([])
   const [moduleFiles, setModFiles]      = useState([])
+  // YAML module registry files shown as read-only reference
+  const [refModFiles, setRefModFiles]   = useState([])
+  const [showRef, setShowRef]           = useState(false)
 
   // Multi-tab state — each tab: { type, name, code, originalCode, loading,
   //   saving, validating, validation, saveMsg, copied }
@@ -340,9 +343,12 @@ export default function Studio() {
         api.editor.listBuiltinIngesters().catch(() => ({ files: [] })),
         api.editor.listBuiltinModules().catch(() => ({ files: [] })),
       ])
-      // Built-ins first (read-only), then custom (editable)
+      // Ingesters: built-in Python files first, then custom
       setIngFiles([...(ingBuiltin.files || []), ...(ing.files || [])])
-      setModFiles([...(modBuiltin.files || []), ...(mod.files || [])])
+      // Modules: only custom Python modules in the editable list
+      setModFiles(mod.files || [])
+      // YAML built-in module registry files go to reference section only
+      setRefModFiles(modBuiltin.files || [])
     } catch (_) {}
   }, [])
 
@@ -382,9 +388,12 @@ export default function Studio() {
       return
     }
 
+    // Read-only = YAML registry reference files opened from the ref panel
+    const readOnly = builtin && type === 'module'
+
     // Add a new loading tab and make it active
     const newTab = {
-      type, name, builtin,
+      type, name, builtin, readOnly,
       code: '', originalCode: '',
       loading: true, saving: false, validating: false,
       validation: null, saveMsg: null, copied: false,
@@ -619,7 +628,7 @@ export default function Studio() {
         </div>
 
         {/* File list */}
-        <div className="flex-1 overflow-y-auto py-1">
+        <div className="flex-1 overflow-y-auto py-1 min-h-0">
           {sidebarFiles.length === 0 ? (
             <div className="px-3 py-4 text-center">
               <FileCode2 size={20} className="text-gray-300 mx-auto mb-2" />
@@ -684,6 +693,34 @@ export default function Studio() {
             )
           })()}
         </div>
+
+        {/* ── Module Registry Reference (YAML files, read-only) ─── */}
+        {sidebarTab === 'modules' && refModFiles.length > 0 && (
+          <div className="border-t border-gray-200 flex-shrink-0">
+            <button
+              onClick={() => setShowRef(v => !v)}
+              className="w-full flex items-center gap-1.5 px-3 py-2 text-[10px] font-semibold text-gray-500 uppercase tracking-widest hover:bg-gray-50 transition-colors"
+            >
+              <BookOpen size={10} />
+              Registry Reference
+              <ChevronRight size={10} className={`ml-auto transition-transform ${showRef ? 'rotate-90' : ''}`} />
+            </button>
+            {showRef && (
+              <div className="py-1 max-h-40 overflow-y-auto">
+                {refModFiles.map(f => (
+                  <button
+                    key={f.name}
+                    onClick={() => openFile('module', f.name, true)}
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-gray-400 hover:bg-gray-50 hover:text-gray-600 transition-colors"
+                  >
+                    <Lock size={9} className="flex-shrink-0 opacity-50" />
+                    <span className="text-[10px] font-mono truncate flex-1">{f.name}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </aside>
 
       {/* ── Editor pane ─────────────────────────────────────────────────────── */}
@@ -789,32 +826,40 @@ export default function Studio() {
                     ? <><Check size={12} className="text-green-600" /> Copied</>
                     : <><Copy size={12} /> Copy</>}
                 </button>
-                <button
-                  onClick={handleValidate}
-                  disabled={activeTab.validating}
-                  className="btn-outline text-xs py-1 px-2"
-                >
-                  {activeTab.validating
-                    ? <RefreshCw size={12} className="animate-spin" />
-                    : <Play size={12} />}
-                  {activeTab.validating ? 'Checking…' : 'Validate'}
-                </button>
-                <button
-                  onClick={handleSave}
-                  disabled={activeTab.saving || !isDirty}
-                  className="btn-primary text-xs py-1 px-2"
-                >
-                  {activeTab.saving
-                    ? <RefreshCw size={12} className="animate-spin" />
-                    : <Save size={12} />}
-                  {activeTab.saving ? 'Saving…' : 'Save'}
-                </button>
-                <button
-                  onClick={() => setShowDelete(true)}
-                  className="btn-danger text-xs py-1 px-2"
-                >
-                  <Trash2 size={12} />
-                </button>
+                {activeTab.readOnly ? (
+                  <span className="badge bg-gray-100 text-gray-500 text-[10px] flex items-center gap-1">
+                    <Lock size={9} /> Read-only reference
+                  </span>
+                ) : (
+                  <>
+                    <button
+                      onClick={handleValidate}
+                      disabled={activeTab.validating}
+                      className="btn-outline text-xs py-1 px-2"
+                    >
+                      {activeTab.validating
+                        ? <RefreshCw size={12} className="animate-spin" />
+                        : <Play size={12} />}
+                      {activeTab.validating ? 'Checking…' : 'Validate'}
+                    </button>
+                    <button
+                      onClick={handleSave}
+                      disabled={activeTab.saving || !isDirty}
+                      className="btn-primary text-xs py-1 px-2"
+                    >
+                      {activeTab.saving
+                        ? <RefreshCw size={12} className="animate-spin" />
+                        : <Save size={12} />}
+                      {activeTab.saving ? 'Saving…' : 'Save'}
+                    </button>
+                    <button
+                      onClick={() => setShowDelete(true)}
+                      className="btn-danger text-xs py-1 px-2"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </>
+                )}
               </div>
             </div>
 
@@ -838,7 +883,8 @@ export default function Studio() {
                 <CodeEditor
                   key={activeTabKey}
                   value={activeTab.code}
-                  onChange={v => updateTab(activeTab.type, activeTab.name, { code: v })}
+                  onChange={v => !activeTab.readOnly && updateTab(activeTab.type, activeTab.name, { code: v })}
+                  readOnly={activeTab.readOnly}
                 />
               )}
             </div>

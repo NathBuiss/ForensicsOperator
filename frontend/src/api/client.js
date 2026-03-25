@@ -146,10 +146,14 @@ export const api = {
   },
 
   llm: {
-    getConfig:    ()     => request('GET',    '/admin/llm-config'),
-    updateConfig: (data) => request('PUT',    '/admin/llm-config', data),
-    clearConfig:  ()     => request('DELETE', '/admin/llm-config'),
-    testConfig:   ()     => request('POST',   '/admin/llm-config/test'),
+    getConfig:         ()     => request('GET',    '/admin/llm-config'),
+    updateConfig:      (data) => request('PUT',    '/admin/llm-config', data),
+    clearConfig:       ()     => request('DELETE', '/admin/llm-config'),
+    testConfig:        ()     => request('POST',   '/admin/llm-config/test'),
+    analyzeModuleRun:  (runId)     => request('POST', `/module-runs/${runId}/analyze`),
+    analyzeAlertRule:  (data)      => request('POST', '/alert-rules/analyze', data),
+    explainEvents:     (data)      => request('POST', '/events/explain', data),
+    generateRule:      (data)      => request('POST', '/alert-rules/generate', data),
   },
 
   editor: {
@@ -198,6 +202,12 @@ export const api = {
     iocStats:     () => request('GET', '/cti/iocs/stats'),
     clearIOCs:    () => request('DELETE', '/cti/iocs'),
     matchCase:    (caseId) => request('POST', `/cases/${caseId}/cti/match`),
+  },
+
+  malware: {
+    uploadFile: (formData) => request('POST', '/malware-analysis/upload', formData),
+    createRun:  (data)     => request('POST', '/malware-analysis/runs', data),
+    listRuns:   ()         => request('GET',  '/malware-analysis/runs'),
   },
 
   collector: {

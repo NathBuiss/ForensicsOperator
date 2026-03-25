@@ -9,6 +9,7 @@ IOCs are stored in Redis and automatically matched when alert rules or modules r
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -52,7 +53,9 @@ class FeedCreate(BaseModel):
     url: str = ""
     api_key: str = ""
     collection: str = ""
-    poll_interval_hours: int = 24
+    poll_interval_value: int = 24
+    poll_interval_unit: str = "hours"   # "minutes" | "hours" | "days"
+    auto_pull: bool = True
 
 
 class FeedUpdate(BaseModel):
@@ -60,7 +63,9 @@ class FeedUpdate(BaseModel):
     url: Optional[str] = None
     api_key: Optional[str] = None
     collection: Optional[str] = None
-    poll_interval_hours: Optional[int] = None
+    poll_interval_value: Optional[int] = None
+    poll_interval_unit: Optional[str] = None
+    auto_pull: Optional[bool] = None
     enabled: Optional[bool] = None
 
 
@@ -81,6 +86,79 @@ def _save_feeds(r: redis_lib.Redis, feeds: list[dict]) -> None:
 
 def _find_feed(feeds: list[dict], feed_id: str) -> dict | None:
     return next((f for f in feeds if f["id"] == feed_id), None)
+
+
+# ── Scheduler helpers ────────────────────────────────────────────────────────
+
+def _feed_interval_seconds(feed: dict) -> int:
+    """Return the polling interval in seconds for a feed, with backward compat."""
+    val  = int(feed.get("poll_interval_value") or feed.get("poll_interval_hours") or 24)
+    unit = feed.get("poll_interval_unit", "hours")
+    mult = {"minutes": 60, "hours": 3600, "days": 86400}.get(unit, 3600)
+    return max(60, val * mult)   # never less than 1 minute
+
+
+def _pull_feed_now(feed: dict, r: redis_lib.Redis, feeds: list[dict]) -> int:
+    """Internal (non-HTTP) version of pull_feed. Returns ioc_count on success."""
+    feed_type = feed.get("type", "")
+    if feed_type == "manual":
+        return 0
+    try:
+        if feed_type == "taxii":
+            bundle = _taxii_fetch(feed)
+        elif feed_type == "stix_url":
+            bundle = _stix_url_fetch(feed)
+        else:
+            return 0
+        _remove_feed_iocs(r, feed["id"])
+        count = _process_stix_bundle(r, bundle, feed_id=feed["id"], feed_name=feed["name"])
+        feed["last_pull"] = datetime.now(timezone.utc).isoformat()
+        feed["ioc_count"] = count
+        _save_feeds(r, feeds)
+        return count
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Auto-pull failed for feed %s: %s", feed["id"], exc)
+        return 0
+
+
+async def start_cti_scheduler() -> None:
+    """
+    Background coroutine — started at API startup.
+    Wakes every 60 s and auto-pulls feeds whose interval has elapsed.
+    """
+    logger.info("CTI scheduler started")
+    while True:
+        await asyncio.sleep(60)
+        try:
+            r = _redis()
+            feeds = _load_feeds(r)
+            now = datetime.now(timezone.utc)
+            for feed in feeds:
+                if not feed.get("enabled", True):
+                    continue
+                if not feed.get("auto_pull", True):
+                    continue
+                if feed.get("type") == "manual":
+                    continue
+                interval_sec = _feed_interval_seconds(feed)
+                last_pull = feed.get("last_pull")
+                if last_pull:
+                    try:
+                        elapsed = (now - datetime.fromisoformat(last_pull)).total_seconds()
+                        if elapsed < interval_sec:
+                            continue
+                    except ValueError:
+                        pass  # malformed timestamp — pull anyway
+                logger.info("CTI auto-pull: feed %s (%s)", feed["id"], feed.get("name", "?"))
+                # Reload feeds inside loop so parallel saves are captured
+                feeds_fresh = _load_feeds(r)
+                feed_fresh  = _find_feed(feeds_fresh, feed["id"])
+                if feed_fresh:
+                    _pull_feed_now(feed_fresh, r, feeds_fresh)
+        except Exception as exc:
+            logger.warning("CTI scheduler tick error: %s", exc)
 
 
 # ── STIX pattern parser ─────────────────────────────────────────────────────
@@ -324,20 +402,24 @@ def add_feed(body: FeedCreate):
     if body.type != "manual" and not body.url:
         raise HTTPException(status_code=422, detail="URL is required for non-manual feeds.")
 
+    if body.poll_interval_unit not in ("minutes", "hours", "days"):
+        raise HTTPException(status_code=422, detail="poll_interval_unit must be 'minutes', 'hours', or 'days'.")
     r = _redis()
     feeds = _load_feeds(r)
     feed = {
-        "id":                  str(uuid.uuid4())[:8],
-        "name":                body.name,
-        "type":                body.type,
-        "url":                 body.url,
-        "api_key":             body.api_key,
-        "collection":          body.collection,
-        "poll_interval_hours": body.poll_interval_hours,
-        "enabled":             True,
-        "last_pull":           None,
-        "ioc_count":           0,
-        "created_at":          datetime.now(timezone.utc).isoformat(),
+        "id":                   str(uuid.uuid4())[:8],
+        "name":                 body.name,
+        "type":                 body.type,
+        "url":                  body.url,
+        "api_key":              body.api_key,
+        "collection":           body.collection,
+        "poll_interval_value":  body.poll_interval_value,
+        "poll_interval_unit":   body.poll_interval_unit,
+        "auto_pull":            body.auto_pull,
+        "enabled":              True,
+        "last_pull":            None,
+        "ioc_count":            0,
+        "created_at":           datetime.now(timezone.utc).isoformat(),
     }
     feeds.append(feed)
     _save_feeds(r, feeds)

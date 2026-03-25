@@ -4,6 +4,5 @@ description: ".NET assembly deobfuscation using de4dot. Removes known obfuscatio
 input_extensions:
   - .exe
   - .dll
-available: false
-unavailable_reason: "Requires .NET runtime and de4dot binary. Windows/.NET only — not supported on Linux containers."
+available: true
 run_on_files: true

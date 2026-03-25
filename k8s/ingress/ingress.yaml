@@ -15,6 +15,25 @@ spec:
     memRequestBodyBytes: 33554432   # 32 MB
     maxResponseBodyBytes: 0
 ---
+# ServersTransport: disable response-header timeout for the API backend.
+# Without this, Traefik kills connections when the API takes >60 s to start
+# responding — which happened when streaming large (500 MB+) files to MinIO
+# synchronously.  Now that MinIO upload is handled in BackgroundTasks (after
+# the HTTP response is sent), this guard is extra insurance.
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: api-no-timeout
+  namespace: __FO_NAMESPACE__
+spec:
+  serverName: ""
+  insecureSkipVerify: false
+  maxIdleConnsPerHost: 32
+  forwardingTimeouts:
+    dialTimeout: "30s"
+    responseHeaderTimeout: "0s"   # wait indefinitely for response headers
+    idleConnTimeout: "120s"
+---
 # HTTP → HTTPS permanent redirect
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -72,6 +91,8 @@ metadata:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
     # Apply upload-buffering middleware: removes body-size cap for large evidence files
     traefik.ingress.kubernetes.io/router.middlewares: __FO_NAMESPACE__-upload-buffering@kubernetescrd
+    # No response-header timeout: API returns immediately (MinIO upload is async)
+    traefik.ingress.kubernetes.io/service.servertransport: __FO_NAMESPACE__-api-no-timeout@kubernetescrd
 spec:
   ingressClassName: traefik
   tls:
