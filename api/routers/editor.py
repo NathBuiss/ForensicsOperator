@@ -138,6 +138,12 @@ def get_module_editor(name: str):
 def save_module_editor(name: str, body: FileWrite):
     path = _safe(MODULES_DIR, name, MODULE_SUFFIX)
     _write(path, body.content)
+    # Invalidate the modules list cache so new/updated modules appear immediately
+    try:
+        from routers.modules import invalidate_modules_cache
+        invalidate_modules_cache()
+    except Exception:
+        pass
     return {"saved": True, "name": name}
 
 
@@ -147,6 +153,11 @@ def delete_module_editor(name: str):
     if not path.exists():
         raise HTTPException(404, "File not found")
     path.unlink()
+    try:
+        from routers.modules import invalidate_modules_cache
+        invalidate_modules_cache()
+    except Exception:
+        pass
 
 
 # ── Built-in ingester plugin files (editable) ─────────────────────────────────

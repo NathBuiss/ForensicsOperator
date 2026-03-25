@@ -45,6 +45,11 @@ spec:
                 secretKeyRef:
                   name: api-auth-secret
                   key: JWT_SECRET
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: api-auth-secret
+                  key: ADMIN_PASSWORD
           resources:
             requests:
               memory: "512Mi"

@@ -112,6 +112,12 @@ def _get_modules() -> list[dict]:
     return _MODULES_CACHE
 
 
+def invalidate_modules_cache() -> None:
+    """Force the YAML module registry to reload on next request."""
+    global _MODULES_CACHE
+    _MODULES_CACHE = None
+
+
 def _get_modules_by_id() -> dict[str, dict]:
     return {m["id"]: m for m in _get_modules()}
 
@@ -199,6 +205,10 @@ def create_module_run(case_id: str, req: CreateModuleRunRequest):
         raise HTTPException(status_code=404, detail="Case not found")
 
     module = _get_modules_by_id().get(req.module_id)
+    if not module:
+        # Also check custom Python modules from the modules/ directory
+        custom_by_id = {m["id"]: m for m in _get_custom_modules()}
+        module = custom_by_id.get(req.module_id)
     if not module:
         raise HTTPException(status_code=404, detail=f"Module '{req.module_id}' not found")
     if not module.get("available"):

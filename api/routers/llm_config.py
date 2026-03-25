@@ -22,14 +22,20 @@ from datetime import datetime, timezone
 from typing import Any
 
 import redis as redis_lib
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from auth.dependencies import require_admin
 from config import settings
 from services import module_runs as run_svc
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["llm"])
+
+# Shorthand: applied to each /admin/llm-config route so only admins can touch config.
+# The router itself is registered with analyst_or_admin in main.py so that
+# analysts can reach the /analyze and /generate endpoints.
+_admin_dep = [Depends(require_admin)]
 
 _LLM_CONFIG_KEY = "fo:llm_config"
 
@@ -65,7 +71,7 @@ class LLMConfigOut(BaseModel):
 
 # ── Config endpoints ──────────────────────────────────────────────────────────
 
-@router.get("/admin/llm-config", response_model=LLMConfigOut)
+@router.get("/admin/llm-config", response_model=LLMConfigOut, dependencies=_admin_dep)
 def get_llm_config():
     """Return current LLM configuration (API key redacted)."""
     r = _redis()
@@ -79,7 +85,7 @@ def get_llm_config():
     )
 
 
-@router.put("/admin/llm-config", response_model=LLMConfigOut)
+@router.put("/admin/llm-config", response_model=LLMConfigOut, dependencies=_admin_dep)
 def update_llm_config(body: LLMConfigIn):
     """Save LLM configuration. Merges with existing config so the key is not
     cleared when only model/provider is updated and api_key is left empty."""
@@ -104,13 +110,13 @@ def update_llm_config(body: LLMConfigIn):
     )
 
 
-@router.delete("/admin/llm-config", status_code=204)
+@router.delete("/admin/llm-config", status_code=204, dependencies=_admin_dep)
 def clear_llm_config():
     """Remove LLM configuration."""
     _redis().delete(_LLM_CONFIG_KEY)
 
 
-@router.post("/admin/llm-config/test")
+@router.post("/admin/llm-config/test", dependencies=_admin_dep)
 def test_llm_config():
     """
     Send a trivial one-token prompt to verify the LLM backend is reachable.

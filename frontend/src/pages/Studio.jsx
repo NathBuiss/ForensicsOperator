@@ -76,69 +76,98 @@ ${name}_module.py — custom analysis module: ${name.replace(/_/g, ' ')}.
 
 Naming rules
   • File must end with _module.py
-  • MODULE_NAME must match the file stem before _module
+  • MODULE_NAME is displayed in the Modules panel
+  • INPUT_EXTENSIONS filters which source files are shown when launching
 
-Docs: /docs  →  "Creating a Custom Module"
+Security model
+  • Code runs in an isolated subprocess with resource limits:
+      CPU: 3600s   Memory: 2 GB   File writes: 500 MB   Subprocesses: 64
+  • Sensitive env vars are stripped before your code runs
+  • tmp_dir is the only writable work area (cleaned up automatically)
 """
-import json
-import os
+import re
+import subprocess
 from pathlib import Path
 
-# ── Metadata (read by the API to display in the Modules list) ─────────────────
+# ── Module metadata (read by the platform to populate the Modules list) ────────
 
 MODULE_NAME        = "${name.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}"
 MODULE_DESCRIPTION = "Custom analysis module — describe what it does here"
-# INPUT_EXTENSIONS   = [".log", ".txt"]   # leave empty to accept any file
+
+# File extensions this module accepts (lower-case, with dot). Leave empty for any.
 INPUT_EXTENSIONS   = []
+# Exact filenames to match regardless of extension (e.g. ["NTUSER.DAT", "$MFT"])
 INPUT_FILENAMES    = []
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Entry point ────────────────────────────────────────────────────────────────
 
-def run(run_id: str, case_id: str, source_files: list, params: dict,
-        minio_client, redis_client, tmp_dir: Path) -> dict:
+def run(
+    run_id: str,
+    case_id: str,
+    source_files: list,
+    params: dict,
+    minio_client,       # minio.Minio — fget_object / put_object / etc.
+    redis_client,       # redis.Redis (decode_responses=True)
+    tmp_dir: Path,      # clean temp directory, wiped after the run
+) -> list:
     """
-    Execute the module against the provided source files.
+    Execute the module and return a list of findings.
 
-    Parameters
-    ----------
-    run_id        Unique ID for this run (string)
-    case_id       Case this run belongs to
-    source_files  List of dicts: [{job_id, filename, minio_key}]
-    params        User-supplied parameters (arbitrary dict)
-    minio_client  Boto3-compatible MinIO client
-    redis_client  Redis client (decode_responses=True)
-    tmp_dir       pathlib.Path to a clean temporary directory
-
-    Returns
-    -------
-    dict with keys:
-      hits         list of result dicts (required)
-      total_hits   int  (optional — computed from len(hits) if omitted)
+    Each finding dict must have at minimum:
+      filename  str   — source file the finding came from
+      message   str   — human-readable description
+      level     str   — "critical" | "high" | "medium" | "low" | "info"
+    Additional fields are stored and rendered in the results panel as-is.
     """
+    MINIO_BUCKET = "forensics-cases"
     hits = []
 
     for sf in source_files:
         local_path = tmp_dir / sf["filename"]
 
-        # Download the source file from MinIO
-        minio_client.fget_object(
-            os.getenv("MINIO_BUCKET", "forensics-cases"),
-            sf["minio_key"],
-            str(local_path),
-        )
+        # ── Download source file from MinIO ────────────────────────────────────
+        minio_client.fget_object(MINIO_BUCKET, sf["minio_key"], str(local_path))
 
-        # ── TODO: replace with your real analysis logic ───────────────────────
-        hits.append({
-            "filename": sf["filename"],
-            "message":  f"Processed {sf['filename']}",
-            "level":    "info",
-        })
+        # ── Example: extract printable strings and flag suspicious patterns ────
+        try:
+            proc = subprocess.run(
+                ["strings", "-n", "8", str(local_path)],
+                capture_output=True, text=True, timeout=120,
+            )
+            strings_found = proc.stdout.splitlines()
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            # Pure-Python fallback if 'strings' binary is unavailable
+            with open(local_path, "rb") as fh:
+                data = fh.read()
+            strings_found = [
+                s.decode("ascii", errors="replace")
+                for s in re.findall(rb"[ -~]{8,}", data)
+            ]
 
-    return {
-        "hits":       hits,
-        "total_hits": len(hits),
-    }
+        # Flag patterns of interest — replace or extend this dict
+        ioc_patterns = {
+            r"(?i)powershell":               ("high",     "PowerShell reference"),
+            r"(?i)mimikatz":                 ("critical", "Mimikatz reference"),
+            r"(?i)cmd\\.exe":                ("medium",   "cmd.exe reference"),
+            r"https?://[^\\s]{10,}":         ("medium",   "URL found"),
+            r"\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b": ("low", "IP address found"),
+        }
+
+        for string in strings_found:
+            for pattern, (level, label) in ioc_patterns.items():
+                if re.search(pattern, string):
+                    hits.append({
+                        "filename": sf["filename"],
+                        "level":    level,
+                        "message":  f"{label}: {string[:200]}",
+                        "string":   string[:500],
+                    })
+
+        # Limit to first 1000 hits per file
+        hits = hits[:1000]
+
+    return hits
 `
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

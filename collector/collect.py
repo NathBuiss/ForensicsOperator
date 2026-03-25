@@ -54,8 +54,8 @@ BANNER = f"""
 
 # Default collection sets — all enabled when nothing is specified
 DEFAULT_WINDOWS = {"evtx", "registry", "prefetch", "lnk", "browser", "tasks", "triage"}
-DEFAULT_LINUX   = {"logs", "history", "config", "cron", "ssh", "triage"}
-DEFAULT_MACOS   = {"logs", "history", "config", "launchagents", "browser", "triage"}
+DEFAULT_LINUX   = {"logs", "history", "config", "cron", "ssh", "triage", "network", "suricata", "zeek"}
+DEFAULT_MACOS   = {"logs", "history", "config", "launchagents", "browser", "triage", "network"}
 # "memory" is intentionally NOT in the defaults — dumps are multi-GB.
 # Add explicitly with --collect memory or --collect memory,evtx,...
 
@@ -74,6 +74,9 @@ ARTIFACT_LABELS = {
     "cron":         "Cron Jobs",
     "ssh":          "SSH Artifacts",
     "launchagents": "Launch Agents / Daemons",
+    "network":      "PCAP / Network Captures",
+    "suricata":     "Suricata IDS Logs (EVE JSON)",
+    "zeek":         "Zeek / Bro Network Logs",
     "memory":       "Physical Memory Dump (live acquisition)",
 }
 
@@ -426,13 +429,16 @@ class WindowsCollector(Collector):
 class LinuxCollector(Collector):
 
     def collect_all(self) -> None:
-        if self._want("logs"):    self._logs()
-        if self._want("history"): self._shell_history()
-        if self._want("config"):  self._system_config()
-        if self._want("cron"):    self._cron()
-        if self._want("ssh"):     self._ssh_artifacts()
-        if self._want("triage"):  self._system_triage()
-        if self._want("memory"):  self._memory()
+        if self._want("logs"):     self._logs()
+        if self._want("history"):  self._shell_history()
+        if self._want("config"):   self._system_config()
+        if self._want("cron"):     self._cron()
+        if self._want("ssh"):      self._ssh_artifacts()
+        if self._want("network"):  self._network_captures()
+        if self._want("suricata"): self._suricata_logs()
+        if self._want("zeek"):     self._zeek_logs()
+        if self._want("triage"):   self._system_triage()
+        if self._want("memory"):   self._memory()
 
     def _logs(self) -> None:
         print("  [*] System Logs")
@@ -499,6 +505,96 @@ class LinuxCollector(Collector):
                 for f in sorted(ssh.iterdir()):
                     if f.is_file() and f.name not in PRIVATE:
                         self._add(f, f"ssh/{user_dir.name}/{f.name}")
+
+    def _network_captures(self) -> None:
+        """Collect PCAP/PCAPNG files from common locations (max 10 files, 500 MB each)."""
+        print("  [*] PCAP / Network Captures")
+        SEARCH_DIRS = [
+            Path("/var/log"),
+            Path("/tmp"),
+            Path("/var/capture"),
+            Path("/opt/pcap"),
+            Path("/data"),
+            Path("/captures"),
+        ]
+        MAX_SIZE = 500 * 1024 * 1024  # 500 MB per file
+        count = 0
+        for d in SEARCH_DIRS:
+            if not d.exists():
+                continue
+            for p in sorted(d.rglob("*.pcap")) + sorted(d.rglob("*.pcapng")) + sorted(d.rglob("*.cap")):
+                if count >= 10:
+                    break
+                if p.stat().st_size <= MAX_SIZE:
+                    if self._add(p, f"network/{p.name}"):
+                        count += 1
+            if count >= 10:
+                break
+        # Live capture — only if tcpdump is available and no pcaps found
+        if count == 0 and shutil.which("tcpdump"):
+            cap_path = self.staging / f"live-{HOSTNAME}-{TS_NOW}.pcap"
+            print("      Live capture: 30 s via tcpdump")
+            try:
+                subprocess.run(
+                    ["tcpdump", "-i", "any", "-w", str(cap_path), "-G", "30", "-W", "1"],
+                    timeout=35, capture_output=True,
+                )
+                self._add(cap_path, f"network/{cap_path.name}")
+            except Exception as exc:
+                self._log(f"tcpdump: {exc}")
+
+    def _suricata_logs(self) -> None:
+        """Collect Suricata EVE JSON logs."""
+        print("  [*] Suricata IDS Logs (EVE JSON)")
+        SEARCH_DIRS = [
+            Path("/var/log/suricata"),
+            Path("/var/log/suricata/"),
+            Path("/opt/suricata/log"),
+            Path("/etc/suricata"),
+        ]
+        count = 0
+        for d in SEARCH_DIRS:
+            if not d.exists():
+                continue
+            for p in sorted(d.glob("eve*.json")) + sorted(d.glob("*.json")):
+                if count >= 20:
+                    break
+                if self._add(p, f"suricata/{p.name}"):
+                    count += 1
+            for p in sorted(d.glob("*.log")):
+                if count >= 20:
+                    break
+                if self._add(p, f"suricata/{p.name}"):
+                    count += 1
+
+    def _zeek_logs(self) -> None:
+        """Collect Zeek (formerly Bro) network analysis logs."""
+        print("  [*] Zeek Network Logs")
+        SEARCH_DIRS = [
+            Path("/var/log/zeek"),
+            Path("/var/log/bro"),
+            Path("/opt/zeek/logs"),
+            Path("/opt/bro/logs"),
+            Path("/nsm/zeek/logs"),
+        ]
+        count = 0
+        for d in SEARCH_DIRS:
+            if not d.exists():
+                continue
+            # Priority logs
+            for name in ["conn.log", "dns.log", "http.log", "ssl.log", "x509.log",
+                         "files.log", "weird.log", "notice.log", "alarm.log"]:
+                p = d / name
+                if self._add(p, f"zeek/{p.name}"):
+                    count += 1
+            # Remaining logs (up to 50 total)
+            for p in sorted(d.rglob("*.log")):
+                if count >= 50:
+                    break
+                if self._add(p, f"zeek/{p.relative_to(d)}"):
+                    count += 1
+            if count > 0:
+                break  # Found logs in this dir, no need to check others
 
     def _system_triage(self) -> None:
         print("  [*] System Triage (live commands)")

@@ -120,6 +120,8 @@ def build_substitutions(cfg, pull_policy):
         "__FO_MINIO_ACCESS_KEY__": cfg["secrets"]["minio_access_key"],
         "__FO_MINIO_SECRET_KEY__": cfg["secrets"]["minio_secret_key"],
         "__FO_JWT_SECRET__":       cfg["secrets"].get("jwt_secret", "CHANGE_ME_IN_PRODUCTION"),
+        "__FO_ADMIN_USERNAME__":   cfg["secrets"].get("admin_username", "admin"),
+        "__FO_ADMIN_PASSWORD__":   cfg["secrets"].get("admin_password", "TracexAdmin1!"),
         "__FO_AUTH_ENABLED__":     str(auth.get("auth_enabled", True)).lower(),
         "__FO_JWT_EXPIRE_HOURS__": str(auth.get("jwt_expire_hours", 8)),
         "__FO_ES_HEAP__":          f"{es_heap}m",

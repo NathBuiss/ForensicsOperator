@@ -47,6 +47,18 @@ async def get_current_user(
         user = get_user(username)
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
+        # Defensive: backfill role for pre-RBAC accounts still in Redis.
+        # The startup migration normally handles this; this guard covers edge cases.
+        if not user.get("role"):
+            import redis as _redis_lib
+            from config import settings as _settings
+            from auth.service import _USER_KEY, user_count
+            try:
+                r = _redis_lib.Redis.from_url(_settings.REDIS_URL, decode_responses=True)
+                r.hset(_USER_KEY.format(username=username), "role", "admin")
+                user["role"] = "admin"
+            except Exception:
+                user["role"] = "admin"  # best-effort in memory
         return user
     except JWTError:
         raise HTTPException(

@@ -31,7 +31,11 @@
     "minio_secret_key": "ForensicsM1ni0!",
 
     "_comment_jwt": "Generate a strong secret with: python3 -c \"import secrets; print(secrets.token_hex(32))\"",
-    "jwt_secret": "CHANGE_ME_IN_PRODUCTION"
+    "jwt_secret": "CHANGE_ME_IN_PRODUCTION",
+
+    "_comment_admin": "Default admin credentials created on first boot. Change admin_password immediately.",
+    "admin_username": "admin",
+    "admin_password": "TracexAdmin1!"
   },
 
   "auth": {

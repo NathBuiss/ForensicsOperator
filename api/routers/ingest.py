@@ -1,6 +1,7 @@
 """File upload and ingest job dispatch."""
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import tempfile
@@ -179,11 +180,18 @@ async def ingest_files(case_id: str, files: List[UploadFile] = File(...)):
         # Determine file size by seeking the underlying SpooledTemporaryFile.
         # For files >1 MB FastAPI has already spooled them to disk, so this is
         # O(1) and does not allocate the file contents in memory.
+        # Fall back to reading content-length header if seek is not supported.
         try:
             file_obj = upload.file
-            file_obj.seek(0, 2)
-            size = file_obj.tell()
-            file_obj.seek(0)
+            try:
+                file_obj.seek(0, 2)
+                size = file_obj.tell()
+                file_obj.seek(0)
+            except (AttributeError, OSError):
+                # Non-seekable stream — read into memory to get size
+                data = await upload.read()
+                size = len(data)
+                file_obj = io.BytesIO(data)
         except Exception as exc:
             logger.error("Cannot determine size of '%s': %s", filename, exc)
             errors.append({"filename": filename, "error": f"Cannot determine file size: {exc}"})

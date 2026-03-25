@@ -69,29 +69,120 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub('', text)
 
 
-def _load_custom_module_runner(module_id: str, tool_meta: dict):
+_SANDBOX_SCRIPT = Path(__file__).parent / "_module_sandbox.py"
+
+# Resource limits for custom module subprocess
+_SANDBOX_CPU_SECONDS  = int(os.getenv("SANDBOX_CPU_SECONDS",  "3600"))
+_SANDBOX_MEMORY_BYTES = int(os.getenv("SANDBOX_MEMORY_BYTES", str(2 * 1024**3)))
+_SANDBOX_FSIZE_BYTES  = int(os.getenv("SANDBOX_FSIZE_BYTES",  str(500 * 1024**2)))
+_SANDBOX_NPROC        = int(os.getenv("SANDBOX_NPROC",        "64"))
+_SANDBOX_TIMEOUT      = int(os.getenv("SANDBOX_TIMEOUT_SEC",  "1800"))  # 30 min wall time
+
+
+def _run_custom_module(
+    run_id: str,
+    case_id: str,
+    module_id: str,
+    work_dir: Path,
+    source_files: list,
+    params: dict,
+    tool_meta: dict,
+) -> list[dict]:
     """
-    Dynamically load and return the run() function from modules/{module_id}_module.py.
-    Returns None if the file doesn't exist or fails to load.
+    Execute a custom *_module.py file in an isolated subprocess.
+
+    The child process:
+      • sets resource limits (CPU, memory, file size, nproc) before importing
+        any module code — limits cascade to any subprocesses the module spawns
+      • receives MinIO/Redis credentials via stdin (not visible in ps/env)
+      • has HOME remapped to work_dir and sensitive env vars stripped
+      • is killed by the parent after SANDBOX_TIMEOUT_SEC wall-clock seconds
+
+    Returns the list of hit dicts produced by the module's run() function.
     """
+    import sys as _sys
+
     module_file = CUSTOM_MODULES_DIR / f"{module_id}_module.py"
     if not module_file.exists():
-        return None
+        raise RuntimeError(
+            f"Custom module file not found: {module_file}. "
+            "Create it in the Studio editor."
+        )
+
+    args_payload = json.dumps({
+        "run_id":        run_id,
+        "case_id":       case_id,
+        "module_file":   str(module_file),
+        "source_files":  source_files,
+        "params":        params,
+        "work_dir":      str(work_dir),
+        "minio_endpoint": MINIO_ENDPOINT,
+        "minio_access":  MINIO_ACCESS,
+        "minio_secret":  MINIO_SECRET,
+        "minio_bucket":  MINIO_BUCKET,
+        "redis_url":     REDIS_URL,
+        # Propagate limit overrides so sandbox can log them
+        "limit_cpu_seconds":  _SANDBOX_CPU_SECONDS,
+        "limit_memory_bytes": _SANDBOX_MEMORY_BYTES,
+        "limit_fsize_bytes":  _SANDBOX_FSIZE_BYTES,
+        "limit_nproc":        _SANDBOX_NPROC,
+    })
+
+    logger.info("[%s] Launching custom module '%s' in sandbox (timeout=%ss)",
+                run_id, module_id, _SANDBOX_TIMEOUT)
+    tool_meta["log"] += (
+        f"[sandbox] executing {module_file.name} in subprocess "
+        f"(cpu={_SANDBOX_CPU_SECONDS}s mem={_SANDBOX_MEMORY_BYTES // 1024**2}MB "
+        f"fsize={_SANDBOX_FSIZE_BYTES // 1024**2}MB nproc={_SANDBOX_NPROC})\n"
+    )
+
     try:
-        import importlib.util as _ilu
-        spec = _ilu.spec_from_file_location(f"_fo_cmod_{module_id}", module_file)
-        mod  = _ilu.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        run_fn = getattr(mod, "run", None)
-        if run_fn is None:
-            raise RuntimeError("Module file has no run() function")
-        logger.info("Loaded custom module: %s", module_file)
-        tool_meta["log"] += f"[custom module] Loaded from {module_file}\n"
-        return run_fn
-    except Exception as exc:
-        logger.error("Failed to load custom module %s: %s", module_file, exc)
-        tool_meta["log"] += f"[custom module] Load error: {exc}\n"
-        raise RuntimeError(f"Custom module '{module_id}' failed to load: {exc}") from exc
+        proc = subprocess.run(
+            [_sys.executable, str(_SANDBOX_SCRIPT)],
+            input=args_payload,
+            capture_output=True,
+            text=True,
+            timeout=_SANDBOX_TIMEOUT,
+            # Inherit only a minimal environment — no secrets in child env
+            env={
+                "PATH":       os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+                "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
+                "HOME":       str(work_dir),
+            },
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"Custom module '{module_id}' timed out after {_SANDBOX_TIMEOUT}s"
+        )
+
+    stderr_out = (proc.stderr or "").strip()
+    if stderr_out:
+        tool_meta["log"] += f"\n[sandbox stderr]\n{stderr_out[:8000]}\n"
+        logger.info("[%s] Sandbox stderr:\n%s", run_id, stderr_out[:3000])
+
+    stdout_out = (proc.stdout or "").strip()
+    tool_meta["stdout"] = stdout_out[:4000] if stdout_out else ""
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Custom module '{module_id}' subprocess exited {proc.returncode}. "
+            f"stderr: {stderr_out[:500]}"
+        )
+
+    try:
+        result = json.loads(stdout_out)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"Custom module '{module_id}' produced invalid JSON output: {exc}. "
+            f"stdout: {stdout_out[:300]}"
+        ) from exc
+
+    if "error" in result:
+        raise RuntimeError(f"Custom module '{module_id}' failed: {result['error']}")
+
+    hits = result.get("hits", [])
+    logger.info("[%s] Custom module returned %d hits", run_id, len(hits))
+    return hits
 
 
 def get_redis() -> redis.Redis:
@@ -196,13 +287,14 @@ def run_module(
         }
         runner = RUNNERS.get(module_id)
 
-        # Fall back to custom module from modules/ directory
-        if runner is None:
-            runner = _load_custom_module_runner(module_id, tool_meta)
-        if not runner:
-            raise RuntimeError(f"Unknown module: {module_id}")
-
-        results = runner(run_id, work_dir, sources_dir, params, tool_meta)
+        if runner is not None:
+            # Built-in module — run directly in this process
+            results = runner(run_id, work_dir, sources_dir, params, tool_meta)
+        else:
+            # Custom module — run in isolated sandboxed subprocess
+            results = _run_custom_module(
+                run_id, case_id, module_id, work_dir, source_files, params, tool_meta
+            )
 
         # ── 3a. For Hayabusa: also index into Elasticsearch so hits appear in Timeline ──
         if module_id == "hayabusa" and results:
