@@ -281,13 +281,31 @@ class WindowsCollector(Collector):
         print("  [*] Browser Artifacts")
         users_dir = Path(os.environ.get("SystemDrive", "C:")) / "Users"
         PROFILES = [
+            # Chrome
             ("chrome", r"AppData\Local\Google\Chrome\User Data\Default\History"),
             ("chrome", r"AppData\Local\Google\Chrome\User Data\Default\Web Data"),
             ("chrome", r"AppData\Local\Google\Chrome\User Data\Default\Cookies"),
             ("chrome", r"AppData\Local\Google\Chrome\User Data\Default\Login Data"),
+            ("chrome", r"AppData\Local\Google\Chrome\User Data\Default\Bookmarks"),
+            # Edge
             ("edge",   r"AppData\Local\Microsoft\Edge\User Data\Default\History"),
             ("edge",   r"AppData\Local\Microsoft\Edge\User Data\Default\Cookies"),
             ("edge",   r"AppData\Local\Microsoft\Edge\User Data\Default\Web Data"),
+            ("edge",   r"AppData\Local\Microsoft\Edge\User Data\Default\Login Data"),
+            # Brave
+            ("brave",  r"AppData\Local\BraveSoftware\Brave-Browser\User Data\Default\History"),
+            ("brave",  r"AppData\Local\BraveSoftware\Brave-Browser\User Data\Default\Cookies"),
+            ("brave",  r"AppData\Local\BraveSoftware\Brave-Browser\User Data\Default\Web Data"),
+            ("brave",  r"AppData\Local\BraveSoftware\Brave-Browser\User Data\Default\Login Data"),
+            # Opera
+            ("opera",  r"AppData\Roaming\Opera Software\Opera Stable\History"),
+            ("opera",  r"AppData\Roaming\Opera Software\Opera Stable\Cookies"),
+            ("opera",  r"AppData\Roaming\Opera Software\Opera Stable\Web Data"),
+            ("opera",  r"AppData\Roaming\Opera Software\Opera Stable\Login Data"),
+            # Vivaldi
+            ("vivaldi", r"AppData\Local\Vivaldi\User Data\Default\History"),
+            ("vivaldi", r"AppData\Local\Vivaldi\User Data\Default\Cookies"),
+            ("vivaldi", r"AppData\Local\Vivaldi\User Data\Default\Login Data"),
         ]
         for user_dir in (sorted(users_dir.iterdir()) if users_dir.exists() else []):
             if not user_dir.is_dir():
@@ -674,10 +692,18 @@ class MacOSCollector(Collector):
             if not user_dir.is_dir():
                 continue
             lib = user_dir / "Library"
-            # Chrome
-            chrome_profile = lib / "Application Support" / "Google" / "Chrome" / "Default"
-            for db in ["History", "Cookies", "Web Data", "Login Data"]:
-                self._add(chrome_profile / db, f"browser/{user_dir.name}/chrome/{db}")
+            # Chromium-based browsers (Chrome, Brave, Edge, Opera, Vivaldi)
+            chromium_browsers = [
+                ("chrome",  "Google/Chrome"),
+                ("brave",   "BraveSoftware/Brave-Browser"),
+                ("edge",    "Microsoft Edge"),
+                ("opera",   "com.operasoftware.Opera"),
+                ("vivaldi", "Vivaldi"),
+            ]
+            for bname, subpath in chromium_browsers:
+                profile = lib / "Application Support" / subpath / "Default"
+                for db in ["History", "Cookies", "Web Data", "Login Data", "Bookmarks"]:
+                    self._add(profile / db, f"browser/{user_dir.name}/{bname}/{db}")
             # Safari
             safari_dir = lib / "Safari"
             for sf in ["History.db", "Downloads.plist", "Bookmarks.plist",
@@ -687,7 +713,7 @@ class MacOSCollector(Collector):
             ff_profiles = lib / "Application Support" / "Firefox" / "Profiles"
             if ff_profiles.exists():
                 for profile in sorted(ff_profiles.iterdir()):
-                    for db in ["places.sqlite", "cookies.sqlite", "logins.json"]:
+                    for db in ["places.sqlite", "cookies.sqlite", "logins.json", "formhistory.sqlite"]:
                         self._add(profile / db, f"browser/{user_dir.name}/firefox/{profile.name}/{db}")
             # Quarantine database (file download history)
             quarantine = lib / "Preferences" / "com.apple.LaunchServices.QuarantineEventsV2"

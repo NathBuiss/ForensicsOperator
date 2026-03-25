@@ -149,11 +149,11 @@ def delete_module_editor(name: str):
     path.unlink()
 
 
-# ── Built-in ingester files (read-only reference) ─────────────────────────────
+# ── Built-in ingester plugin files (editable) ─────────────────────────────────
 
 @router.get("/editor/builtin-ingesters")
 def list_builtin_ingesters():
-    """List built-in plugin Python files (read-only reference)."""
+    """List built-in plugin Python files."""
     return {"files": [dict(f, builtin=True) for f in _list(PLUGINS_DIR, PLUGIN_SUFFIX)]}
 
 
@@ -163,11 +163,34 @@ def get_builtin_ingester(name: str):
     return {"name": name, "content": _read(path), "builtin": True}
 
 
-# ── Built-in module YAML registry files (read-only reference) ─────────────────
+@router.put("/editor/builtin-ingesters/{name}")
+def save_builtin_ingester(name: str, body: FileWrite):
+    """Overwrite a built-in plugin file on the plugins PVC."""
+    path = _safe(PLUGINS_DIR, name, PLUGIN_SUFFIX)
+    _write(path, body.content)
+    return {"saved": True, "name": name, "builtin": True}
+
+
+@router.delete("/editor/builtin-ingesters/{name}", status_code=204)
+def delete_builtin_ingester(name: str):
+    """Delete a built-in plugin file from the plugins PVC."""
+    path = _safe(PLUGINS_DIR, name, PLUGIN_SUFFIX)
+    if not path.exists():
+        raise HTTPException(404, "File not found")
+    path.unlink()
+
+
+# ── Built-in module YAML registry files (editable) ────────────────────────────
+
+def _safe_yaml(name: str) -> Path:
+    if not name.endswith(".yaml") or any(c in name for c in ("/", "\\", "..")):
+        raise HTTPException(400, "Invalid file name — must end with .yaml")
+    return MODULES_REG_DIR / name
+
 
 @router.get("/editor/builtin-modules")
 def list_builtin_modules():
-    """List module YAML registry files (read-only reference)."""
+    """List module YAML registry files."""
     if not MODULES_REG_DIR.exists():
         return {"files": []}
     files = []
@@ -178,12 +201,28 @@ def list_builtin_modules():
 
 @router.get("/editor/builtin-modules/{name}")
 def get_builtin_module_file(name: str):
-    if not name.endswith(".yaml") or "/" in name or "\\" in name or ".." in name:
-        raise HTTPException(400, "Invalid file name")
-    path = MODULES_REG_DIR / name
+    path = _safe_yaml(name)
     if not path.exists():
         raise HTTPException(404, "File not found")
     return {"name": name, "content": path.read_text(encoding="utf-8"), "builtin": True}
+
+
+@router.put("/editor/builtin-modules/{name}")
+def save_builtin_module_file(name: str, body: FileWrite):
+    """Overwrite a module YAML registry file."""
+    _ensure(MODULES_REG_DIR)
+    path = _safe_yaml(name)
+    path.write_text(body.content, encoding="utf-8")
+    return {"saved": True, "name": name, "builtin": True}
+
+
+@router.delete("/editor/builtin-modules/{name}", status_code=204)
+def delete_builtin_module_file(name: str):
+    """Delete a module YAML registry file."""
+    path = _safe_yaml(name)
+    if not path.exists():
+        raise HTTPException(404, "File not found")
+    path.unlink()
 
 
 # ── Shared: syntax validation ──────────────────────────────────────────────────

@@ -4,6 +4,7 @@ import {
   LayoutDashboard, Puzzle, FolderOpen,
   Plus, X, ChevronRight, Bell, Sun, Moon, Cpu, PackageOpen, Layers,
   Code2, BookOpen, LogOut, UserCircle, Settings2, Stars,
+  Activity, Shield, Users, Database,
 } from 'lucide-react'
 import { api } from '../../api/client'
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts'
@@ -145,6 +146,12 @@ export default function Layout({ user, onLogout }) {
             Modules
           </NavLink>
 
+          <NavLink to="/cti" className={({ isActive }) =>
+            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
+            <Shield size={15} />
+            Threat Intel
+          </NavLink>
+
           {/* ── Developer ────────────────────────────── */}
           <p className="px-2 mb-1.5 mt-4 text-[10px] font-semibold text-white/30 uppercase tracking-widest">
             Developer
@@ -172,6 +179,18 @@ export default function Layout({ user, onLogout }) {
           <p className="px-2 mb-1.5 mt-4 text-[10px] font-semibold text-white/30 uppercase tracking-widest">
             Admin
           </p>
+
+          <NavLink to="/performance" className={({ isActive }) =>
+            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
+            <Activity size={15} />
+            Performance
+          </NavLink>
+
+          <NavLink to="/users" className={({ isActive }) =>
+            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
+            <Users size={15} />
+            Users
+          </NavLink>
 
           <NavLink to="/settings" className={({ isActive }) =>
             isActive ? 'nav-item-active' : 'nav-item-inactive'}>

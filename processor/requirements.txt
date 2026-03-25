@@ -9,5 +9,6 @@ python-magic==0.4.27
 pyhindsight>=3.4.0
 pefile>=2023.2.7
 oletools>=0.60
+dpkt>=1.9.8
 # pyscca (libscca-python) — install manually if MAM-compressed prefetch support needed
 # pip install libscca-python

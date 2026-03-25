@@ -67,7 +67,6 @@ spec:
           volumeMounts:
             - name: plugins-volume
               mountPath: /app/plugins
-              readOnly: true
       volumes:
         - name: plugins-volume
           persistentVolumeClaim:

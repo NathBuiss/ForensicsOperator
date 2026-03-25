@@ -2,10 +2,19 @@
 Module execution task: download source files, run module binary, store results.
 
 Supported modules:
-  hayabusa  — Sigma-based EVTX threat hunting
-  strings   — Printable string extraction from any file
-  hindsight — Browser forensics (Chrome/Firefox/Edge)
-  regripper — Deep Windows registry analysis
+  hayabusa         — Sigma-based EVTX threat hunting
+  strings          — Printable string extraction from any file
+  strings_analysis — Categorised string extraction with IOC identification
+  hindsight        — Browser forensics (Chrome/Firefox/Edge)
+  regripper        — Deep Windows registry analysis
+  wintriage        — Windows triage collection analysis
+  yara             — YARA rule scanning
+  exiftool         — Metadata extraction
+  volatility3      — Memory forensics
+  oletools         — Office document macro / OLE analysis
+  ole_analysis     — Alias for oletools
+  pe_analysis      — PE executable deep inspection
+  grep_search      — Regex-based IOC / keyword pattern search
 """
 from __future__ import annotations
 
@@ -171,16 +180,19 @@ def run_module(
         tool_meta: dict[str, str] = {"stdout": "", "stderr": "", "log": ""}
 
         RUNNERS = {
-            "hayabusa":    _run_hayabusa,
-            "strings":     _run_strings,
-            "hindsight":   _run_hindsight,
-            "regripper":   _run_regripper,
-            "wintriage":   _run_wintriage,
-            "yara":        _run_yara,
-            "exiftool":    _run_exiftool,
-            "volatility3": _run_volatility3,
-            "oletools":    _run_oletools,
-            "pe_analysis": _run_pe_analysis,
+            "hayabusa":         _run_hayabusa,
+            "strings":          _run_strings,
+            "hindsight":        _run_hindsight,
+            "regripper":        _run_regripper,
+            "wintriage":        _run_wintriage,
+            "yara":             _run_yara,
+            "exiftool":         _run_exiftool,
+            "volatility3":      _run_volatility3,
+            "oletools":         _run_oletools,
+            "pe_analysis":      _run_pe_analysis,
+            "strings_analysis": _run_strings_analysis,
+            "grep_search":      _run_grep_search,
+            "ole_analysis":     _run_oletools,  # alias — same engine as oletools
         }
         runner = RUNNERS.get(module_id)
 
@@ -2679,4 +2691,199 @@ def _run_pe_analysis(
         pe.close()
         tool_meta["log"] += f"{pe_path.name}: {len(results)} hits\n"
 
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Strings Analysis — categorised string extraction with IOC identification
+# ─────────────────────────────────────────────────────────────────────────────
+
+_IOC_PATTERNS = {
+    "urls":     re.compile(r'https?://'),
+    "ips":      re.compile(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'),
+    "emails":   re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'),
+    "paths":    re.compile(r'[A-Z]:\\|/usr/|/etc/|/var/'),
+    "registry": re.compile(r'HKEY_|HKLM\\|HKCU\\'),
+}
+
+
+def _run_strings_analysis(
+    run_id: str,
+    work_dir: Path,
+    sources_dir: Path,
+    params: dict,
+    tool_meta: dict,
+) -> list[dict]:
+    """Extract ASCII and Unicode strings, then categorise IOCs."""
+    strings_bin = shutil.which("strings")
+    if not strings_bin:
+        raise RuntimeError(
+            "'strings' binary not found. Ensure binutils is installed in the processor image."
+        )
+
+    results: list[dict] = []
+
+    for file_path in sorted(sources_dir.iterdir()):
+        if not file_path.is_file():
+            continue
+
+        logger.info("[%s] strings_analysis: extracting from %s", run_id, file_path.name)
+        tool_meta["stdout"] += f"\n=== {file_path.name} ===\n"
+
+        # ASCII strings (min length 6)
+        try:
+            proc_ascii = subprocess.run(
+                [strings_bin, "-a", "-n", "6", str(file_path)],
+                capture_output=True, text=True, timeout=120,
+            )
+            ascii_strings = proc_ascii.stdout.strip().split("\n") if proc_ascii.stdout.strip() else []
+        except subprocess.TimeoutExpired:
+            logger.warning("[%s] strings (ASCII) timed out on %s", run_id, file_path.name)
+            ascii_strings = []
+
+        # Unicode strings (min length 6)
+        try:
+            proc_unicode = subprocess.run(
+                [strings_bin, "-a", "-n", "6", "-el", str(file_path)],
+                capture_output=True, text=True, timeout=120,
+            )
+            unicode_strings = proc_unicode.stdout.strip().split("\n") if proc_unicode.stdout.strip() else []
+        except subprocess.TimeoutExpired:
+            logger.warning("[%s] strings (Unicode) timed out on %s", run_id, file_path.name)
+            unicode_strings = []
+
+        all_strings = list(set(ascii_strings + unicode_strings))
+
+        # Categorise interesting strings
+        iocs: dict[str, list[str]] = {cat: [] for cat in _IOC_PATTERNS}
+        for s in all_strings:
+            for cat, pat in _IOC_PATTERNS.items():
+                if pat.search(s):
+                    iocs[cat].append(s)
+
+        # Emit one summary hit per file
+        ioc_count = sum(len(v) for v in iocs.values())
+        level = "high" if ioc_count > 20 else ("medium" if ioc_count > 5 else "informational")
+        results.append({
+            "id":             str(uuid.uuid4()),
+            "timestamp":      "",
+            "level":          level,
+            "level_int":      LEVEL_INT.get(level, 1),
+            "rule_title":     f"Strings Analysis — {file_path.name}",
+            "computer":       file_path.name,
+            "details_raw":    json.dumps({
+                "total_strings": len(all_strings),
+                "interesting_strings": {k: v[:50] for k, v in iocs.items()},
+                "sample_strings": all_strings[:200],
+            }),
+            "filename":       file_path.name,
+            "total_strings":  len(all_strings),
+        })
+
+        # Emit individual IOC hits so they show up in the results table
+        for cat, matches in iocs.items():
+            for m in matches[:50]:
+                results.append({
+                    "id":          str(uuid.uuid4()),
+                    "timestamp":   "",
+                    "level":       "medium",
+                    "level_int":   LEVEL_INT.get("medium", 3),
+                    "rule_title":  f"IOC String ({cat})",
+                    "computer":    file_path.name,
+                    "details_raw": m,
+                    "filename":    file_path.name,
+                    "ioc_type":    cat,
+                })
+
+        tool_meta["stdout"] += (
+            f"  Total strings: {len(all_strings)}  |  IOCs: {ioc_count} "
+            f"(urls={len(iocs['urls'])}, ips={len(iocs['ips'])}, emails={len(iocs['emails'])})\n"
+        )
+
+    tool_meta["log"] += f"\nProcessed {len(list(sources_dir.iterdir()))} file(s), {len(results)} hits\n"
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pattern Search (grep) — regex-based IOC / keyword scanning
+# ─────────────────────────────────────────────────────────────────────────────
+
+_DEFAULT_GREP_PATTERNS = [
+    r'https?://[^\s<>"]+',
+    r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b',
+    r'[a-fA-F0-9]{32}',   # MD5
+    r'[a-fA-F0-9]{40}',   # SHA1
+    r'[a-fA-F0-9]{64}',   # SHA256
+    r'(?:powershell|cmd\.exe|wscript|cscript|mshta|certutil|bitsadmin)',
+]
+
+
+def _run_grep_search(
+    run_id: str,
+    work_dir: Path,
+    sources_dir: Path,
+    params: dict,
+    tool_meta: dict,
+) -> list[dict]:
+    """Search files for regex patterns — IOCs, keywords, encoded payloads."""
+    grep_bin = shutil.which("grep")
+    if not grep_bin:
+        raise RuntimeError(
+            "'grep' binary not found. Ensure coreutils is installed in the processor image."
+        )
+
+    run_config = params or {}
+    patterns = run_config.get("patterns", []) if isinstance(run_config, dict) else []
+    if not patterns:
+        patterns = list(_DEFAULT_GREP_PATTERNS)
+
+    tool_meta["log"] += f"Patterns ({len(patterns)}): {patterns}\n"
+    results: list[dict] = []
+
+    for file_path in sorted(sources_dir.iterdir()):
+        if not file_path.is_file():
+            continue
+
+        logger.info("[%s] grep_search: scanning %s with %d patterns", run_id, file_path.name, len(patterns))
+        tool_meta["stdout"] += f"\n=== {file_path.name} ===\n"
+
+        for pat in patterns:
+            # Count matches
+            try:
+                proc_count = subprocess.run(
+                    [grep_bin, "-oPc", pat, str(file_path)],
+                    capture_output=True, text=True, timeout=60,
+                )
+                count = int(proc_count.stdout.strip()) if proc_count.stdout.strip().isdigit() else 0
+            except (subprocess.TimeoutExpired, ValueError):
+                count = 0
+
+            if count > 0:
+                # Extract actual matches (deduplicated, capped at 50)
+                try:
+                    proc_matches = subprocess.run(
+                        [grep_bin, "-oP", pat, str(file_path)],
+                        capture_output=True, text=True, timeout=60,
+                    )
+                    matches = list(set(proc_matches.stdout.strip().split("\n")))[:50]
+                except subprocess.TimeoutExpired:
+                    matches = []
+
+                level = "high" if count > 10 else ("medium" if count > 2 else "low")
+                results.append({
+                    "id":            str(uuid.uuid4()),
+                    "timestamp":     "",
+                    "level":         level,
+                    "level_int":     LEVEL_INT.get(level, 1),
+                    "rule_title":    f"Pattern Match — {pat[:60]}",
+                    "computer":      file_path.name,
+                    "details_raw":   json.dumps({"count": count, "samples": matches}),
+                    "filename":      file_path.name,
+                    "pattern":       pat,
+                    "match_count":   count,
+                })
+
+                tool_meta["stdout"] += f"  [{pat[:40]}…] → {count} match(es)\n"
+
+    tool_meta["log"] += f"\nScanned {len(list(sources_dir.iterdir()))} file(s), {len(results)} pattern hits\n"
     return results

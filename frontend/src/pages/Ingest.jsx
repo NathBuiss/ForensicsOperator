@@ -1,28 +1,50 @@
 import { useState, useEffect, useRef } from 'react'
+import { RefreshCw } from 'lucide-react'
 import { api } from '../api/client'
 
-const ACCEPTED_TYPES = ['.evtx', '.plaso', '.pf', '.lnk', '.dat', '.hive', '.jsonl', '.csv', '.zip']
-const ACCEPTED_NAMES = ['$MFT', 'NTUSER.DAT', 'SYSTEM', 'SOFTWARE', 'SAM', 'SECURITY']
+const ACCEPTED_TYPES = ['.evtx', '.plaso', '.pf', '.lnk', '.dat', '.hive', '.jsonl', '.csv', '.zip',
+                         '.pcap', '.pcapng', '.cap', '.sqlite', '.db', '.sqlite3', '.sqlitedb',
+                         '.plist', '.xml', '.log', '.ab', '.txt']
+const ACCEPTED_NAMES = ['$MFT', 'NTUSER.DAT', 'SYSTEM', 'SOFTWARE', 'SAM', 'SECURITY',
+                        'HISTORY', 'COOKIES', 'LOGIN DATA', 'BOOKMARKS', 'WEB DATA',
+                        'PLACES.SQLITE', 'COOKIES.SQLITE']
 const ACCEPT_ATTR   = [...ACCEPTED_TYPES, ...ACCEPTED_NAMES.map(n => `.${n.replace('$', '')}`)].join(',')
 
 function JobCard({ jobId }) {
   const [job, setJob] = useState(null)
+  const [retrying, setRetrying] = useState(false)
   const intervalRef = useRef(null)
 
-  useEffect(() => {
-    const poll = () => {
-      api.ingest.getJob(jobId).then(setJob).catch(() => {})
-    }
+  function startPolling() {
+    const poll = () => { api.ingest.getJob(jobId).then(setJob).catch(() => {}) }
     poll()
     intervalRef.current = setInterval(poll, 3000)
+  }
+
+  useEffect(() => {
+    startPolling()
     return () => clearInterval(intervalRef.current)
-  }, [jobId])
+  }, [jobId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (job?.status === 'COMPLETED' || job?.status === 'FAILED') {
       clearInterval(intervalRef.current)
     }
   }, [job?.status])
+
+  async function retryJob() {
+    setRetrying(true)
+    try {
+      await api.ingest.retryJob(jobId)
+      // Restart polling after retry
+      clearInterval(intervalRef.current)
+      startPolling()
+    } catch (err) {
+      alert('Retry failed: ' + err.message)
+    } finally {
+      setRetrying(false)
+    }
+  }
 
   if (!job) return <div className="text-gray-400 text-xs p-2">Loading job {jobId}...</div>
 
@@ -37,10 +59,23 @@ function JobCard({ jobId }) {
     <div className={`card p-3 ${job.status === 'FAILED' ? 'border-red-200' : ''}`}>
       <div className="flex items-center justify-between mb-1">
         <span className="text-xs text-brand-text font-medium truncate">{job.original_filename}</span>
-        <span className={`text-xs font-mono ${statusColors[job.status] || 'text-gray-500'}`}>
-          {job.status}
-          {job.status === 'RUNNING' && <span className="ml-1 animate-pulse">●</span>}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className={`text-xs font-mono ${statusColors[job.status] || 'text-gray-500'}`}>
+            {job.status}
+            {job.status === 'RUNNING' && <span className="ml-1 animate-pulse">●</span>}
+          </span>
+          {job.status === 'FAILED' && (
+            <button
+              onClick={retryJob}
+              disabled={retrying}
+              className="btn-ghost text-xs px-1.5 py-0.5 text-brand-accent hover:text-brand-accenthover"
+              title="Retry this job"
+            >
+              <RefreshCw size={12} className={retrying ? 'animate-spin' : ''} />
+              {retrying ? '' : 'Retry'}
+            </button>
+          )}
+        </div>
       </div>
 
       {job.plugin_used && (
@@ -81,7 +116,8 @@ export default function Ingest({ caseId, onComplete }) {
   const [uploading, setUploading] = useState(false)
   const [jobs, setJobs]           = useState([])
   const [error, setError]         = useState('')
-  const inputRef = useRef()
+  const inputRef  = useRef()
+  const folderRef = useRef()
 
   useEffect(() => {
     api.ingest.listJobs(caseId)
@@ -123,7 +159,7 @@ export default function Ingest({ caseId, onComplete }) {
       </p>
       <p className="text-xs text-gray-400 mb-4">
         📦 <strong>.zip</strong> archives are extracted automatically — each file inside is processed as a separate job.
-        Large files are streamed directly to storage.
+        Large files are streamed directly to storage. Failed jobs can be retried.
       </p>
 
       {/* Dropzone */}
@@ -132,17 +168,41 @@ export default function Ingest({ caseId, onComplete }) {
         onDragLeave={() => setDragging(false)}
         onDrop={onDrop}
         onClick={() => inputRef.current?.click()}
-        className={`${dragging ? 'drop-zone-active' : 'drop-zone-inactive'} mb-4 ${uploading ? 'opacity-50 pointer-events-none' : ''}`}>
+        className={`${dragging ? 'drop-zone-active' : 'drop-zone-inactive'} mb-3 ${uploading ? 'opacity-50 pointer-events-none' : ''}`}>
         <p className="text-2xl mb-2">📂</p>
         <p className="text-sm text-gray-500">
           {uploading ? 'Uploading...' : 'Drop forensics files here or click to browse'}
         </p>
-        <p className="text-xs text-gray-400 mt-1">Multiple files supported</p>
+        <p className="text-xs text-gray-400 mt-1">Multiple files or folders supported</p>
         <input
           ref={inputRef}
           type="file"
           multiple
           accept={ACCEPT_ATTR}
+          className="hidden"
+          onChange={e => handleFiles([...e.target.files])}
+        />
+      </div>
+
+      {/* Folder upload button */}
+      <div className="flex items-center gap-2 mb-4">
+        <button
+          onClick={() => folderRef.current?.click()}
+          disabled={uploading}
+          className="btn-outline text-xs"
+        >
+          📁 Upload Folder
+        </button>
+        <span className="text-[10px] text-gray-400">
+          Select a directory — all files inside will be uploaded
+        </span>
+        <input
+          ref={folderRef}
+          type="file"
+          // @ts-ignore — webkitdirectory is non-standard but widely supported
+          webkitdirectory=""
+          directory=""
+          multiple
           className="hidden"
           onChange={e => handleFiles([...e.target.files])}
         />

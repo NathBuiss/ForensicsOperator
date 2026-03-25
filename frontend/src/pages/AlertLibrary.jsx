@@ -3,7 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import {
   Bell, Plus, Trash2, ChevronDown, ChevronUp, Pencil, Check, X,
   AlertTriangle, Loader2, Search, Play, CheckCircle, Clock, RefreshCw,
-  ExternalLink, Filter, Tag, Upload, FileCode,
+  ExternalLink, Filter, Tag, Upload, FileCode, Sparkles, Bot, Info,
+  ShieldAlert, Code2,
 } from 'lucide-react'
 import { api } from '../api/client'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
@@ -39,6 +40,14 @@ const CATEGORY_STYLES = {
   'Other':             { bg: 'bg-gray-100 text-gray-600 border-gray-200',     dot: 'bg-gray-400'    },
 }
 
+const SIGMA_LEVEL_STYLES = {
+  critical: 'bg-red-100 text-red-700 border-red-200',
+  high:     'bg-orange-100 text-orange-700 border-orange-200',
+  medium:   'bg-yellow-100 text-yellow-700 border-yellow-200',
+  low:      'bg-blue-100 text-blue-700 border-blue-200',
+  info:     'bg-gray-100 text-gray-600 border-gray-200',
+}
+
 function CategoryBadge({ category }) {
   if (!category) return null
   const style = CATEGORY_STYLES[category] || CATEGORY_STYLES['Other']
@@ -47,6 +56,299 @@ function CategoryBadge({ category }) {
       <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${style.dot}`} />
       {category}
     </span>
+  )
+}
+
+function SigmaLevelBadge({ level }) {
+  if (!level) return null
+  const cls = SIGMA_LEVEL_STYLES[level.toLowerCase()] || SIGMA_LEVEL_STYLES.info
+  return (
+    <span className={`inline-flex items-center text-[10px] font-medium border rounded-full px-2 py-0.5 ${cls}`}>
+      {level}
+    </span>
+  )
+}
+
+// ── Unified Sigma Rule Modal (create + edit) ──────────────────────────────────
+// mode='create' → imports as new rule via importSigma
+// mode='edit'   → parses YAML then updates existing rule via updateLibraryRule
+function SigmaRuleModal({ rule = null, onClose, onSaved }) {
+  const isEdit = !!rule
+  const fileRef = useRef(null)
+
+  const [yamlText, setYamlText]       = useState(rule?.sigma_yaml || '')
+  const [saving, setSaving]           = useState(false)
+  const [error, setError]             = useState('')
+  const [result, setResult]           = useState(null)   // import result message
+
+  // AI generation state
+  const [showAI, setShowAI]           = useState(false)
+  const [aiDesc, setAiDesc]           = useState('')
+  const [aiCtx,  setAiCtx]           = useState('')
+  const [aiLoading, setAiLoading]     = useState(false)
+  const [aiError, setAiError]         = useState('')
+
+  function handleFile(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = ev => setYamlText(ev.target.result || '')
+    reader.readAsText(file)
+  }
+
+  async function generateWithAI() {
+    if (!aiDesc.trim()) return
+    setAiLoading(true)
+    setAiError('')
+    try {
+      const res = await api.alertRules.generateRule({ description: aiDesc, context: aiCtx })
+      setYamlText(res.yaml || '')
+      setShowAI(false)
+      setAiDesc('')
+      setAiCtx('')
+    } catch (err) {
+      setAiError(err.message)
+    } finally {
+      setAiLoading(false)
+    }
+  }
+
+  async function doSave() {
+    if (!yamlText.trim()) return
+    setSaving(true)
+    setError('')
+    setResult(null)
+    try {
+      if (isEdit) {
+        // Parse the YAML first to derive ES query + metadata
+        const parsed = await api.alertRules.parseSigma({ yaml: yamlText })
+        const updated = await api.alertRules.updateLibraryRule(rule.id, {
+          name:          parsed.name,
+          description:   parsed.description,
+          category:      parsed.category,
+          artifact_type: parsed.artifact_type,
+          query:         parsed.query,
+          sigma_yaml:    yamlText,
+        })
+        onSaved(updated)
+        onClose()
+      } else {
+        const res = await api.alertRules.importSigma({ yaml: yamlText })
+        if (res.imported > 0) {
+          onSaved(res.rules)
+          onClose()
+        } else {
+          setResult({ skipped: res.skipped })
+        }
+      }
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const placeholder = `title: Suspicious PowerShell Execution
+status: stable
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4688
+    CommandLine|contains: 'powershell'
+  condition: selection
+level: medium
+tags:
+  - attack.execution
+  - attack.t1059.001`
+
+  return (
+    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+      onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="bg-white border border-gray-200 rounded-xl w-full max-w-2xl shadow-2xl flex flex-col"
+        style={{ maxHeight: '90vh' }}>
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 flex-shrink-0">
+          <div className="flex items-center gap-2">
+            <FileCode size={16} className="text-brand-accent" />
+            <span className="font-semibold text-brand-text text-sm">
+              {isEdit ? 'Edit Sigma Rule' : 'New Sigma Rule'}
+            </span>
+            {isEdit && rule.sigma_level && <SigmaLevelBadge level={rule.sigma_level} />}
+          </div>
+          <button onClick={onClose} className="btn-ghost p-1"><X size={14} /></button>
+        </div>
+
+        {/* Body */}
+        <div className="p-5 space-y-3 overflow-y-auto flex-1">
+
+          {/* AI generation panel */}
+          {showAI ? (
+            <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Sparkles size={14} className="text-indigo-500" />
+                  <span className="text-xs font-semibold text-indigo-700">Generate with AI</span>
+                </div>
+                <button onClick={() => setShowAI(false)} className="btn-ghost p-0.5 text-indigo-400 hover:text-indigo-600">
+                  <X size={13} />
+                </button>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  What should this rule detect? <span className="text-red-400">*</span>
+                </label>
+                <textarea
+                  value={aiDesc}
+                  onChange={e => setAiDesc(e.target.value)}
+                  placeholder="e.g. Detect brute-force login attempts — multiple failed Windows logon events in a short period"
+                  className="input text-xs w-full resize-none"
+                  rows={3}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Additional context <span className="text-gray-400 font-normal">(optional)</span>
+                </label>
+                <input
+                  value={aiCtx}
+                  onChange={e => setAiCtx(e.target.value)}
+                  placeholder="e.g. Windows event logs, EventID 4625, TargetUserName field"
+                  className="input text-xs w-full"
+                />
+              </div>
+              {aiError && (
+                <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-center gap-1.5">
+                  <X size={12} /> {aiError}
+                </p>
+              )}
+              <button
+                onClick={generateWithAI}
+                disabled={!aiDesc.trim() || aiLoading}
+                className="btn-primary text-xs"
+              >
+                {aiLoading ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
+                {aiLoading ? 'Generating…' : 'Generate Sigma YAML'}
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowAI(true)}
+                className="btn-outline text-xs flex items-center gap-1.5"
+              >
+                <Sparkles size={13} className="text-indigo-500" /> Generate with AI
+              </button>
+              <span className="text-gray-300 text-xs">or</span>
+              <input ref={fileRef} type="file" accept=".yml,.yaml" className="hidden" onChange={handleFile} />
+              <button
+                onClick={() => fileRef.current?.click()}
+                className="btn-outline text-xs"
+              >
+                <Upload size={13} /> Upload .yml file
+              </button>
+              {!isEdit && (
+                <span className="text-xs text-gray-400 ml-auto flex items-center gap-1">
+                  <Info size={11} /> paste Sigma YAML below
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* YAML editor */}
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1 flex items-center gap-1">
+              <Code2 size={12} /> Sigma Rule YAML
+            </label>
+            <textarea
+              value={yamlText}
+              onChange={e => setYamlText(e.target.value)}
+              placeholder={placeholder}
+              className="input font-mono text-xs w-full resize-none"
+              rows={16}
+              spellCheck={false}
+            />
+          </div>
+
+          {error && (
+            <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-center gap-1.5">
+              <X size={12} /> {error}
+            </p>
+          )}
+
+          {result && (
+            <div className="text-xs rounded-lg border px-3 py-2 bg-amber-50 border-amber-200 text-amber-700">
+              <AlertTriangle size={12} className="inline mr-1" />
+              Rule already exists or could not be parsed (skipped: {result.skipped}).
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="px-5 py-4 border-t border-gray-200 flex-shrink-0 flex items-center gap-2">
+          <button
+            onClick={doSave}
+            disabled={!yamlText.trim() || saving}
+            className="btn-primary text-xs"
+          >
+            {saving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+            {isEdit ? 'Save Changes' : 'Import Rule'}
+          </button>
+          <button onClick={onClose} className="btn-ghost text-xs">Cancel</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── AI Analysis panel (shown inside RunOnCaseModal after a firing result) ──────
+function AiAnalysisPanel({ rule, result }) {
+  const [loading,  setLoading]  = useState(false)
+  const [analysis, setAnalysis] = useState(null)
+  const [error,    setError]    = useState('')
+
+  async function analyze() {
+    setLoading(true)
+    setError('')
+    setAnalysis(null)
+    try {
+      const sampleEvents = result.match?.sample_events || []
+      const res = await api.alertRules.analyzeResult({
+        rule_name:    rule.name,
+        rule_query:   rule.query,
+        match_count:  result.match?.match_count || 0,
+        sample_events: sampleEvents,
+      })
+      setAnalysis(res.analysis || res.message || JSON.stringify(res))
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="border border-indigo-200 rounded-lg bg-indigo-50 p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 text-xs font-semibold text-indigo-700">
+          <Bot size={13} /> AI Analysis
+        </div>
+        {!analysis && (
+          <button onClick={analyze} disabled={loading} className="btn-primary text-xs py-1 px-2.5">
+            {loading ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+            {loading ? 'Analyzing…' : 'Analyze with AI'}
+          </button>
+        )}
+      </div>
+      {error && <p className="text-xs text-red-600">{error}</p>}
+      {analysis && (
+        <div className="text-xs text-indigo-900 leading-relaxed whitespace-pre-wrap bg-white border border-indigo-100 rounded-lg p-3 max-h-64 overflow-y-auto">
+          {analysis}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -81,8 +383,9 @@ function RunOnCaseModal({ rule, cases, onClose }) {
   return (
     <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
       onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl w-full max-w-md shadow-2xl">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 dark:border-gray-700">
+      <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl w-full max-w-md shadow-2xl flex flex-col"
+        style={{ maxHeight: '90vh' }}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
           <div className="flex items-center gap-2">
             <Play size={15} className="text-brand-accent" />
             <span className="font-semibold text-brand-text text-sm">Run Rule on Case</span>
@@ -90,12 +393,13 @@ function RunOnCaseModal({ rule, cases, onClose }) {
           <button onClick={onClose} className="btn-ghost p-1"><X size={14} /></button>
         </div>
 
-        <div className="p-5 space-y-4">
+        <div className="p-5 space-y-4 overflow-y-auto flex-1">
           {/* Rule summary */}
           <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
             <div className="flex items-center gap-2 flex-wrap mb-1">
               <p className="text-xs font-semibold text-brand-text">{rule.name}</p>
               {rule.category && <CategoryBadge category={rule.category} />}
+              {rule.sigma_level && <SigmaLevelBadge level={rule.sigma_level} />}
             </div>
             <code className="block text-xs text-gray-500 font-mono break-all">{rule.query}</code>
           </div>
@@ -151,6 +455,8 @@ function RunOnCaseModal({ rule, cases, onClose }) {
                       <p className="text-xs text-gray-700 mt-0.5">{ev.message || '—'}</p>
                     </button>
                   ))}
+                  {/* AI Analysis (only shown after a firing result) */}
+                  <AiAnalysisPanel rule={rule} result={result} />
                 </>
               ) : (
                 <p className="text-xs text-green-700 flex items-center gap-1">
@@ -165,123 +471,39 @@ function RunOnCaseModal({ rule, cases, onClose }) {
   )
 }
 
-// ── Edit form (inline) ────────────────────────────────────────────────────────
-function EditRuleForm({ rule, onSaved, onCancel }) {
-  const [form, setForm] = useState({
-    name: rule.name,
-    description: rule.description || '',
-    category: rule.category || '',
-    artifact_type: rule.artifact_type || '',
-    query: rule.query,
-    threshold: rule.threshold,
-  })
-  const [saving, setSaving] = useState(false)
-  const [error, setError]   = useState('')
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
-
-  async function save(e) {
-    e.preventDefault()
-    setSaving(true)
-    setError('')
-    try {
-      const updated = await api.alertRules.updateLibraryRule(rule.id, {
-        ...form,
-        threshold: parseInt(form.threshold) || 1,
-      })
-      onSaved(updated)
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <form onSubmit={save} className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-3">
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="block text-xs font-medium text-gray-600 mb-1">Rule Name *</label>
-          <input className="input text-xs" value={form.name} onChange={e => set('name', e.target.value)} required />
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-gray-600 mb-1">Category</label>
-          <select className="input text-xs" value={form.category} onChange={e => set('category', e.target.value)}>
-            <option value="">Uncategorized</option>
-            {CATEGORY_ORDER.filter(c => c !== 'Other').map(c => (
-              <option key={c} value={c}>{c}</option>
-            ))}
-          </select>
-        </div>
-      </div>
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="block text-xs font-medium text-gray-600 mb-1">Artifact Type</label>
-          <select className="input text-xs" value={form.artifact_type} onChange={e => set('artifact_type', e.target.value)}>
-            <option value="">Any</option>
-            <option value="evtx">evtx</option>
-            <option value="prefetch">prefetch</option>
-            <option value="mft">mft</option>
-            <option value="registry">registry</option>
-            <option value="lnk">lnk</option>
-            <option value="hayabusa">hayabusa</option>
-          </select>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
-          <input className="input text-xs" value={form.description} onChange={e => set('description', e.target.value)} />
-        </div>
-      </div>
-      <div>
-        <label className="block text-xs font-medium text-gray-600 mb-1">ES Query *</label>
-        <input className="input font-mono text-xs" value={form.query} onChange={e => set('query', e.target.value)} required />
-      </div>
-      <div className="flex items-end gap-3">
-        <div className="w-28">
-          <label className="block text-xs font-medium text-gray-600 mb-1">Min Matches</label>
-          <input type="number" min="1" className="input text-xs" value={form.threshold} onChange={e => set('threshold', e.target.value)} />
-        </div>
-        <button type="submit" disabled={saving} className="btn-primary text-xs">
-          {saving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Save
-        </button>
-        <button type="button" onClick={onCancel} className="btn-ghost text-xs">
-          <X size={13} /> Cancel
-        </button>
-      </div>
-      {error && <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{error}</p>}
-    </form>
-  )
-}
-
 // ── Library rule card ─────────────────────────────────────────────────────────
 function LibraryRuleCard({ rule, cases, onDelete, onUpdated }) {
   const [expanded, setExpanded] = useState(false)
-  const [editing, setEditing]   = useState(false)
-  const [showRun, setShowRun]   = useState(false)
-
-  if (editing) {
-    return (
-      <EditRuleForm
-        rule={rule}
-        onSaved={updated => { onUpdated(updated); setEditing(false) }}
-        onCancel={() => setEditing(false)}
-      />
-    )
-  }
+  const [showEdit, setShowEdit] = useState(false)
+  const [showRun,  setShowRun]  = useState(false)
 
   return (
     <>
-      {showRun && <RunOnCaseModal rule={rule} cases={cases} onClose={() => setShowRun(false)} />}
+      {showRun  && <RunOnCaseModal rule={rule} cases={cases} onClose={() => setShowRun(false)} />}
+      {showEdit && (
+        <SigmaRuleModal
+          rule={rule}
+          onClose={() => setShowEdit(false)}
+          onSaved={updated => { onUpdated(updated); setShowEdit(false) }}
+        />
+      )}
       <div className="card overflow-hidden">
         <div className="flex items-center gap-3 px-4 py-3">
           <AlertTriangle size={15} className="text-amber-500 flex-shrink-0" />
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
               <span className="font-medium text-brand-text text-sm">{rule.name}</span>
-              {rule.category && <CategoryBadge category={rule.category} />}
+              {rule.category    && <CategoryBadge category={rule.category} />}
+              {rule.sigma_level && <SigmaLevelBadge level={rule.sigma_level} />}
               {rule.artifact_type && (
                 <span className={`badge badge-${rule.artifact_type}`}>{rule.artifact_type}</span>
               )}
               <span className="text-xs text-gray-400">threshold ≥{rule.threshold}</span>
+              {rule.sigma_yaml && (
+                <span className="badge bg-indigo-50 text-indigo-600 border-indigo-200 text-[10px]">
+                  <FileCode size={9} className="mr-0.5" /> Sigma
+                </span>
+              )}
             </div>
             {rule.description && (
               <p className="text-xs text-gray-500 truncate">{rule.description}</p>
@@ -296,9 +518,9 @@ function LibraryRuleCard({ rule, cases, onDelete, onUpdated }) {
               <Play size={13} />
             </button>
             <button
-              onClick={() => setEditing(true)}
+              onClick={() => setShowEdit(true)}
               className="btn-ghost px-2 py-1.5 text-xs"
-              title="Edit rule"
+              title="Edit rule as Sigma YAML"
             >
               <Pencil size={13} />
             </button>
@@ -319,14 +541,39 @@ function LibraryRuleCard({ rule, cases, onDelete, onUpdated }) {
         </div>
 
         {expanded && (
-          <div className="border-t border-gray-100 bg-gray-50 px-4 py-3">
-            <p className="text-xs text-gray-500 mb-1">ES Query</p>
-            <code className="block text-xs font-mono text-brand-text bg-white border border-gray-200
-                             rounded px-3 py-2 break-all">
-              {rule.query}
-            </code>
+          <div className="border-t border-gray-100 bg-gray-50 px-4 py-3 space-y-3">
+            {/* ES Query */}
+            <div>
+              <p className="text-xs text-gray-500 mb-1">Elasticsearch Query</p>
+              <code className="block text-xs font-mono text-brand-text bg-white border border-gray-200
+                               rounded px-3 py-2 break-all">
+                {rule.query}
+              </code>
+            </div>
+            {/* Sigma YAML */}
+            {rule.sigma_yaml && (
+              <div>
+                <p className="text-xs text-gray-500 mb-1 flex items-center gap-1">
+                  <FileCode size={11} /> Sigma YAML
+                </p>
+                <pre className="text-[11px] font-mono text-gray-700 bg-white border border-gray-200
+                                 rounded px-3 py-2 overflow-x-auto max-h-48 overflow-y-auto">
+                  {rule.sigma_yaml}
+                </pre>
+              </div>
+            )}
+            {/* Tags */}
+            {rule.sigma_tags?.length > 0 && (
+              <div className="flex flex-wrap gap-1">
+                {rule.sigma_tags.map(t => (
+                  <span key={t} className="badge bg-gray-100 text-gray-500 border border-gray-200 font-mono">
+                    {t}
+                  </span>
+                ))}
+              </div>
+            )}
             {rule.created_at && (
-              <p className="text-xs text-gray-400 mt-2">
+              <p className="text-xs text-gray-400">
                 Added {new Date(rule.created_at).toLocaleDateString()}
               </p>
             )}
@@ -337,217 +584,6 @@ function LibraryRuleCard({ rule, cases, onDelete, onUpdated }) {
   )
 }
 
-// ── Create rule form ──────────────────────────────────────────────────────────
-function CreateRuleForm({ onCreated }) {
-  const [form, setForm] = useState({
-    name: '', description: '', category: '', artifact_type: '', query: '', threshold: 1,
-  })
-  const [saving, setSaving] = useState(false)
-  const [error, setError]   = useState('')
-
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
-
-  async function submit(e) {
-    e.preventDefault()
-    if (!form.name.trim() || !form.query.trim()) return
-    setSaving(true)
-    setError('')
-    try {
-      const rule = await api.alertRules.createLibraryRule({
-        ...form,
-        threshold: parseInt(form.threshold) || 1,
-      })
-      onCreated(rule)
-      setForm({ name: '', description: '', category: '', artifact_type: '', query: '', threshold: 1 })
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <form onSubmit={submit} className="card p-5 space-y-3">
-      <h3 className="font-semibold text-brand-text flex items-center gap-2">
-        <Plus size={15} className="text-brand-accent" />
-        Create Custom Rule
-      </h3>
-
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="block text-xs font-medium text-gray-600 mb-1">Rule Name *</label>
-          <input className="input" placeholder="e.g. Lateral Movement Detected"
-            value={form.name} onChange={e => set('name', e.target.value)} required />
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-gray-600 mb-1">Category</label>
-          <select className="input" value={form.category} onChange={e => set('category', e.target.value)}>
-            <option value="">Uncategorized</option>
-            {CATEGORY_ORDER.filter(c => c !== 'Other').map(c => (
-              <option key={c} value={c}>{c}</option>
-            ))}
-          </select>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="block text-xs font-medium text-gray-600 mb-1">Artifact Type</label>
-          <select className="input" value={form.artifact_type}
-            onChange={e => set('artifact_type', e.target.value)}>
-            <option value="">Any</option>
-            <option value="evtx">evtx</option>
-            <option value="prefetch">prefetch</option>
-            <option value="mft">mft</option>
-            <option value="registry">registry</option>
-            <option value="lnk">lnk</option>
-            <option value="hayabusa">hayabusa</option>
-          </select>
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
-          <input className="input" placeholder="What does this rule detect?"
-            value={form.description} onChange={e => set('description', e.target.value)} />
-        </div>
-      </div>
-
-      <div>
-        <label className="block text-xs font-medium text-gray-600 mb-1">
-          Elasticsearch Query *
-          <span className="text-gray-400 font-normal ml-1">(Lucene query string syntax)</span>
-        </label>
-        <input className="input font-mono" placeholder="evtx.event_id:4625 AND evtx.event_data.FailureReason:*"
-          value={form.query} onChange={e => set('query', e.target.value)} required />
-      </div>
-
-      <div className="flex items-end gap-3">
-        <div className="w-36">
-          <label className="block text-xs font-medium text-gray-600 mb-1">Min Matches</label>
-          <input type="number" min="1" className="input" value={form.threshold}
-            onChange={e => set('threshold', e.target.value)} />
-        </div>
-        <button type="submit" disabled={saving} className="btn-primary">
-          {saving ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
-          Add Rule
-        </button>
-      </div>
-
-      {error && (
-        <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-          {error}
-        </p>
-      )}
-    </form>
-  )
-}
-
-// ── Sigma import modal ────────────────────────────────────────────────────────
-function SigmaImportModal({ onClose, onImported }) {
-  const [yamlText, setYamlText] = useState('')
-  const [importing, setImporting] = useState(false)
-  const [result, setResult]       = useState(null)
-  const [error, setError]         = useState('')
-  const fileRef = useRef(null)
-
-  function handleFile(e) {
-    const file = e.target.files?.[0]
-    if (!file) return
-    const reader = new FileReader()
-    reader.onload = ev => setYamlText(ev.target.result || '')
-    reader.readAsText(file)
-  }
-
-  async function doImport() {
-    if (!yamlText.trim()) return
-    setImporting(true)
-    setError('')
-    setResult(null)
-    try {
-      const res = await api.alertRules.importSigma({ yaml: yamlText })
-      setResult(res)
-      if (res.imported > 0) onImported(res.rules)
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setImporting(false)
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-      onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="bg-white border border-gray-200 rounded-xl w-full max-w-xl shadow-2xl flex flex-col"
-        style={{ maxHeight: '85vh' }}>
-        {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 flex-shrink-0">
-          <div className="flex items-center gap-2">
-            <FileCode size={16} className="text-brand-accent" />
-            <span className="font-semibold text-brand-text text-sm">Import Sigma Rule</span>
-          </div>
-          <button onClick={onClose} className="btn-ghost p-1"><X size={14} /></button>
-        </div>
-
-        {/* Body */}
-        <div className="p-5 space-y-3 overflow-y-auto flex-1">
-          <p className="text-xs text-gray-500">
-            Paste a Sigma rule YAML below, or upload a <code>.yml</code> / <code>.yaml</code> file.
-            The rule will be converted to an Elasticsearch query and added to the library.
-          </p>
-
-          {/* File upload */}
-          <div>
-            <input ref={fileRef} type="file" accept=".yml,.yaml" className="hidden" onChange={handleFile} />
-            <button
-              onClick={() => fileRef.current?.click()}
-              className="btn-outline text-xs w-full justify-center"
-            >
-              <Upload size={13} /> Upload .yml / .yaml file
-            </button>
-          </div>
-
-          {/* YAML textarea */}
-          <textarea
-            value={yamlText}
-            onChange={e => setYamlText(e.target.value)}
-            placeholder={`title: Suspicious PowerShell Execution\nstatus: stable\nlogsource:\n  product: windows\n  service: security\ndetection:\n  selection:\n    EventID: 4688\n    CommandLine|contains: 'powershell'\n  condition: selection\nlevel: medium\ntags:\n  - attack.execution\n  - attack.t1059.001`}
-            className="input font-mono text-xs w-full resize-none"
-            rows={14}
-            spellCheck={false}
-          />
-
-          {error && (
-            <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-center gap-1.5">
-              <X size={12} /> {error}
-            </p>
-          )}
-
-          {result && (
-            <div className={`text-xs rounded-lg border px-3 py-2 ${result.imported > 0 ? 'bg-green-50 border-green-200 text-green-700' : 'bg-amber-50 border-amber-200 text-amber-700'}`}>
-              {result.imported > 0
-                ? <><Check size={12} className="inline mr-1" />{result.imported} rule{result.imported > 1 ? 's' : ''} imported.</>
-                : <><AlertTriangle size={12} className="inline mr-1" />Rule already exists or could not be parsed (skipped: {result.skipped}).</>
-              }
-            </div>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className="px-5 py-4 border-t border-gray-200 flex-shrink-0 flex items-center gap-2">
-          <button
-            onClick={doImport}
-            disabled={!yamlText.trim() || importing}
-            className="btn-primary text-xs"
-          >
-            {importing ? <Loader2 size={13} className="animate-spin" /> : <FileCode size={13} />}
-            Import Rule
-          </button>
-          <button onClick={onClose} className="btn-ghost text-xs">Close</button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function AlertLibrary() {
   const [rules, setRules]     = useState([])
@@ -555,7 +591,7 @@ export default function AlertLibrary() {
   const [loading, setLoading] = useState(true)
   const [seeding, setSeeding]   = useState(false)
   const [seedMsg, setSeedMsg]   = useState(null)
-  const [showSigma, setShowSigma] = useState(false)
+  const [showSigmaModal, setShowSigmaModal] = useState(false)
   const [search, setSearch]             = useState('')
   const [artifactFilter, setArtifactFilter] = useState('all')
   const [categoryFilter, setCategoryFilter] = useState('all')
@@ -570,7 +606,6 @@ export default function AlertLibrary() {
     [rules]
   )
 
-  // Distinct categories present in the current rule set, ordered by CATEGORY_ORDER
   const presentCategories = useMemo(() => {
     const cats = new Set(rules.map(r => r.category || 'Other').filter(Boolean))
     return ['all', ...CATEGORY_ORDER.filter(c => cats.has(c))]
@@ -589,14 +624,12 @@ export default function AlertLibrary() {
     })
   }, [rules, search, artifactFilter, categoryFilter])
 
-  // Group filtered rules by category in CATEGORY_ORDER order
   const groupedRules = useMemo(() => {
     const groups = new Map()
     for (const cat of CATEGORY_ORDER) {
       const items = filteredRules.filter(r => (r.category || 'Other') === cat)
       if (items.length > 0) groups.set(cat, items)
     }
-    // Catch any rules with a category not in CATEGORY_ORDER
     const known = new Set(CATEGORY_ORDER)
     const uncategorized = filteredRules.filter(r => !known.has(r.category || 'Other'))
     if (uncategorized.length > 0) {
@@ -634,10 +667,6 @@ export default function AlertLibrary() {
     }
   }
 
-  function handleCreated(rule) {
-    setRules(prev => [rule, ...prev])
-  }
-
   function handleUpdated(updated) {
     setRules(prev => prev.map(r => r.id === updated.id ? updated : r))
   }
@@ -668,12 +697,12 @@ export default function AlertLibrary() {
           <h1 className="text-xl font-bold text-brand-text">Alert Rule Library</h1>
         </div>
         <p className="text-sm text-gray-500">
-          Define detection rules. Use <Play size={11} className="inline" /> to run a specific rule on any case,
-          or use the <strong className="text-brand-text">Run Alerts</strong> button on the case timeline to run all rules at once.
+          Sigma-based detection rules. Use <Play size={11} className="inline" /> to run a rule on any case,
+          or use <strong className="text-brand-text">Run Alerts</strong> on the case timeline to run all rules.
         </p>
       </div>
 
-      {/* Library — shown first */}
+      {/* Library section */}
       <div className="mb-8">
         <div className="flex items-center gap-2 mb-3">
           <Search size={14} className="text-gray-500" />
@@ -691,11 +720,10 @@ export default function AlertLibrary() {
               </span>
             )}
             <button
-              onClick={() => setShowSigma(true)}
-              className="btn-outline text-xs"
-              title="Import a Sigma detection rule (YAML)"
+              onClick={() => setShowSigmaModal(true)}
+              className="btn-primary text-xs"
             >
-              <FileCode size={13} /> Import Sigma
+              <Plus size={13} /> New Rule
             </button>
             <button
               onClick={() => seedDefaults(false)}
@@ -704,17 +732,20 @@ export default function AlertLibrary() {
               title="Append any built-in defaults not already in the library"
             >
               {seeding ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
-              Load Default Rules
+              Load Defaults
             </button>
           </div>
         </div>
 
-        {showSigma && (
-          <SigmaImportModal
-            onClose={() => setShowSigma(false)}
-            onImported={newRules => {
-              setRules(prev => [...prev, ...newRules])
-              setShowSigma(false)
+        {/* New Sigma Rule modal */}
+        {showSigmaModal && (
+          <SigmaRuleModal
+            onClose={() => setShowSigmaModal(false)}
+            onSaved={newRules => {
+              // importSigma returns an array
+              const arr = Array.isArray(newRules) ? newRules : [newRules]
+              setRules(prev => [...prev, ...arr])
+              setShowSigmaModal(false)
             }}
           />
         )}
@@ -746,116 +777,87 @@ export default function AlertLibrary() {
           </div>
         )}
 
-        {/* Filter bar */}
+        {/* Search + artifact filter row */}
         {!loading && rules.length > 0 && (
-          <div className="flex items-center gap-2 mb-3 flex-wrap">
-            {/* Search input */}
-            <div className="relative flex-1 min-w-[180px]">
-              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+          <div className="flex items-center gap-2 mb-3">
+            <div className="relative flex-1">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
               <input
                 ref={searchRef}
-                type="text"
+                className="input pl-8 text-xs"
+                placeholder="Search rules… (press / to focus)"
                 value={search}
                 onChange={e => setSearch(e.target.value)}
-                placeholder="Filter rules… (press /)"
-                className="input text-xs pl-8 pr-7"
               />
-              {search && (
-                <button
-                  onClick={() => setSearch('')}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                >
-                  <X size={12} />
-                </button>
-              )}
             </div>
-
-            {/* Artifact type filter */}
-            <div className="flex items-center gap-1">
-              <Filter size={12} className="text-gray-400" />
+            {artifactTypes.length > 2 && (
               <select
+                className="input text-xs max-w-[140px]"
                 value={artifactFilter}
                 onChange={e => setArtifactFilter(e.target.value)}
-                className="input text-xs py-1.5"
               >
-                {artifactTypes.map(t => (
-                  <option key={t} value={t}>{t === 'all' ? 'All types' : t}</option>
+                {artifactTypes.map(a => (
+                  <option key={a} value={a}>{a === 'all' ? 'All artifacts' : a}</option>
                 ))}
               </select>
-            </div>
-
-            {/* Result count + clear */}
-            <span className="text-xs text-gray-400 whitespace-nowrap">
-              Showing {filteredRules.length} of {rules.length} rules
-            </span>
+            )}
             {hasFilters && (
-              <button onClick={clearFilters} className="btn-ghost text-xs text-gray-500">
-                <X size={11} /> Clear
+              <button onClick={clearFilters} className="btn-ghost text-xs flex items-center gap-1">
+                <X size={12} /> Clear
               </button>
             )}
           </div>
         )}
 
+        {/* Rule list */}
         {loading ? (
-          <div className="flex items-center gap-2 text-gray-400 py-8 justify-center">
-            <Loader2 size={18} className="animate-spin" />
-            Loading rules…
+          <div className="space-y-2">
+            {[1, 2, 3].map(i => <div key={i} className="skeleton h-14 w-full" />)}
           </div>
         ) : rules.length === 0 ? (
-          <div className="card p-10 flex flex-col items-center text-center text-gray-400">
-            <Bell size={32} className="mb-3 opacity-30" />
-            <p className="font-medium text-brand-text">No rules yet</p>
-            <p className="text-sm mt-1 mb-5">Load the built-in detection rules to get started, or create your own below.</p>
-            <button
-              onClick={() => seedDefaults(false)}
-              disabled={seeding}
-              className="btn-primary"
-            >
-              {seeding ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+          <div className="card p-10 text-center">
+            <ShieldAlert size={28} className="text-gray-300 mx-auto mb-3" />
+            <p className="text-gray-600 text-sm font-medium mb-1">No rules in library</p>
+            <p className="text-gray-400 text-xs mb-4">
+              Create a rule with <strong>New Rule</strong>, or load the built-in defaults.
+            </p>
+            <button onClick={() => seedDefaults(false)} disabled={seeding} className="btn-outline text-xs mx-auto">
+              {seeding ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
               Load Default Rules
             </button>
           </div>
         ) : filteredRules.length === 0 ? (
-          <div className="card p-8 flex flex-col items-center text-center text-gray-400">
-            <Search size={24} className="mb-2 opacity-30" />
-            <p className="text-sm">No rules match your filters.</p>
-            <button onClick={clearFilters} className="btn-ghost text-xs mt-3">
-              Clear filters
+          <div className="card p-8 text-center">
+            <Filter size={22} className="text-gray-300 mx-auto mb-2" />
+            <p className="text-gray-500 text-sm">No rules match the current filters.</p>
+            <button onClick={clearFilters} className="btn-ghost text-xs mt-2">
+              <X size={12} /> Clear filters
             </button>
           </div>
         ) : (
-          <div className="space-y-6">
-            {[...groupedRules.entries()].map(([cat, catRules]) => {
-              const style = CATEGORY_STYLES[cat] || CATEGORY_STYLES['Other']
-              return (
-                <div key={cat}>
-                  {/* Category section header */}
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className={`w-2 h-2 rounded-full flex-shrink-0 ${style.dot}`} />
-                    <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">{cat}</h3>
-                    <span className="text-xs text-gray-400">({catRules.length})</span>
-                    <div className="flex-1 border-t border-gray-100" />
-                  </div>
-                  <div className="space-y-2">
-                    {catRules.map(r => (
-                      <LibraryRuleCard
-                        key={r.id}
-                        rule={r}
-                        cases={cases}
-                        onDelete={deleteRule}
-                        onUpdated={handleUpdated}
-                      />
-                    ))}
-                  </div>
+          <div className="space-y-4">
+            {[...groupedRules.entries()].map(([cat, items]) => (
+              <div key={cat}>
+                <div className="flex items-center gap-2 mb-2">
+                  <CategoryBadge category={cat} />
+                  <span className="text-xs text-gray-400">{items.length}</span>
                 </div>
-              )
-            })}
+                <div className="space-y-2">
+                  {items.map(rule => (
+                    <LibraryRuleCard
+                      key={rule.id}
+                      rule={rule}
+                      cases={cases}
+                      onDelete={deleteRule}
+                      onUpdated={handleUpdated}
+                    />
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
         )}
       </div>
-
-      {/* Create rule form — at the bottom */}
-      <CreateRuleForm onCreated={handleCreated} />
     </div>
   )
 }

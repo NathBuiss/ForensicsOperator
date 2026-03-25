@@ -37,9 +37,14 @@ def _ingest_one(
     fileobj,
     size: int,
     dispatched: list,
+    errors: list,
     source_zip: str | None = None,
 ) -> None:
-    """Upload a single file to MinIO and dispatch an ingest job (streaming, no RAM copy)."""
+    """Upload a single file to MinIO and dispatch an ingest job (streaming, no RAM copy).
+
+    On failure the error is appended to *errors* so the caller can continue
+    processing remaining files.  No exception is raised.
+    """
     if size == 0:
         logger.warning("Skipping empty file: %s", filename)
         return
@@ -50,14 +55,18 @@ def _ingest_one(
     try:
         storage.upload_fileobj(minio_key, fileobj, size)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Storage upload failed for '{filename}': {exc}")
+        logger.error("Storage upload failed for '%s': %s", filename, exc)
+        errors.append({"filename": filename, "error": f"Storage upload failed: {exc}"})
+        return
 
     job_svc.create_job(job_id, case_id, filename, minio_key, source_zip=source_zip or "")
 
     try:
         _dispatch_celery_task(job_id, case_id, minio_key, filename)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Task dispatch failed for '{filename}': {exc}")
+        logger.error("Task dispatch failed for '%s': %s", filename, exc)
+        errors.append({"filename": filename, "error": f"Task dispatch failed: {exc}"})
+        return
 
     entry: dict = {
         "job_id":     job_id,
@@ -70,12 +79,15 @@ def _ingest_one(
     dispatched.append(entry)
 
 
-def _handle_zip(case_id: str, zip_name: str, zip_fileobj, dispatched: list) -> None:
+def _handle_zip(
+    case_id: str, zip_name: str, zip_fileobj, dispatched: list, errors: list,
+) -> None:
     """
     Extract a zip archive and ingest each contained file as a separate job.
 
-    Uses a tmpdir so the zip is never fully loaded into memory — each file is
+    Uses a tmpdir so the zip is never fully loaded into memory -- each file is
     extracted, streamed to MinIO, then immediately deleted from disk.
+    If individual files fail, errors are recorded and processing continues.
     """
     with tempfile.TemporaryDirectory(prefix="fo_zip_") as tmpdir:
         # ── Write the uploaded zip to disk ──────────────────────────────────
@@ -86,10 +98,8 @@ def _handle_zip(case_id: str, zip_name: str, zip_fileobj, dispatched: list) -> N
         try:
             zf = zipfile.ZipFile(zip_path, "r")
         except zipfile.BadZipFile:
-            raise HTTPException(
-                status_code=400,
-                detail=f"'{zip_name}' is not a valid zip archive",
-            )
+            errors.append({"filename": zip_name, "error": "Not a valid zip archive"})
+            return
 
         pre_count = len(dispatched)
         with zf:
@@ -108,6 +118,11 @@ def _handle_zip(case_id: str, zip_name: str, zip_fileobj, dispatched: list) -> N
                         shutil.copyfileobj(src, dst)
                 except Exception as exc:
                     logger.warning("Could not extract '%s' from '%s': %s", entry, zip_name, exc)
+                    errors.append({
+                        "filename": entry_name,
+                        "source_zip": zip_name,
+                        "error": f"Extraction failed: {exc}",
+                    })
                     continue
 
                 file_size = os.path.getsize(extracted_path)
@@ -117,21 +132,21 @@ def _handle_zip(case_id: str, zip_name: str, zip_fileobj, dispatched: list) -> N
                 # Stream extracted file to MinIO then clean up immediately
                 try:
                     with open(extracted_path, "rb") as f:
-                        _ingest_one(case_id, entry_name, f, file_size, dispatched, source_zip=zip_name)
-                except HTTPException:
-                    logger.error("Ingest failed for '%s' from zip '%s'", entry_name, zip_name)
-                    continue
+                        _ingest_one(
+                            case_id, entry_name, f, file_size,
+                            dispatched, errors, source_zip=zip_name,
+                        )
                 finally:
                     try:
                         os.unlink(extracted_path)
                     except OSError:
                         pass
 
-        if len(dispatched) == pre_count:
-            raise HTTPException(
-                status_code=400,
-                detail=f"'{zip_name}' contained no processable files",
-            )
+        if len(dispatched) == pre_count and not errors:
+            errors.append({
+                "filename": zip_name,
+                "error": "Zip archive contained no processable files",
+            })
 
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
@@ -144,6 +159,10 @@ async def ingest_files(case_id: str, files: List[UploadFile] = File(...)):
     Accepts: .evtx, .plaso, .pf, $MFT, NTUSER.DAT, SYSTEM, SOFTWARE, SAM,
              .lnk, .jsonl, .csv  and  .zip (contents extracted, each file processed separately)
 
+    Supports uploading multiple files at once (e.g. directory/folder uploads).
+    Each file gets its own job ID and is processed independently — if one file
+    fails, the remaining files continue.
+
     Large files are streamed directly to MinIO — they are never fully loaded into
     the API process memory, so uploads of several GB are safe.
     """
@@ -152,6 +171,7 @@ async def ingest_files(case_id: str, files: List[UploadFile] = File(...)):
         raise HTTPException(status_code=404, detail="Case not found")
 
     dispatched: list = []
+    errors: list = []
 
     for upload in files:
         filename = upload.filename or "unknown"
@@ -165,17 +185,26 @@ async def ingest_files(case_id: str, files: List[UploadFile] = File(...)):
             size = file_obj.tell()
             file_obj.seek(0)
         except Exception as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Cannot determine size of '{filename}': {exc}",
-            )
+            logger.error("Cannot determine size of '%s': %s", filename, exc)
+            errors.append({"filename": filename, "error": f"Cannot determine file size: {exc}"})
+            continue
 
         if filename.lower().endswith(".zip"):
-            _handle_zip(case_id, filename, file_obj, dispatched)
+            _handle_zip(case_id, filename, file_obj, dispatched, errors)
         else:
-            _ingest_one(case_id, filename, file_obj, size, dispatched)
+            _ingest_one(case_id, filename, file_obj, size, dispatched, errors)
 
-    if not dispatched:
+    if not dispatched and not errors:
         raise HTTPException(status_code=400, detail="No valid files uploaded")
 
-    return {"case_id": case_id, "jobs": dispatched}
+    if not dispatched and errors:
+        raise HTTPException(
+            status_code=400,
+            detail="All files failed to ingest",
+            headers={"X-Ingest-Errors": str(len(errors))},
+        )
+
+    response: dict = {"case_id": case_id, "jobs": dispatched}
+    if errors:
+        response["errors"] = errors
+    return response

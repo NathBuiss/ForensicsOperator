@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Settings2, Sparkles, Check, X, Loader2, Trash2, Eye, EyeOff, AlertCircle, Wifi } from 'lucide-react'
+import { Settings2, Sparkles, Check, X, Loader2, Trash2, Eye, EyeOff, AlertCircle, Wifi, HardDrive } from 'lucide-react'
 import { api } from '../api/client'
 
 const PROVIDERS = [
@@ -38,6 +38,14 @@ const PROVIDERS = [
   },
 ]
 
+const S3_VENDORS = [
+  { id: 'aws',    name: 'AWS S3' },
+  { id: 'minio',  name: 'MinIO' },
+  { id: 'wasabi', name: 'Wasabi' },
+  { id: 'gcs',    name: 'GCS' },
+  { id: 'other',  name: 'Other' },
+]
+
 export default function Settings() {
   const [config, setConfig]   = useState(null)
   const [loading, setLoading] = useState(true)
@@ -56,9 +64,50 @@ export default function Settings() {
     enabled: true,
   })
 
+  // ── S3 Storage state ──────────────────────────────────────────────────────
+  const [s3Config, setS3Config]       = useState(null)
+  const [s3Loading, setS3Loading]     = useState(true)
+  const [s3Saving, setS3Saving]       = useState(false)
+  const [s3Saved, setS3Saved]         = useState(false)
+  const [s3Error, setS3Error]         = useState('')
+  const [s3ShowKey, setS3ShowKey]     = useState(false)
+  const [s3Testing, setS3Testing]     = useState(false)
+  const [s3TestResult, setS3TestResult] = useState(null)
+
+  const [s3Form, setS3Form] = useState({
+    vendor: 'aws',
+    endpoint: '',
+    access_key: '',
+    secret_key: '',
+    bucket: '',
+    region: '',
+    use_ssl: true,
+  })
+
+  const setS3 = (k, v) => setS3Form(f => ({ ...f, [k]: v }))
+
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
   useEffect(() => {
+    // Load S3 config
+    api.s3.getConfig()
+      .then(cfg => {
+        setS3Config(cfg)
+        if (cfg.endpoint) {
+          setS3Form({
+            vendor:     cfg.vendor || 'aws',
+            endpoint:   cfg.endpoint || '',
+            access_key: cfg.access_key || '',
+            secret_key: '',
+            bucket:     cfg.bucket || '',
+            region:     cfg.region || '',
+            use_ssl:    cfg.use_ssl !== false,
+          })
+        }
+      })
+      .catch(() => {})
+      .finally(() => setS3Loading(false))
+
     api.llm.getConfig()
       .then(cfg => {
         setConfig(cfg)
@@ -117,6 +166,49 @@ export default function Settings() {
       setTestResult({ ok: false, error: err.message })
     } finally {
       setTesting(false)
+    }
+  }
+
+  // ── S3 handlers ─────────────────────────────────────────────────────────
+  async function saveS3(e) {
+    e.preventDefault()
+    setS3Saving(true)
+    setS3Error('')
+    setS3Saved(false)
+    try {
+      const updated = await api.s3.setConfig(s3Form)
+      setS3Config(updated)
+      setS3Saved(true)
+      setTimeout(() => setS3Saved(false), 3000)
+    } catch (err) {
+      setS3Error(err.message)
+    } finally {
+      setS3Saving(false)
+    }
+  }
+
+  async function clearS3() {
+    if (!confirm('Remove S3 storage configuration?')) return
+    try {
+      await api.s3.clearConfig()
+      setS3Config({ endpoint: '', access_key: '', secret_key_set: false, bucket: '', region: '', vendor: 'aws', use_ssl: true })
+      setS3Form({ vendor: 'aws', endpoint: '', access_key: '', secret_key: '', bucket: '', region: '', use_ssl: true })
+      setS3TestResult(null)
+    } catch (err) {
+      setS3Error(err.message)
+    }
+  }
+
+  async function testS3() {
+    setS3Testing(true)
+    setS3TestResult(null)
+    try {
+      const res = await api.s3.testConfig()
+      setS3TestResult({ ok: true, message: res.message })
+    } catch (err) {
+      setS3TestResult({ ok: false, error: err.message })
+    } finally {
+      setS3Testing(false)
     }
   }
 
@@ -310,6 +402,191 @@ export default function Settings() {
                 <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-start gap-1.5">
                   <X size={12} className="mt-0.5 flex-shrink-0" />
                   <span><strong>Failed:</strong> {testResult.error}</span>
+                </div>
+              )
+            )}
+          </form>
+        )}
+      </section>
+
+      {/* S3 Storage section */}
+      <section className="card p-5 space-y-4 mt-6">
+        <div className="flex items-center gap-2">
+          <HardDrive size={15} className="text-blue-500" />
+          <h2 className="font-semibold text-brand-text">S3 Storage</h2>
+          {!s3Loading && s3Config?.endpoint && (
+            <span className="text-xs text-green-600 bg-green-50 border border-green-200 rounded-full px-2 py-0.5 flex items-center gap-1">
+              <Check size={10} /> Configured
+            </span>
+          )}
+        </div>
+
+        <p className="text-xs text-gray-500">
+          Connect an external S3-compatible bucket (AWS S3, MinIO, Wasabi, GCS) to browse and import
+          forensic artifacts directly into cases, or let the collector upload evidence securely.
+        </p>
+
+        {s3Loading ? (
+          <div className="flex items-center gap-2 text-gray-400 py-4">
+            <Loader2 size={14} className="animate-spin" /> Loading...
+          </div>
+        ) : (
+          <form onSubmit={saveS3} className="space-y-4">
+            {/* Vendor */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Vendor</label>
+              <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">
+                {S3_VENDORS.map(v => (
+                  <button
+                    key={v.id}
+                    type="button"
+                    onClick={() => setS3('vendor', v.id)}
+                    className={`text-xs py-2 px-3 rounded-lg border transition-colors text-left font-medium ${
+                      s3Form.vendor === v.id
+                        ? 'bg-brand-accent text-white border-brand-accent'
+                        : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
+                    }`}
+                  >
+                    {v.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Endpoint URL */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Endpoint URL</label>
+              <input
+                className="input text-xs font-mono"
+                placeholder={s3Form.vendor === 'aws' ? 's3.amazonaws.com' : s3Form.vendor === 'wasabi' ? 's3.wasabisys.com' : s3Form.vendor === 'gcs' ? 'storage.googleapis.com' : 'minio.example.com:9000'}
+                value={s3Form.endpoint}
+                onChange={e => setS3('endpoint', e.target.value)}
+                required
+              />
+            </div>
+
+            {/* Access Key */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Access Key</label>
+              <input
+                className="input text-xs font-mono"
+                placeholder="AKIAIOSFODNN7EXAMPLE"
+                value={s3Form.access_key}
+                onChange={e => setS3('access_key', e.target.value)}
+                required
+              />
+            </div>
+
+            {/* Secret Key */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                Secret Key
+                {s3Config?.secret_key_set && (
+                  <span className="ml-1 text-green-600 font-normal">(key set — leave blank to keep)</span>
+                )}
+              </label>
+              <div className="relative">
+                <input
+                  type={s3ShowKey ? 'text' : 'password'}
+                  className="input text-xs pr-8 font-mono"
+                  placeholder={s3Config?.secret_key_set ? '••••••••••••••••' : 'wJalrXUtnFEMI/K7MDENG/bPxR...'}
+                  value={s3Form.secret_key}
+                  onChange={e => setS3('secret_key', e.target.value)}
+                />
+                <button
+                  type="button"
+                  onClick={() => setS3ShowKey(v => !v)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                  {s3ShowKey ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              </div>
+            </div>
+
+            {/* Bucket + Region */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Bucket Name</label>
+                <input
+                  className="input text-xs font-mono"
+                  placeholder="my-forensics-bucket"
+                  value={s3Form.bucket}
+                  onChange={e => setS3('bucket', e.target.value)}
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Region <span className="text-gray-400 font-normal">(optional)</span>
+                </label>
+                <input
+                  className="input text-xs font-mono"
+                  placeholder="us-east-1"
+                  value={s3Form.region}
+                  onChange={e => setS3('region', e.target.value)}
+                />
+              </div>
+            </div>
+
+            {/* Use SSL */}
+            <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={s3Form.use_ssl}
+                onChange={e => setS3('use_ssl', e.target.checked)}
+                className="rounded border-gray-300 text-brand-accent focus:ring-brand-accent"
+              />
+              Use SSL / HTTPS
+            </label>
+
+            {s3Error && (
+              <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-center gap-1.5">
+                <AlertCircle size={12} /> {s3Error}
+              </p>
+            )}
+
+            <div className="flex items-center gap-2 flex-wrap">
+              <button type="submit" disabled={s3Saving} className="btn-primary text-xs">
+                {s3Saving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+                Save
+              </button>
+              {s3Config?.endpoint && (
+                <button
+                  type="button"
+                  onClick={testS3}
+                  disabled={s3Testing}
+                  className="btn-outline text-xs"
+                >
+                  {s3Testing ? <Loader2 size={13} className="animate-spin" /> : <Wifi size={13} />}
+                  Test Connection
+                </button>
+              )}
+              {s3Saved && (
+                <span className="text-xs text-green-600 flex items-center gap-1">
+                  <Check size={11} /> Saved
+                </span>
+              )}
+              {s3Config?.endpoint && (
+                <button
+                  type="button"
+                  onClick={clearS3}
+                  className="btn-ghost text-xs text-red-500 hover:text-red-700 ml-auto"
+                >
+                  <Trash2 size={12} /> Remove
+                </button>
+              )}
+            </div>
+
+            {s3TestResult && (
+              s3TestResult.ok ? (
+                <div className="text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2 flex items-start gap-1.5">
+                  <Check size={12} className="mt-0.5 flex-shrink-0" />
+                  <span><strong>Connected.</strong> {s3TestResult.message}</span>
+                </div>
+              ) : (
+                <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-start gap-1.5">
+                  <X size={12} className="mt-0.5 flex-shrink-0" />
+                  <span><strong>Failed:</strong> {s3TestResult.error}</span>
                 </div>
               )
             )}

@@ -1,0 +1,9 @@
+id: de4dot
+name: de4dot Deobfuscator
+description: ".NET assembly deobfuscation using de4dot. Removes known obfuscation patterns from .NET executables to reveal original code."
+input_extensions:
+  - .exe
+  - .dll
+available: false
+unavailable_reason: "Requires .NET runtime and de4dot binary. Windows/.NET only — not supported on Linux containers."
+run_on_files: true

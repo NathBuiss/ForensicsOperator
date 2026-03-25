@@ -70,6 +70,23 @@ def get_job(job_id: str) -> dict | None:
     return data
 
 
+def reset_job_for_retry(job_id: str) -> None:
+    """Reset a FAILED job back to PENDING so it can be re-dispatched."""
+    r = get_redis()
+    key = f"job:{job_id}"
+    r.hset(key, mapping={
+        "status": "PENDING",
+        "error": "",
+        "events_indexed": "0",
+        "plugin_used": "",
+        "plugin_stats": "{}",
+        "started_at": "",
+        "completed_at": "",
+        "task_id": "",
+    })
+    r.expire(key, JOB_TTL)
+
+
 def list_case_jobs(case_id: str) -> list[dict]:
     r = get_redis()
     job_ids = r.smembers(f"case:{case_id}:jobs")

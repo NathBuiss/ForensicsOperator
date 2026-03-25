@@ -9,10 +9,11 @@ from fastapi.responses import JSONResponse
 from routers import (
     cases, ingest, jobs, search, plugins, health,
     saved_searches, alert_rules, export, global_alert_rules,
-    modules, collector, editor, llm_config,
+    modules, collector, editor, llm_config, s3_integration, metrics,
+    cti,
 )
 from routers import auth as auth_router
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_user, require_admin, require_analyst_or_admin
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -48,9 +49,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Auth dependency applied to all protected routes ───────────────────────────
+# ── Auth dependencies for route protection ────────────────────────────────────
 # Health and auth endpoints are public; everything else requires a valid JWT.
-_protected = [Depends(get_current_user)]
+# Analyst-or-admin: regular forensic operations (cases, search, etc.)
+# Admin-only: system configuration (LLM settings, global alert rules, etc.)
+_analyst_or_admin = [Depends(require_analyst_or_admin)]
+_admin_only       = [Depends(require_admin)]
 
 # ── Routers ────────────────────────────────────────────────────────────────────
 
@@ -58,17 +62,24 @@ _protected = [Depends(get_current_user)]
 app.include_router(health.router,      prefix="/api/v1")
 app.include_router(auth_router.router, prefix="/api/v1")
 
-# Protected — require valid JWT (or AUTH_ENABLED=false for dev)
-app.include_router(cases.router,              prefix="/api/v1", dependencies=_protected)
-app.include_router(ingest.router,             prefix="/api/v1", dependencies=_protected)
-app.include_router(jobs.router,               prefix="/api/v1", dependencies=_protected)
-app.include_router(search.router,             prefix="/api/v1", dependencies=_protected)
-app.include_router(plugins.router,            prefix="/api/v1", dependencies=_protected)
-app.include_router(saved_searches.router,     prefix="/api/v1", dependencies=_protected)
-app.include_router(alert_rules.router,        prefix="/api/v1", dependencies=_protected)
-app.include_router(export.router,             prefix="/api/v1", dependencies=_protected)
-app.include_router(global_alert_rules.router, prefix="/api/v1", dependencies=_protected)
-app.include_router(modules.router,            prefix="/api/v1", dependencies=_protected)
-app.include_router(collector.router,          prefix="/api/v1", dependencies=_protected)
-app.include_router(editor.router,             prefix="/api/v1", dependencies=_protected)
-app.include_router(llm_config.router,         prefix="/api/v1", dependencies=_protected)
+# Protected — analyst or admin
+app.include_router(cases.router,              prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(ingest.router,             prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(jobs.router,               prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(search.router,             prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(plugins.router,            prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(saved_searches.router,     prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(alert_rules.router,        prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(export.router,             prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(modules.router,            prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(collector.router,          prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(editor.router,             prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(cti.router,               prefix="/api/v1", dependencies=_analyst_or_admin)
+
+# Protected — analyst or admin (alert rules used by analysts too)
+app.include_router(global_alert_rules.router, prefix="/api/v1", dependencies=_analyst_or_admin)
+
+# Protected — admin only (system configuration)
+app.include_router(llm_config.router,         prefix="/api/v1", dependencies=_admin_only)
+app.include_router(s3_integration.router,     prefix="/api/v1", dependencies=_admin_only)
+app.include_router(metrics.router,            prefix="/api/v1", dependencies=_analyst_or_admin)

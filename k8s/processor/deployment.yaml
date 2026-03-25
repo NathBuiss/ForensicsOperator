@@ -14,10 +14,9 @@ spec:
         app: processor
     spec:
       initContainers:
-        # Copy built-in plugins from the image into the shared PVC so they are
-        # available at /app/plugins at runtime. Uses cp -r so new versions always
-        # overwrite stale builtins, while user-uploaded plugins with unique names
-        # are preserved.
+        # Seed built-in plugins into the shared PVC on first run.
+        # Uses cp -n (no-overwrite) so edits made via Studio / editor API are
+        # preserved across pod restarts. Only new built-in files are added.
         - name: seed-plugins
           image: __FO_PROCESSOR_IMAGE__
           imagePullPolicy: __FO_PULL_POLICY__
@@ -25,8 +24,8 @@ spec:
             - sh
             - -c
             - |
-              cp -r /app/plugins_builtin/. /app/plugins/
-              echo "Built-in plugins seeded: $(ls /app/plugins)"
+              cp -n /app/plugins_builtin/. /app/plugins/ 2>/dev/null || true
+              echo "Built-in plugins seeded (no-overwrite): $(ls /app/plugins)"
           volumeMounts:
             - name: plugins-volume
               mountPath: /app/plugins

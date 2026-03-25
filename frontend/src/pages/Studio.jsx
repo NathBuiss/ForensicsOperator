@@ -452,13 +452,21 @@ export default function Studio() {
 
   async function handleSave() {
     if (!activeTab) return
-    const { type, name, code } = activeTab   // capture at call time
+    const { type, name, code, builtin } = activeTab   // capture at call time
     updateTab(type, name, { saving: true, validation: null, saveMsg: null })
     try {
-      if (type === 'ingester') {
-        await api.editor.saveIngester(name, { content: code })
+      if (builtin) {
+        if (type === 'ingester') {
+          await api.editor.saveBuiltinIngester(name, { content: code })
+        } else {
+          await api.editor.saveBuiltinModule(name, { content: code })
+        }
       } else {
-        await api.editor.saveModule(name, { content: code })
+        if (type === 'ingester') {
+          await api.editor.saveIngester(name, { content: code })
+        } else {
+          await api.editor.saveModule(name, { content: code })
+        }
       }
       updateTab(type, name, {
         originalCode: code,
@@ -496,14 +504,22 @@ export default function Studio() {
   async function handleDelete() {
     if (!activeTab) return
     setShowDelete(false)
-    const { type, name } = activeTab
+    const { type, name, builtin } = activeTab
     const key = fileId(type, name)
     const idx = openTabs.findIndex(t => fileId(t.type, t.name) === key)
     try {
-      if (type === 'ingester') {
-        await api.editor.deleteIngester(name)
+      if (builtin) {
+        if (type === 'ingester') {
+          await api.editor.deleteBuiltinIngester(name)
+        } else {
+          await api.editor.deleteBuiltinModule(name)
+        }
       } else {
-        await api.editor.deleteModule(name)
+        if (type === 'ingester') {
+          await api.editor.deleteIngester(name)
+        } else {
+          await api.editor.deleteModule(name)
+        }
       }
       // Force-close tab (no dirty check — file is already deleted)
       const remaining = openTabs.filter(t => fileId(t.type, t.name) !== key)
@@ -588,7 +604,7 @@ export default function Studio() {
               const isActive   = activeTabKey === key
               const openTab    = openTabs.find(t => fileId(t.type, t.name) === key)
               const isOpen     = Boolean(openTab)
-              const isDirtyTab = isOpen && !f.builtin && openTab.code !== openTab.originalCode
+              const isDirtyTab = isOpen && openTab.code !== openTab.originalCode
               return (
                 <button
                   key={f.name}
@@ -717,13 +733,6 @@ export default function Studio() {
               </div>
 
               <div className="flex items-center gap-1.5 flex-shrink-0">
-                {/* Read-only badge for built-in files */}
-                {activeTab.builtin && (
-                  <span className="flex items-center gap-1 text-[11px] text-gray-500 bg-gray-100 border border-gray-200 rounded-lg px-2 py-0.5">
-                    <Lock size={10} /> Read-only
-                  </span>
-                )}
-
                 {/* Validation result badge */}
                 {activeTab.validation && (
                   activeTab.validation.valid
@@ -751,38 +760,32 @@ export default function Studio() {
                     ? <><Check size={12} className="text-green-600" /> Copied</>
                     : <><Copy size={12} /> Copy</>}
                 </button>
-                {!activeTab.builtin && (
-                  <button
-                    onClick={handleValidate}
-                    disabled={activeTab.validating}
-                    className="btn-outline text-xs py-1 px-2"
-                  >
-                    {activeTab.validating
-                      ? <RefreshCw size={12} className="animate-spin" />
-                      : <Play size={12} />}
-                    {activeTab.validating ? 'Checking…' : 'Validate'}
-                  </button>
-                )}
-                {!activeTab.builtin && (
-                  <button
-                    onClick={handleSave}
-                    disabled={activeTab.saving || !isDirty}
-                    className="btn-primary text-xs py-1 px-2"
-                  >
-                    {activeTab.saving
-                      ? <RefreshCw size={12} className="animate-spin" />
-                      : <Save size={12} />}
-                    {activeTab.saving ? 'Saving…' : 'Save'}
-                  </button>
-                )}
-                {!activeTab.builtin && (
-                  <button
-                    onClick={() => setShowDelete(true)}
-                    className="btn-danger text-xs py-1 px-2"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                )}
+                <button
+                  onClick={handleValidate}
+                  disabled={activeTab.validating}
+                  className="btn-outline text-xs py-1 px-2"
+                >
+                  {activeTab.validating
+                    ? <RefreshCw size={12} className="animate-spin" />
+                    : <Play size={12} />}
+                  {activeTab.validating ? 'Checking…' : 'Validate'}
+                </button>
+                <button
+                  onClick={handleSave}
+                  disabled={activeTab.saving || !isDirty}
+                  className="btn-primary text-xs py-1 px-2"
+                >
+                  {activeTab.saving
+                    ? <RefreshCw size={12} className="animate-spin" />
+                    : <Save size={12} />}
+                  {activeTab.saving ? 'Saving…' : 'Save'}
+                </button>
+                <button
+                  onClick={() => setShowDelete(true)}
+                  className="btn-danger text-xs py-1 px-2"
+                >
+                  <Trash2 size={12} />
+                </button>
               </div>
             </div>
 
@@ -806,8 +809,7 @@ export default function Studio() {
                 <CodeEditor
                   key={activeTabKey}
                   value={activeTab.code}
-                  onChange={v => !activeTab.builtin && updateTab(activeTab.type, activeTab.name, { code: v })}
-                  readOnly={activeTab.builtin}
+                  onChange={v => updateTab(activeTab.type, activeTab.name, { code: v })}
                 />
               )}
             </div>
@@ -842,7 +844,7 @@ export default function Studio() {
           onCreate={handleCreate}
         />
       )}
-      {showDelete && activeTab && !activeTab.builtin && (
+      {showDelete && activeTab && (
         <DeleteConfirmModal
           file={activeTab.name}
           onClose={() => setShowDelete(false)}

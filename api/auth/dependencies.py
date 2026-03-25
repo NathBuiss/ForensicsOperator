@@ -57,6 +57,17 @@ async def get_current_user(
 
 
 async def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    """Only allow users with the 'admin' role."""
     if current_user.get("role") != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return current_user
+
+
+async def require_analyst_or_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    """Allow users with either the 'analyst' or 'admin' role."""
+    if current_user.get("role") not in ("admin", "analyst"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Analyst or admin access required",
+        )
     return current_user

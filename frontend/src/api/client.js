@@ -58,6 +58,7 @@ export const api = {
     upload:   (caseId, formData) => request('POST', `/cases/${caseId}/ingest`, formData),
     listJobs: (caseId)           => request('GET',  `/cases/${caseId}/jobs`),
     getJob:   (jobId)            => request('GET',  `/jobs/${jobId}`),
+    retryJob: (jobId)            => request('POST', `/jobs/${jobId}/retry`),
   },
 
   search: {
@@ -90,8 +91,13 @@ export const api = {
   },
 
   auth: {
-    me:    ()     => request('GET', '/auth/me'),
-    login: (data) => request('POST', '/auth/login', data),
+    me:             ()               => request('GET',    '/auth/me'),
+    login:          (data)           => request('POST',   '/auth/login', data),
+    listUsers:      ()               => request('GET',    '/auth/users'),
+    createUser:     (data)           => request('POST',   '/auth/users', data),
+    updateUser:     (username, data)  => request('PUT',    `/auth/users/${username}`, data),
+    deleteUser:     (username)        => request('DELETE', `/auth/users/${username}`),
+    changePassword: (data)           => request('PUT',    '/auth/me/password', data),
   },
 
   savedSearches: {
@@ -113,6 +119,10 @@ export const api = {
     runLibrary:      (caseId)         => request('POST',   `/cases/${caseId}/alert-rules/run-library`),
     runSingleRule:   (caseId, ruleId) => request('POST',   `/cases/${caseId}/alert-rules/library/${ruleId}/run`),
     importSigma:     (data)           => request('POST',   '/alert-rules/library/sigma', data),
+    getLibraryRule:  (id)             => request('GET',    `/alert-rules/library/${id}`),
+    generateRule:    (data)           => request('POST',   '/alert-rules/generate', data),
+    analyzeResult:   (data)           => request('POST',   '/alert-rules/analyze', data),
+    parseSigma:      (data)           => request('POST',   '/alert-rules/sigma/parse', data),
   },
 
   export: {
@@ -152,11 +162,42 @@ export const api = {
     saveModule:           (name, data)  => request('PUT',    `/editor/modules/${name}`, data),
     deleteModule:         (name)        => request('DELETE', `/editor/modules/${name}`),
     validate:             (code)        => request('POST',   '/editor/validate', { code }),
-    // Built-in reference files (read-only)
+    // Built-in ingester plugin files (editable)
     listBuiltinIngesters: ()            => request('GET',    '/editor/builtin-ingesters'),
     getBuiltinIngester:   (name)        => request('GET',    `/editor/builtin-ingesters/${name}`),
+    saveBuiltinIngester:  (name, data)  => request('PUT',    `/editor/builtin-ingesters/${name}`, data),
+    deleteBuiltinIngester:(name)        => request('DELETE', `/editor/builtin-ingesters/${name}`),
+    // Built-in module YAML registry files (editable)
     listBuiltinModules:   ()            => request('GET',    '/editor/builtin-modules'),
     getBuiltinModule:     (name)        => request('GET',    `/editor/builtin-modules/${name}`),
+    saveBuiltinModule:    (name, data)  => request('PUT',    `/editor/builtin-modules/${name}`, data),
+    deleteBuiltinModule:  (name)        => request('DELETE', `/editor/builtin-modules/${name}`),
+  },
+
+  s3: {
+    getConfig:    ()             => request('GET',    '/admin/s3-config'),
+    setConfig:    (data)         => request('PUT',    '/admin/s3-config', data),
+    clearConfig:  ()             => request('DELETE', '/admin/s3-config'),
+    testConfig:   ()             => request('POST',   '/admin/s3-config/test'),
+    browse:       (prefix = '', delimiter = '/') => request('GET', `/s3/browse?prefix=${encodeURIComponent(prefix)}&delimiter=${encodeURIComponent(delimiter)}`),
+    importToCase: (caseId, data) => request('POST',   `/cases/${caseId}/s3-import`, data),
+  },
+
+  metrics: {
+    dashboard: () => request('GET', '/metrics/dashboard'),
+  },
+
+  cti: {
+    listFeeds:    () => request('GET', '/cti/feeds'),
+    addFeed:      (data) => request('POST', '/cti/feeds', data),
+    updateFeed:   (id, data) => request('PUT', `/cti/feeds/${id}`, data),
+    deleteFeed:   (id) => request('DELETE', `/cti/feeds/${id}`),
+    pullFeed:     (id) => request('POST', `/cti/feeds/${id}/pull`),
+    importBundle: (data) => request('POST', '/cti/import', data),
+    listIOCs:     (params = {}) => { const q = new URLSearchParams(params).toString(); return request('GET', `/cti/iocs${q ? '?' + q : ''}`) },
+    iocStats:     () => request('GET', '/cti/iocs/stats'),
+    clearIOCs:    () => request('DELETE', '/cti/iocs'),
+    matchCase:    (caseId) => request('POST', `/cases/${caseId}/cti/match`),
   },
 
   collector: {

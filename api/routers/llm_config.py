@@ -132,6 +132,33 @@ def test_llm_config():
 
 # ── Analysis endpoint ─────────────────────────────────────────────────────────
 
+_SIGMA_GEN_PROMPT = """You are an expert threat detection engineer who writes Sigma detection rules.
+Sigma is a generic signature format for SIEM systems.
+Output ONLY valid Sigma YAML — no markdown fences, no explanations, just the YAML.
+Required keys: title, status, description, logsource, detection, level.
+Optional but encouraged: id (UUIDv4), tags (MITRE ATT&CK), falsepositives.
+
+Example structure:
+title: Suspicious PowerShell Encoded Command
+id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+status: experimental
+description: Detects PowerShell with encoded command arguments often used by attackers
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4688
+    CommandLine|contains: '-EncodedCommand'
+  condition: selection
+level: high
+tags:
+  - attack.execution
+  - attack.t1059.001
+falsepositives:
+  - Legitimate administrative automation"""
+
+
 _SYSTEM_PROMPT = """You are an expert digital forensic analyst reviewing the output of an automated analysis module.
 Analyze the provided detections and produce a structured forensic summary.
 
@@ -353,6 +380,144 @@ def _build_prompt(run: dict) -> str:
         f"{hits_text or '(none)'}\n\n"
         "Analyze the above forensic findings and respond with the JSON structure as instructed."
     )
+
+
+def _build_alert_prompt(rule_name: str, rule_query: str, match_count: int, sample_events: list) -> str:
+    """Build a prompt for LLM analysis of alert rule results."""
+    events_text = ""
+    for i, ev in enumerate(sample_events[:30], 1):
+        ts  = ev.get("timestamp", "")
+        msg = ev.get("message", "")[:300]
+        events_text += f"{i}. [{ts}] {msg}\n"
+
+    return (
+        f"Alert Rule: {rule_name}\n"
+        f"Query: {rule_query}\n"
+        f"Total matches: {match_count}\n\n"
+        f"Sample events ({min(len(sample_events), 30)} shown):\n"
+        f"{events_text or '(no sample events)'}\n\n"
+        "Analyze the above alert matches and respond with the JSON structure as instructed."
+    )
+
+
+def generate_sigma_yaml(description: str, context: str = "") -> str:
+    """Call the configured LLM to generate a Sigma rule YAML from a text description."""
+    r = _redis()
+    cfg = _get_config(r)
+    if not cfg or not cfg.get("provider"):
+        raise ValueError("LLM not configured. Go to Settings → AI Analysis first.")
+
+    provider = cfg.get("provider", "").lower()
+    model    = cfg.get("model", "")
+    api_key  = cfg.get("api_key", "")
+    base_url = cfg.get("base_url", "").rstrip("/")
+
+    user_msg = f"Write a Sigma detection rule for: {description}"
+    if context:
+        user_msg += f"\nAdditional context: {context}"
+
+    import urllib.request
+
+    if provider == "anthropic":
+        headers = {
+            "Content-Type":      "application/json",
+            "x-api-key":         api_key,
+            "anthropic-version": "2023-06-01",
+        }
+        body = json.dumps({
+            "model": model, "max_tokens": 1200,
+            "system": _SIGMA_GEN_PROMPT,
+            "messages": [{"role": "user", "content": user_msg}],
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=body, headers=headers, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read())["content"][0]["text"]
+
+    elif provider == "ollama":
+        url = base_url or "http://localhost:11434"
+        body = json.dumps({
+            "model": model, "stream": False,
+            "messages": [
+                {"role": "system",  "content": _SIGMA_GEN_PROMPT},
+                {"role": "user",    "content": user_msg},
+            ],
+        }).encode()
+        req = urllib.request.Request(
+            f"{url}/api/chat", data=body,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read())["message"]["content"]
+
+    else:  # openai or custom
+        url = base_url or "https://api.openai.com/v1"
+        headers = {
+            "Content-Type":  "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        body = json.dumps({
+            "model": model, "max_tokens": 1200, "temperature": 0.3,
+            "messages": [
+                {"role": "system", "content": _SIGMA_GEN_PROMPT},
+                {"role": "user",   "content": user_msg},
+            ],
+        }).encode()
+        req = urllib.request.Request(
+            f"{url}/chat/completions", data=body, headers=headers, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read())["choices"][0]["message"]["content"]
+
+
+class AlertAnalyzeRequest(BaseModel):
+    rule_name: str
+    rule_query: str = ""
+    match_count: int = 0
+    sample_events: list = []
+
+
+@router.post("/alert-rules/analyze")
+def analyze_alert_rule_result(req: AlertAnalyzeRequest) -> Any:
+    """
+    Run AI analysis on alert rule results (fired matches).
+    Accepts the rule metadata + sample events; returns a structured forensic report.
+    """
+    r = _redis()
+    cfg = _get_config(r)
+    if not cfg or not cfg.get("enabled"):
+        raise HTTPException(
+            status_code=400,
+            detail="LLM not configured. Go to Settings → AI Analysis.",
+        )
+
+    prompt = _build_alert_prompt(
+        req.rule_name, req.rule_query, req.match_count, req.sample_events
+    )
+    try:
+        raw = _call_llm(cfg, prompt)
+    except Exception as exc:
+        logger.error("LLM call failed for alert analysis: %s", exc)
+        raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}")
+
+    try:
+        clean = raw.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[1] if "\n" in clean else clean[3:]
+            clean = clean.rstrip("`").strip()
+        analysis: dict = json.loads(clean)
+    except (json.JSONDecodeError, ValueError):
+        analysis = {
+            "summary": raw[:1000], "severity": "unknown",
+            "timeline": [], "indicators": [], "mitre_techniques": [],
+            "recommendations": [], "confidence": "low", "_raw": raw[:2000],
+        }
+
+    analysis["analyzed_at"] = datetime.now(timezone.utc).isoformat()
+    analysis["model_used"]  = f"{cfg.get('provider', '?')}/{cfg.get('model', '?')}"
+    return {"analysis": analysis}
 
 
 @router.post("/module-runs/{run_id}/analyze")

@@ -135,6 +135,7 @@ class AlertRuleIn(BaseModel):
     artifact_type: str = ""
     query: str
     threshold: int = 1
+    sigma_yaml: str = ""     # raw Sigma YAML (optional for legacy rules)
 
 
 class AlertRuleUpdate(BaseModel):
@@ -144,6 +145,7 @@ class AlertRuleUpdate(BaseModel):
     artifact_type: str | None = None
     query: str | None = None
     threshold: int | None = None
+    sigma_yaml: str | None = None
 
 
 # ── Library CRUD ──────────────────────────────────────────────────────────────
@@ -155,6 +157,17 @@ def list_library():
     _seed_defaults_if_empty(r)
     data = r.get(GLOBAL_KEY)
     return {"rules": json.loads(data) if data else []}
+
+
+@router.get("/alert-rules/library/{rule_id}")
+def get_library_rule(rule_id: str):
+    """Return a single library rule by ID."""
+    r = _redis()
+    rules: list[dict] = json.loads(r.get(GLOBAL_KEY) or "[]")
+    rule = next((rl for rl in rules if rl["id"] == rule_id), None)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    return rule
 
 
 @router.post("/alert-rules/library/seed", status_code=200)
@@ -186,6 +199,36 @@ def seed_library(replace: bool = False):
         r.set(GLOBAL_KEY, json.dumps(existing))
     r.set(GLOBAL_SEEDED_KEY, "1")
     return {"added": len(added), "total": len(existing)}
+
+
+@router.post("/alert-rules/sigma/parse")
+def parse_sigma_rule(body: dict):
+    """
+    Parse a Sigma YAML string and return the derived fields WITHOUT creating a rule.
+    Used by the frontend edit modal to preview / validate the ES query.
+    Returns { name, description, category, artifact_type, query, sigma_level, sigma_tags, sigma_status }.
+    """
+    if not _YAML_AVAILABLE:
+        raise HTTPException(status_code=500, detail="PyYAML is not installed on the server.")
+    raw_yaml = body.get("yaml", "")
+    if not raw_yaml.strip():
+        raise HTTPException(status_code=422, detail="Provide a non-empty 'yaml' key.")
+    try:
+        sigma = yaml.safe_load(raw_yaml)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"YAML parse error: {exc}")
+    if not isinstance(sigma, dict) or not sigma.get("title"):
+        raise HTTPException(status_code=422, detail="Sigma rule must have a 'title' field.")
+    return {
+        "name":          sigma.get("title", "Untitled"),
+        "description":   sigma.get("description", ""),
+        "category":      _sigma_to_category(sigma),
+        "artifact_type": _sigma_to_artifact_type(sigma),
+        "query":         _sigma_to_es_query(sigma),
+        "sigma_level":   sigma.get("level", ""),
+        "sigma_tags":    sigma.get("tags", []),
+        "sigma_status":  sigma.get("status", ""),
+    }
 
 
 @router.post("/alert-rules/library/sigma", status_code=201)
@@ -249,6 +292,7 @@ def import_sigma_rules(body: dict):
             "query":        query,
             "threshold":    1,
             "rule_type":    "sigma",
+            "sigma_yaml":   raw_yaml,
             "sigma_id":     sigma.get("id", ""),
             "sigma_level":  sigma.get("level", ""),
             "sigma_tags":   sigma.get("tags", []),
@@ -660,3 +704,23 @@ def run_single_rule_against_case(case_id: str, rule_id: str):
         "rules_checked": 1,
         "fired": match is not None,
     }
+
+
+# ── LLM helpers ───────────────────────────────────────────────────────────────
+
+class GenerateRuleRequest(BaseModel):
+    description: str
+    context: str = ""
+
+
+@router.post("/alert-rules/generate")
+def generate_sigma_rule(body: GenerateRuleRequest):
+    """Use the configured LLM to generate a Sigma YAML rule from a description."""
+    try:
+        from routers.llm_config import generate_sigma_yaml  # type: ignore
+        yaml_text = generate_sigma_yaml(body.description, body.context)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}")
+    return {"yaml": yaml_text}

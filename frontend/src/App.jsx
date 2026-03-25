@@ -14,6 +14,9 @@ import Studio       from './pages/Studio'
 import Docs         from './pages/Docs'
 import Settings     from './pages/Settings'
 import Login        from './pages/Login'
+import Performance  from './pages/Performance'
+import UserManagement from './pages/UserManagement'
+import ThreatIntel  from './pages/ThreatIntel'
 
 import { getToken, setToken, clearToken, isAuthenticated } from './api/client'
 
@@ -79,6 +82,9 @@ export default function App() {
           <Route path="collector"                    element={<Collector />} />
           <Route path="studio"                       element={<Studio />} />
           <Route path="docs"                         element={<Docs />} />
+          <Route path="performance"                  element={<Performance />} />
+          <Route path="users"                        element={<UserManagement />} />
+          <Route path="cti"                          element={<ThreatIntel />} />
           <Route path="settings"                     element={<Settings />} />
           <Route path="plugins" element={<Navigate to="/ingesters" replace />} />
           <Route path="*"       element={<Navigate to="/" replace />} />
