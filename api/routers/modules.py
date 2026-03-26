@@ -241,12 +241,15 @@ def create_module_run(case_id: str, req: CreateModuleRunRequest):
 
     try:
         from celery import Celery
+        from kombu import Exchange
         celery_app = Celery(broker=settings.REDIS_URL)
         celery_app.send_task(
             "module.run",
             args=[run_id, case_id, req.module_id, source_files, req.params],
             task_id=run_id,
             queue="modules",
+            exchange=Exchange("forensics", type="direct"),
+            routing_key="modules",
         )
     except Exception as exc:
         logger.error("Celery dispatch failed for module run %s: %s", run_id, exc)
@@ -326,12 +329,15 @@ def create_standalone_run(req: StandaloneRunRequest):
 
     try:
         from celery import Celery
+        from kombu import Exchange
         celery_app = Celery(broker=settings.REDIS_URL)
         celery_app.send_task(
             "module.run",
             args=[run_id, MALWARE_CASE_ID, req.module_id, source_files, req.params],
             task_id=run_id,
             queue="modules",
+            exchange=Exchange("forensics", type="direct"),
+            routing_key="modules",
         )
     except Exception as exc:
         logger.error("Celery dispatch failed for standalone run %s: %s", run_id, exc)

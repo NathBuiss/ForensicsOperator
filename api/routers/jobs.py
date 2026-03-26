@@ -55,12 +55,16 @@ def retry_job(job_id: str):
 
     # Re-dispatch the Celery ingest task
     try:
+        from celery import Celery
+        from kombu import Exchange
         celery_app = Celery(broker=settings.REDIS_URL)
         celery_app.send_task(
             "ingest.process_artifact",
             args=[job_id, case_id, minio_object_key, original_filename],
             task_id=job_id,
             queue="ingest",
+            exchange=Exchange("forensics", type="direct"),
+            routing_key="ingest",
         )
     except Exception as exc:
         logger.exception("Failed to re-dispatch Celery task for job %s", job_id)

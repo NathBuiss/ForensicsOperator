@@ -68,12 +68,15 @@ def _build_external_client(cfg: dict) -> Minio:
 def _dispatch_celery_task(job_id: str, case_id: str, minio_key: str, filename: str) -> None:
     """Dispatch a Celery ingest task via send_task."""
     from celery import Celery
+    from kombu import Exchange
     app = Celery(broker=settings.REDIS_URL)
     app.send_task(
         "ingest.process_artifact",
         args=[job_id, case_id, minio_key, filename],
         task_id=job_id,
         queue="ingest",
+        exchange=Exchange("forensics", type="direct"),
+        routing_key="ingest",
     )
 
 
