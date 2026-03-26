@@ -16,3 +16,7 @@ yara-python>=4.3.1
 volatility3>=2.5.0
 # pyscca (libscca-python) — install manually if MAM-compressed prefetch support needed
 # pip install libscca-python
+# malwoverview — multi-source threat intelligence CLI (github.com/alexandreborges/malwoverview)
+# The malwoverview module works without this (direct VT API fallback), but installing
+# adds the CLI for enriched output.
+malwoverview

@@ -101,12 +101,17 @@ def _feed_interval_seconds(feed: dict) -> int:
 def _pull_feed_now(feed: dict, r: redis_lib.Redis, feeds: list[dict]) -> int:
     """Internal (non-HTTP) version of pull_feed. Returns ioc_count on success."""
     feed_type = feed.get("type", "")
+    # Manual feeds with a URL can be auto-re-imported as stix_url
+    effective_type = feed_type
     if feed_type == "manual":
-        return 0
+        if feed.get("url", "").strip():
+            effective_type = "stix_url"
+        else:
+            return 0  # pure manual feed — nothing to auto-pull
     try:
-        if feed_type == "taxii":
+        if effective_type == "taxii":
             bundle = _taxii_fetch(feed)
-        elif feed_type == "stix_url":
+        elif effective_type == "stix_url":
             bundle = _stix_url_fetch(feed)
         else:
             return 0
@@ -140,7 +145,8 @@ async def start_cti_scheduler() -> None:
                     continue
                 if not feed.get("auto_pull", True):
                     continue
-                if feed.get("type") == "manual":
+                # Skip pure manual feeds (no URL) — they have no source to pull from
+                if feed.get("type") == "manual" and not feed.get("url", "").strip():
                     continue
                 interval_sec = _feed_interval_seconds(feed)
                 last_pull = feed.get("last_pull")
@@ -468,17 +474,21 @@ def pull_feed(feed_id: str):
         raise HTTPException(status_code=404, detail="Feed not found")
 
     feed_type = feed["type"]
-
+    # Manual feeds with a URL can be re-pulled like a stix_url feed
+    effective_type = feed_type
     if feed_type == "manual":
-        raise HTTPException(
-            status_code=400,
-            detail="Manual feeds do not support auto-pull. Use POST /cti/import instead.",
-        )
+        if feed.get("url", "").strip():
+            effective_type = "stix_url"
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Pure manual feeds have no URL to pull from. Use POST /cti/import instead, or set a URL to enable periodic re-import.",
+            )
 
     # Fetch STIX bundle from source
-    if feed_type == "taxii":
+    if effective_type == "taxii":
         bundle = _taxii_fetch(feed)
-    elif feed_type == "stix_url":
+    elif effective_type == "stix_url":
         bundle = _stix_url_fetch(feed)
     else:
         raise HTTPException(status_code=400, detail=f"Unknown feed type: {feed_type}")

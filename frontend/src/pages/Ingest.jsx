@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react'
-import { RefreshCw, Upload } from 'lucide-react'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { RefreshCw, Upload, AlertTriangle } from 'lucide-react'
 import { api } from '../api/client'
 
 const ACCEPTED_TYPES = ['.evtx', '.plaso', '.pf', '.lnk', '.dat', '.hive', '.jsonl', '.csv', '.zip',
@@ -10,13 +10,18 @@ const ACCEPTED_NAMES = ['$MFT', 'NTUSER.DAT', 'SYSTEM', 'SOFTWARE', 'SAM', 'SECU
                         'PLACES.SQLITE', 'COOKIES.SQLITE']
 const ACCEPT_ATTR   = [...ACCEPTED_TYPES, ...ACCEPTED_NAMES.map(n => `.${n.replace('$', '')}`)].join(',')
 
-function JobCard({ jobId }) {
+function JobCard({ jobId, onStatusChange }) {
   const [job, setJob] = useState(null)
   const [retrying, setRetrying] = useState(false)
   const intervalRef = useRef(null)
 
   function startPolling() {
-    const poll = () => { api.ingest.getJob(jobId).then(setJob).catch(() => {}) }
+    const poll = () => {
+      api.ingest.getJob(jobId).then(j => {
+        setJob(j)
+        onStatusChange?.(jobId, j?.status)
+      }).catch(() => {})
+    }
     poll()
     intervalRef.current = setInterval(poll, 3000)
   }
@@ -122,19 +127,39 @@ function JobCard({ jobId }) {
 }
 
 export default function Ingest({ caseId, onComplete }) {
-  const [dragging, setDragging]     = useState(false)
-  const [uploading, setUploading]   = useState(false)
-  const [uploadPct, setUploadPct]   = useState(0)
-  const [jobs, setJobs]             = useState([])
-  const [error, setError]           = useState('')
+  const [dragging, setDragging]         = useState(false)
+  const [uploading, setUploading]       = useState(false)
+  const [uploadPct, setUploadPct]       = useState(0)
+  const [jobs, setJobs]                 = useState([])       // ordered list of job IDs
+  const [jobStatuses, setJobStatuses]   = useState({})       // jobId → status
+  const [error, setError]               = useState('')
   const inputRef  = useRef()
   const folderRef = useRef()
 
   useEffect(() => {
     api.ingest.listJobs(caseId)
-      .then(r => setJobs((r.jobs || []).map(j => j.job_id)))
+      .then(r => {
+        const all = r.jobs || []
+        // Seed known statuses from the initial fetch so we can sort immediately
+        const statusMap = {}
+        all.forEach(j => { statusMap[j.job_id] = j.status })
+        setJobStatuses(statusMap)
+        // Sort: FAILED first, then RUNNING/PENDING, then COMPLETED
+        const order = { FAILED: 0, RUNNING: 1, PENDING: 2, UPLOADING: 3, COMPLETED: 4 }
+        const sorted = [...all].sort((a, b) =>
+          (order[a.status] ?? 99) - (order[b.status] ?? 99)
+        )
+        setJobs(sorted.map(j => j.job_id))
+      })
       .catch(() => {})
   }, [caseId])
+
+  const handleStatusChange = useCallback((jobId, status) => {
+    setJobStatuses(prev => {
+      if (prev[jobId] === status) return prev
+      return { ...prev, [jobId]: status }
+    })
+  }, [])
 
   function handleFiles(files) {
     if (!files.length) return
@@ -160,7 +185,13 @@ export default function Ingest({ caseId, onComplete }) {
         try {
           const r = JSON.parse(xhr.responseText)
           const newJobIds = (r.jobs || []).map(j => j.job_id)
+          // New jobs start as PENDING — prepend them before existing jobs
           setJobs(prev => [...newJobIds, ...prev])
+          setJobStatuses(prev => {
+            const next = { ...prev }
+            newJobIds.forEach(id => { next[id] = 'PENDING' })
+            return next
+          })
           onComplete?.()
         } catch {
           setError('Unexpected response from server')
@@ -267,16 +298,33 @@ export default function Ingest({ caseId, onComplete }) {
       )}
 
       {/* Jobs list */}
-      {jobs.length > 0 && (
-        <div>
-          <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">
-            Processing Jobs
-          </h3>
-          <div className="space-y-2">
-            {jobs.map(jid => <JobCard key={jid} jobId={jid} />)}
+      {jobs.length > 0 && (() => {
+        const failedCount  = Object.values(jobStatuses).filter(s => s === 'FAILED').length
+        const activeCount  = Object.values(jobStatuses).filter(s => s === 'RUNNING' || s === 'PENDING' || s === 'UPLOADING').length
+        return (
+          <div>
+            <div className="flex items-center gap-3 mb-2">
+              <h3 className="text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Ingestion Jobs
+              </h3>
+              <span className="text-[10px] text-gray-400">{jobs.length} total</span>
+              {failedCount > 0 && (
+                <span className="flex items-center gap-1 text-[10px] font-semibold text-red-600 bg-red-50 border border-red-200 rounded-full px-2 py-0.5">
+                  <AlertTriangle size={10} /> {failedCount} failed
+                </span>
+              )}
+              {activeCount > 0 && (
+                <span className="text-[10px] text-brand-accent animate-pulse">{activeCount} running</span>
+              )}
+            </div>
+            <div className="space-y-2">
+              {jobs.map(jid => (
+                <JobCard key={jid} jobId={jid} onStatusChange={handleStatusChange} />
+              ))}
+            </div>
           </div>
-        </div>
-      )}
+        )
+      })()}
     </div>
   )
 }

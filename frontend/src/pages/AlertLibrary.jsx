@@ -138,7 +138,9 @@ function SigmaRuleModal({ rule = null, onClose, onSaved }) {
           onSaved(res.rules)
           onClose()
         } else {
-          setResult({ skipped: res.skipped })
+          // Surface specific skip reasons returned by the API
+          const reasons = res.skip_reasons?.map(r => r.reason) || []
+          setResult({ skipped: res.skipped, reasons })
         }
       }
     } catch (err) {
@@ -279,9 +281,14 @@ tags:
           )}
 
           {result && (
-            <div className="text-xs rounded-lg border px-3 py-2 bg-amber-50 border-amber-200 text-amber-700">
-              <AlertTriangle size={12} className="inline mr-1" />
-              Rule already exists or could not be parsed (skipped: {result.skipped}).
+            <div className="text-xs rounded-lg border p-3 bg-amber-50 border-amber-200 text-amber-700 space-y-1.5">
+              <p className="font-semibold flex items-center gap-1">
+                <AlertTriangle size={12} />
+                Rule could not be imported ({result.skipped} skipped)
+              </p>
+              {result.reasons?.map((r, i) => (
+                <p key={i} className="text-amber-800 pl-4">• {r}</p>
+              ))}
             </div>
           )}
         </div>

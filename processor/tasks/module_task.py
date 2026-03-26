@@ -15,6 +15,7 @@ Supported modules:
   ole_analysis     — Alias for oletools
   pe_analysis      — PE executable deep inspection
   grep_search      — Regex-based IOC / keyword pattern search
+  malwoverview     — VirusTotal / multi-TI hash lookup (malwoverview CLI or direct API)
 """
 from __future__ import annotations
 
@@ -75,6 +76,8 @@ _SAFE_ENV = {
 
 # Redis key for UI-configured Cuckoo integration settings
 _CUCKOO_CONFIG_KEY = "fo:config:cuckoo"
+# Redis key for UI-configured malwoverview / VirusTotal settings
+_MALWOVERVIEW_CONFIG_KEY = "fo:config:malwoverview"
 
 
 def _strip_ansi(text: str) -> str:
@@ -299,6 +302,7 @@ def run_module(
             "access_log_analysis": _run_access_log_analysis,
             "cuckoo":              _run_cuckoo,
             "de4dot":              _run_de4dot,
+            "malwoverview":        _run_malwoverview,
         }
         runner = RUNNERS.get(module_id)
 
@@ -3456,4 +3460,189 @@ def _run_de4dot(
             tool_meta["stderr"] += f"de4dot error for {file_path.name}: {exc}\n"
 
     tool_meta["log"] += f"\nde4dot: {len(results)} file(s) processed\n"
+    return results
+
+
+# ── malwoverview — VirusTotal / multi-source TI hash lookup ───────────────────
+
+def _vt_file_report(sha256: str, api_key: str, filename: str, tool_meta: dict) -> list[dict]:
+    """
+    Query VirusTotal v3 for a file hash.
+    Returns a list of standardised result dicts (one entry per file).
+    """
+    import hashlib as _hl  # already in stdlib; reimport locally for clarity
+
+    url = f"https://www.virustotal.com/api/v3/files/{sha256}"
+    req = urllib.request.Request(url, headers={"x-apikey": api_key})
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            tool_meta["stdout"] += f"  {sha256[:16]}… not found in VirusTotal — file may be new or private.\n"
+            return [{
+                "id":          str(uuid.uuid4()),
+                "timestamp":   "",
+                "level":       "info",
+                "level_int":   LEVEL_INT["info"],
+                "rule_title":  "Not in VirusTotal",
+                "computer":    filename,
+                "details_raw": json.dumps({"sha256": sha256, "status": "not_found", "file": filename}),
+                "message":     f"{filename} — hash not found in VirusTotal (may be new or unknown sample)",
+            }]
+        raise
+
+    attrs  = data.get("data", {}).get("attributes", {})
+    stats  = attrs.get("last_analysis_stats", {})
+
+    malicious  = int(stats.get("malicious",  0))
+    suspicious = int(stats.get("suspicious", 0))
+    total      = sum(stats.values())
+
+    # Map detection count to severity level
+    if   malicious >= 10:                   level = "critical"
+    elif malicious >= 5:                    level = "high"
+    elif malicious >= 2 or suspicious >= 5: level = "medium"
+    elif malicious >= 1 or suspicious >= 1: level = "low"
+    else:                                   level = "info"
+
+    # Collect engine verdicts for detected engines only
+    engine_verdicts: dict[str, str] = {}
+    for engine, result in (attrs.get("last_analysis_results") or {}).items():
+        if result.get("category") in ("malicious", "suspicious"):
+            engine_verdicts[engine] = result.get("result") or result.get("category", "")
+
+    names = attrs.get("names", [])
+    tags  = attrs.get("tags",  [])
+
+    tool_meta["stdout"] += (
+        f"  VirusTotal: {malicious}/{total} engines flagged as malicious\n"
+        + (f"  Known names: {', '.join(names[:5])}\n" if names else "")
+        + (f"  Tags: {', '.join(tags[:5])}\n"         if tags  else "")
+    )
+
+    return [{
+        "id":          str(uuid.uuid4()),
+        "timestamp":   "",
+        "level":       level,
+        "level_int":   LEVEL_INT.get(level, 1),
+        "rule_title":  f"VirusTotal: {malicious}/{total} detections",
+        "computer":    filename,
+        "details_raw": json.dumps({
+            "sha256":          sha256,
+            "malicious":       malicious,
+            "suspicious":      suspicious,
+            "total_engines":   total,
+            "names":           names[:10],
+            "tags":            tags,
+            "engine_verdicts": dict(list(engine_verdicts.items())[:20]),
+        }),
+        "message": (
+            f"{filename} — {malicious}/{total} AV engines detected malware"
+            + (f" | {', '.join(names[:2])}"   if names else "")
+            + (f" [{', '.join(tags[:3])}]"    if tags  else "")
+        ),
+    }]
+
+
+def _run_malwoverview(
+    run_id: str, work_dir: Path, sources_dir: Path, params: dict, tool_meta: dict
+) -> list[dict]:
+    """
+    Threat intelligence lookup using malwoverview / VirusTotal v3.
+
+    For each uploaded file:
+      1. Computes SHA-256, MD5, SHA-1 hashes.
+      2. Queries VirusTotal v3 REST API directly (primary).
+      3. Optionally enriches via the malwoverview CLI if it is present.
+
+    Requires a VirusTotal API key — configure via Settings → Integrations
+    or set the VT_API_KEY environment variable.
+
+    References: https://github.com/alexandreborges/malwoverview
+    """
+    import hashlib
+
+    # ── Load config (Redis UI settings → env var fallback) ────────────────────
+    _redis_cfg: dict = {}
+    try:
+        _redis_cfg = get_redis().hgetall(_MALWOVERVIEW_CONFIG_KEY) or {}
+    except Exception:
+        pass
+
+    vt_api_key = (_redis_cfg.get("vt_api_key") or os.getenv("VT_API_KEY", "")).strip()
+
+    if not vt_api_key:
+        raise RuntimeError(
+            "malwoverview not configured — go to Settings → Integrations → malwoverview "
+            "and enter your VirusTotal API key, or set VT_API_KEY as an environment variable."
+        )
+
+    # Check if the malwoverview CLI is available for extra output
+    mwo_bin = shutil.which("malwoverview") or shutil.which("malwoverview.py")
+
+    results: list[dict] = []
+
+    for file_path in sorted(sources_dir.rglob("*")):
+        if not file_path.is_file():
+            continue
+
+        tool_meta["stdout"] += f"\n=== malwoverview: {file_path.name} ===\n"
+
+        try:
+            # ── 1. Hash the file ───────────────────────────────────────────────
+            sha256_h = hashlib.sha256()
+            md5_h    = hashlib.md5()
+            sha1_h   = hashlib.sha1()
+            with open(file_path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(65536), b""):
+                    sha256_h.update(chunk)
+                    md5_h.update(chunk)
+                    sha1_h.update(chunk)
+
+            file_sha256 = sha256_h.hexdigest()
+            file_md5    = md5_h.hexdigest()
+            file_sha1   = sha1_h.hexdigest()
+
+            tool_meta["stdout"] += (
+                f"  SHA256: {file_sha256}\n"
+                f"  MD5:    {file_md5}\n"
+                f"  SHA1:   {file_sha1}\n"
+            )
+
+            # ── 2. VirusTotal v3 lookup (direct API) ──────────────────────────
+            hits = _vt_file_report(file_sha256, vt_api_key, file_path.name, tool_meta)
+            results.extend(hits)
+
+            # ── 3. malwoverview CLI (optional enrichment) ─────────────────────
+            if mwo_bin:
+                # Write a minimal config file so malwoverview can authenticate
+                config_dir  = work_dir / ".malwoverview"
+                config_dir.mkdir(exist_ok=True)
+                config_file = config_dir / ".malwoverview"
+                config_file.write_text(f"[VIRUSTOTAL]\nvtapi = {vt_api_key}\n")
+
+                env = {**_SAFE_ENV, "HOME": str(work_dir)}
+                try:
+                    proc = subprocess.run(
+                        [mwo_bin, "-x", file_sha256, "-V", "3"],
+                        capture_output=True, text=True, timeout=60,
+                        env=env,
+                    )
+                    mwo_out = _strip_ansi(proc.stdout or "")
+                    mwo_err = _strip_ansi(proc.stderr or "")
+                    if mwo_out:
+                        tool_meta["stdout"] += "\n[malwoverview CLI output]\n" + mwo_out
+                    if mwo_err:
+                        tool_meta["stderr"] += mwo_err
+                except Exception as mwo_exc:
+                    tool_meta["stderr"] += f"  malwoverview CLI skipped: {mwo_exc}\n"
+
+        except urllib.error.URLError as exc:
+            tool_meta["stderr"] += f"  Network error querying VirusTotal: {exc}\n"
+        except Exception as exc:
+            tool_meta["stderr"] += f"  Error processing {file_path.name}: {exc}\n"
+
+    tool_meta["log"] += f"\nmalwoverview: {len(results)} file(s) queried\n"
     return results

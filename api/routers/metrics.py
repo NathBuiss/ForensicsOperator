@@ -352,26 +352,35 @@ def metrics_dashboard():
     within a few seconds even when backends are slow or down.
     """
     # Run all sections in parallel, each with its own deadline.
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        f_system = pool.submit(_get_system_metrics)
-        f_es     = pool.submit(_get_elasticsearch_metrics)
-        f_redis  = pool.submit(_get_redis_metrics)
-        f_minio  = pool.submit(_get_minio_metrics)
-        f_celery = pool.submit(_get_celery_metrics)
-        f_cases  = pool.submit(_get_cases_metrics)
+    # NOTE: we must NOT use `with ThreadPoolExecutor(...) as pool:` here because
+    # the context-manager calls shutdown(wait=True) on exit — which blocks until
+    # every thread finishes even after its future has already timed out.  Instead
+    # we collect results first, then shut the pool down in the background so slow
+    # threads (e.g. Celery inspector waiting for broker broadcast) can't stall the
+    # HTTP response.
+    pool = ThreadPoolExecutor(max_workers=6)
+    f_system = pool.submit(_get_system_metrics)
+    f_es     = pool.submit(_get_elasticsearch_metrics)
+    f_redis  = pool.submit(_get_redis_metrics)
+    f_minio  = pool.submit(_get_minio_metrics)
+    f_celery = pool.submit(_get_celery_metrics)
+    f_cases  = pool.submit(_get_cases_metrics)
 
-        def _get(fut, default):
-            try:
-                return fut.result(timeout=_SECTION_TIMEOUT)
-            except Exception:
-                return default
+    def _get(fut, default):
+        try:
+            return fut.result(timeout=_SECTION_TIMEOUT)
+        except Exception:
+            return default
 
-        return {
-            "timestamp":     datetime.now(timezone.utc).isoformat(),
-            "system":        _get(f_system, _DEFAULT_SYSTEM),
-            "elasticsearch": _get(f_es,     _DEFAULT_ES),
-            "redis":         _get(f_redis,  _DEFAULT_REDIS),
-            "minio":         _get(f_minio,  _DEFAULT_MINIO),
-            "celery":        _get(f_celery, _DEFAULT_CELERY),
-            "cases":         _get(f_cases,  _DEFAULT_CASES),
-        }
+    result = {
+        "timestamp":     datetime.now(timezone.utc).isoformat(),
+        "system":        _get(f_system, _DEFAULT_SYSTEM),
+        "elasticsearch": _get(f_es,     _DEFAULT_ES),
+        "redis":         _get(f_redis,  _DEFAULT_REDIS),
+        "minio":         _get(f_minio,  _DEFAULT_MINIO),
+        "celery":        _get(f_celery, _DEFAULT_CELERY),
+        "cases":         _get(f_cases,  _DEFAULT_CASES),
+    }
+    # Let any still-running threads finish in the background — don't block.
+    pool.shutdown(wait=False)
+    return result

@@ -3,11 +3,93 @@ import { useLocation, useParams, useNavigate } from 'react-router-dom'
 import {
   Search as SearchIcon, Bookmark, BookmarkCheck, Download, X, Trash2,
   Loader2, HelpCircle, ArrowLeft, ChevronRight, Clock, Tag, Flag,
-  ExternalLink, Filter,
+  ExternalLink, Filter, Sparkles,
 } from 'lucide-react'
 import { api } from '../api/client'
 import EventDetail from '../components/shared/EventDetail'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
+
+// ── AI Search Assist Panel ────────────────────────────────────────────────────
+function AiSearchPanel({ caseId, onApply, onClose }) {
+  const [text, setText]       = useState('')
+  const [loading, setLoading] = useState(false)
+  const [result, setResult]   = useState(null)
+  const [error, setError]     = useState('')
+
+  async function submit(e) {
+    e.preventDefault()
+    if (!text.trim()) return
+    setLoading(true)
+    setError('')
+    setResult(null)
+    try {
+      const res = await api.llm.searchAssist({ query: text, case_id: caseId })
+      setResult(res)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <>
+      <div className="panel-backdrop" onClick={onClose} />
+      <div className="absolute right-0 top-0 h-full w-80 bg-white border-l border-gray-200 shadow-xl z-30 overflow-y-auto flex flex-col">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 flex-shrink-0">
+          <div className="flex items-center gap-2">
+            <Sparkles size={14} className="text-indigo-500" />
+            <span className="font-semibold text-brand-text text-sm">AI Search Assist</span>
+          </div>
+          <button onClick={onClose} className="icon-btn"><X size={14} /></button>
+        </div>
+        <div className="p-4 flex-1 space-y-4">
+          <p className="text-xs text-gray-500">
+            Describe what you want to find in plain English — the AI will generate the Elasticsearch query for you.
+          </p>
+          <form onSubmit={submit} className="space-y-2">
+            <textarea
+              value={text}
+              onChange={e => setText(e.target.value)}
+              placeholder="e.g. failed logins from the last week&#10;mimikatz or credential dumping activity&#10;all network connections from workstation WS01"
+              className="input w-full text-xs resize-none"
+              rows={4}
+              autoFocus
+            />
+            <button type="submit" disabled={!text.trim() || loading} className="btn-primary text-xs w-full justify-center">
+              {loading ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
+              {loading ? 'Generating…' : 'Generate Query'}
+            </button>
+          </form>
+
+          {error && (
+            <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-center gap-1.5">
+              <X size={12} /> {error}
+            </p>
+          )}
+
+          {result && (
+            <div className="space-y-2">
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest mb-1.5">Generated Query</p>
+                <code className="block text-xs text-brand-accent font-mono break-all">{result.query}</code>
+              </div>
+              {result.explanation && (
+                <p className="text-xs text-gray-500 italic">{result.explanation}</p>
+              )}
+              <button
+                onClick={() => { onApply(result.query); onClose() }}
+                className="btn-primary text-xs w-full justify-center"
+              >
+                <SearchIcon size={12} /> Apply Query
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  )
+}
 
 // ── Search Help Panel ─────────────────────────────────────────────────────────
 function SearchHelpPanel({ onClose }) {
@@ -111,7 +193,8 @@ export default function Search() {
   const [showSave, setShowSave]     = useState(false)
   const [showHelp, setShowHelp]     = useState(false)
   const [caseName, setCaseName]     = useState('')
-  const [showFacets, setShowFacets] = useState(true)
+  const [showFacets, setShowFacets]       = useState(true)
+  const [showAiAssist, setShowAiAssist]   = useState(false)
   const queryInputRef = useRef(null)
 
   // Load case info for breadcrumb
@@ -263,7 +346,12 @@ export default function Search() {
           <button type="submit" className="btn-primary text-xs px-3">
             <SearchIcon size={12} /> Search
           </button>
-          <button type="button" onClick={() => setShowHelp(v => !v)}
+          <button type="button" onClick={() => { setShowAiAssist(v => !v); setShowHelp(false) }}
+            className={`btn-ghost text-xs p-1.5 ${showAiAssist ? 'text-indigo-500' : ''}`}
+            title="AI search assist — describe what you want to find">
+            <Sparkles size={14} />
+          </button>
+          <button type="button" onClick={() => { setShowHelp(v => !v); setShowAiAssist(false) }}
             className={`btn-ghost text-xs p-1.5 ${showHelp ? 'text-brand-accent' : ''}`}
             title="Search syntax help (Shift+/)">
             <HelpCircle size={14} />
@@ -445,7 +533,14 @@ export default function Search() {
         </div>
       </div>
 
-      {showHelp && <SearchHelpPanel onClose={() => setShowHelp(false)} />}
+      {showHelp      && <SearchHelpPanel onClose={() => setShowHelp(false)} />}
+      {showAiAssist  && (
+        <AiSearchPanel
+          caseId={caseId}
+          onApply={q => { setInputVal(q); setQuery(q); doSearch(q, filters, 0) }}
+          onClose={() => setShowAiAssist(false)}
+        />
+      )}
       {selectedEvent && <EventDetail event={selectedEvent} caseId={caseId} onClose={() => setSelectedEvent(null)} />}
     </div>
   )

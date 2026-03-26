@@ -1,13 +1,19 @@
 """File upload and ingest job dispatch.
 
-Strategy: receive files quickly (spool to local disk), return job IDs immediately,
-then upload to MinIO in FastAPI BackgroundTasks — so the HTTP response is sent before
-the (potentially slow) MinIO transfer completes.  This fixes HTTP 500 / timeout errors
-on large files (500 MB+) that previously caused Traefik to kill the connection.
+Strategy:
+  1. Stream each uploaded file to a local temp file in 4 MB async chunks.
+     Using UploadFile.read() (which internally uses run_in_threadpool) ensures
+     the event loop is never blocked, so other requests remain responsive even
+     during 500 MB+ uploads.
+  2. Return job IDs immediately after spooling, with status UPLOADING.
+  3. Upload from the temp file to MinIO in a BackgroundTask — so the HTTP
+     response is sent before the (potentially slow) MinIO transfer completes.
+     This prevents proxy timeout errors (Traefik / Vite dev proxy) on large files.
+
+Status lifecycle: UPLOADING → PENDING → RUNNING → COMPLETED | FAILED
 """
 from __future__ import annotations
 
-import io
 import logging
 import os
 import shutil
@@ -221,28 +227,34 @@ async def ingest_files(
     for upload in files:
         filename = upload.filename or "unknown"
 
-        # ── Spool to a local temp file (fast disk write) ───────────────────────
-        # For files already spooled by FastAPI (>1 MB) this is a disk→disk copy.
-        # For in-memory files (<1 MB) it's a single write to disk.
-        # Either way, it completes in milliseconds, letting us respond quickly.
+        # ── Stream upload to a local temp file ────────────────────────────────
+        # Uses UploadFile.read() in 4 MB chunks so the event loop is never
+        # blocked for more than a few milliseconds, even for 500 MB+ files.
+        # Each read() call is internally dispatched to a thread pool by
+        # Starlette, keeping other requests responsive during large uploads.
         try:
             tmp_fd, tmp_path = tempfile.mkstemp(prefix="fo_ingest_", suffix=f"_{filename}")
             os.close(tmp_fd)
-            file_obj = upload.file
-            try:
-                file_obj.seek(0)
-            except (AttributeError, OSError):
-                pass
 
+            size = 0
+            chunk_size = 4 * 1024 * 1024  # 4 MB chunks
             with open(tmp_path, "wb") as out:
-                shutil.copyfileobj(file_obj, out)
+                while True:
+                    chunk = await upload.read(chunk_size)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    size += len(chunk)
 
         except Exception as exc:
             logger.error("Cannot spool '%s' to disk: %s", filename, exc)
+            # Clean up partial temp file if it was created
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
             errors.append({"filename": filename, "error": f"Failed to receive file: {exc}"})
             continue
-
-        size = os.path.getsize(tmp_path)
 
         if filename.lower().endswith(".zip"):
             _handle_zip_async(case_id, filename, tmp_path, dispatched, errors, background_tasks)

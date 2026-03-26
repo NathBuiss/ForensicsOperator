@@ -140,13 +140,27 @@ function FeedModal({ feed, onClose, onSaved }) {
             </select>
           </div>
 
-          {/* URL (hidden for manual) */}
-          {form.type !== 'manual' && (
+          {/* URL — required for TAXII/STIX, optional for manual (enables periodic re-import) */}
+          {form.type !== 'manual' ? (
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">URL *</label>
               <input value={form.url} onChange={e => set('url', e.target.value)}
                 placeholder={form.type === 'taxii' ? 'https://taxii.example.com/taxii2/' : 'https://example.com/stix-bundle.json'}
                 className="input text-xs font-mono" required />
+            </div>
+          ) : (
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                Re-import URL <span className="text-gray-400 font-normal">(optional — enables periodic auto-pull)</span>
+              </label>
+              <input value={form.url} onChange={e => set('url', e.target.value)}
+                placeholder="https://example.com/stix-bundle.json"
+                className="input text-xs font-mono" />
+              {form.url && (
+                <p className="text-[10px] text-blue-600 mt-1">
+                  ↻ This feed will be periodically re-fetched from the URL above.
+                </p>
+              )}
             </div>
           )}
 
@@ -172,8 +186,8 @@ function FeedModal({ feed, onClose, onSaved }) {
             </div>
           )}
 
-          {/* Auto-pull schedule (not for manual feeds) */}
-          {form.type !== 'manual' && (
+          {/* Auto-pull schedule (shown for all feeds that have a URL to pull from) */}
+          {(form.type !== 'manual' || form.url?.trim()) && (
             <div className="space-y-2 p-3 border border-gray-200 rounded-lg bg-gray-50">
               <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer select-none">
                 <input type="checkbox" checked={form.auto_pull} onChange={e => set('auto_pull', e.target.checked)}

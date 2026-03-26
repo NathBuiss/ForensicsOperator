@@ -93,10 +93,12 @@ export default function Timeline({ caseId, artifactTypes }) {
   const [showColPicker, setShowColPicker] = useState(false)
   const colPickerRef                      = useRef(null)
 
-  const [checkedFoIds, setCheckedFoIds] = useState(new Set())
-  const [explaining, setExplaining]     = useState(false)
-  const [explainResult, setExplainResult] = useState(null)
-  const [naturalDate, setNaturalDate]   = useState('')
+  const [checkedFoIds, setCheckedFoIds]     = useState(new Set())
+  const [explaining, setExplaining]         = useState(false)
+  const [explainResult, setExplainResult]   = useState(null)
+  const [naturalDate, setNaturalDate]       = useState('')
+  const [showCustomRange, setShowCustomRange] = useState(false)
+  const [naturalDateErr, setNaturalDateErr] = useState('')
 
   const loaderRef = useRef(null)
   const searchRef = useRef(null)
@@ -273,9 +275,27 @@ export default function Timeline({ caseId, artifactTypes }) {
   function applyNaturalDate(e) {
     e.preventDefault()
     if (!naturalDate.trim()) return
+    setNaturalDateErr('')
     const iso = parseNaturalDate(naturalDate)
-    if (iso) { setFromTs(iso); setNaturalDate('') }
-    else alert(`Couldn't parse "${naturalDate}". Try: "monday", "3 days ago", "last week", "2 months ago"`)
+    if (iso) { setFromTs(iso); setNaturalDate(''); setNaturalDateErr('') }
+    else setNaturalDateErr(`Try: "monday", "3 days ago", "last week", "2 months ago"`)
+  }
+
+  // Apply a quick date preset (null = clear)
+  function applyPreset(preset) {
+    setNaturalDateErr('')
+    if (!preset) { setFromTs(''); setToTs(''); setShowCustomRange(false); return }
+    const now = new Date()
+    setToTs('')  // clear To so "now" is implied
+    setShowCustomRange(false)
+    switch (preset) {
+      case '1h':  { const d = new Date(now); d.setHours(d.getHours() - 1);   setFromTs(d.toISOString()); break }
+      case '6h':  { const d = new Date(now); d.setHours(d.getHours() - 6);   setFromTs(d.toISOString()); break }
+      case '24h': { const d = new Date(now); d.setDate(d.getDate() - 1);      setFromTs(d.toISOString()); break }
+      case '7d':  { const d = new Date(now); d.setDate(d.getDate() - 7);      setFromTs(d.toISOString()); break }
+      case '30d': { const d = new Date(now); d.setDate(d.getDate() - 30);     setFromTs(d.toISOString()); break }
+      default: break
+    }
   }
 
   // Explain selected events with LLM
@@ -342,36 +362,97 @@ export default function Timeline({ caseId, artifactTypes }) {
             )}
           </div>
 
-          {/* From */}
+          {/* Date range */}
           <div>
-            <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5 block">From</label>
-            <input
-              type="datetime-local"
-              value={fromTs ? fromTs.slice(0, 16) : ''}
-              onChange={e => setFromTs(e.target.value ? new Date(e.target.value).toISOString() : '')}
-              className="input w-full text-xs py-1"
-            />
-            <form onSubmit={applyNaturalDate} className="mt-1 flex gap-1">
-              <input
-                type="text"
-                value={naturalDate}
-                onChange={e => setNaturalDate(e.target.value)}
-                placeholder="monday, 3 days ago…"
-                className="input flex-1 text-[10px] py-0.5 px-1.5"
-              />
-              <button type="submit" className="btn-ghost text-[10px] px-1.5 py-0.5">→</button>
-            </form>
-          </div>
+            <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5 block">Time Range</label>
 
-          {/* To */}
-          <div>
-            <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5 block">To</label>
-            <input
-              type="datetime-local"
-              value={toTs ? toTs.slice(0, 16) : ''}
-              onChange={e => setToTs(e.target.value ? new Date(e.target.value).toISOString() : '')}
-              className="input w-full text-xs py-1"
-            />
+            {/* Quick presets */}
+            <div className="grid grid-cols-3 gap-1 mb-1.5">
+              {[
+                { id: '1h',  label: '1h'  },
+                { id: '6h',  label: '6h'  },
+                { id: '24h', label: '24h' },
+                { id: '7d',  label: '7d'  },
+                { id: '30d', label: '30d' },
+              ].map(p => (
+                <button
+                  key={p.id}
+                  onClick={() => applyPreset(p.id)}
+                  className={`text-[10px] py-0.5 rounded border transition-colors ${
+                    fromTs && !showCustomRange &&
+                    Math.abs(new Date() - new Date(fromTs)) < { '1h':3600, '6h':21600, '24h':86400, '7d':604800, '30d':2592000 }[p.id] * 1100
+                      ? 'bg-brand-accent text-white border-brand-accent'
+                      : 'bg-white text-gray-600 border-gray-200 hover:border-brand-accent hover:text-brand-accent'
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
+              <button
+                onClick={() => { setShowCustomRange(v => !v) }}
+                className={`text-[10px] py-0.5 rounded border transition-colors col-span-3 mt-0.5 ${
+                  showCustomRange
+                    ? 'bg-brand-accent text-white border-brand-accent'
+                    : 'bg-white text-gray-600 border-gray-200 hover:border-brand-accent hover:text-brand-accent'
+                }`}
+              >
+                Custom range
+              </button>
+            </div>
+
+            {/* Custom date range inputs */}
+            {showCustomRange && (
+              <div className="space-y-2 mt-1 p-2 bg-gray-50 rounded border border-gray-200">
+                <div>
+                  <p className="text-[9px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">From</p>
+                  <input
+                    type="datetime-local"
+                    value={fromTs ? fromTs.slice(0, 16) : ''}
+                    onChange={e => setFromTs(e.target.value ? new Date(e.target.value).toISOString() : '')}
+                    className="input w-full text-[10px] py-0.5 px-1.5"
+                  />
+                </div>
+                <div>
+                  <p className="text-[9px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">To</p>
+                  <input
+                    type="datetime-local"
+                    value={toTs ? toTs.slice(0, 16) : ''}
+                    onChange={e => setToTs(e.target.value ? new Date(e.target.value).toISOString() : '')}
+                    className="input w-full text-[10px] py-0.5 px-1.5"
+                  />
+                </div>
+                <div>
+                  <p className="text-[9px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Natural language (From)</p>
+                  <form onSubmit={applyNaturalDate} className="flex gap-1">
+                    <input
+                      type="text"
+                      value={naturalDate}
+                      onChange={e => { setNaturalDate(e.target.value); setNaturalDateErr('') }}
+                      placeholder="monday, 3 days ago…"
+                      className="input flex-1 text-[10px] py-0.5 px-1.5"
+                    />
+                    <button type="submit" className="btn-ghost text-[10px] px-1.5 py-0.5">→</button>
+                  </form>
+                  {naturalDateErr && (
+                    <p className="text-[9px] text-amber-600 mt-0.5">{naturalDateErr}</p>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Active range display */}
+            {(fromTs || toTs) && (
+              <div className="mt-1.5 flex items-center gap-1 text-[9px] text-gray-500 bg-gray-50 rounded px-1.5 py-1">
+                <span className="flex-1 truncate">
+                  {fromTs ? new Date(fromTs).toLocaleDateString() : '…'}
+                  {' → '}
+                  {toTs ? new Date(toTs).toLocaleDateString() : 'now'}
+                </span>
+                <button onClick={() => applyPreset(null)} className="text-gray-400 hover:text-red-500 flex-shrink-0">
+                  <X size={9} />
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Flagged only */}

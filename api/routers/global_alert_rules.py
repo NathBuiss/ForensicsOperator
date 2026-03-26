@@ -261,21 +261,32 @@ def import_sigma_rules(body: dict):
     rules: list[dict] = json.loads(r.get(GLOBAL_KEY) or "[]")
     existing_names = {rl["name"].lower() for rl in rules}
 
-    imported, skipped, new_rules = 0, 0, []
+    imported, skipped, new_rules, skip_reasons = 0, 0, [], []
     for raw_yaml in raw_list:
         try:
             sigma = yaml.safe_load(raw_yaml)
         except Exception as exc:
             skipped += 1
+            skip_reasons.append({"reason": f"YAML parse error: {exc}", "title": None})
             continue
 
-        if not isinstance(sigma, dict) or not sigma.get("title"):
+        if not isinstance(sigma, dict):
             skipped += 1
+            skip_reasons.append({"reason": "YAML did not produce a mapping (expected a dict)", "title": None})
+            continue
+
+        if not sigma.get("title"):
+            skipped += 1
+            skip_reasons.append({
+                "reason": "Missing required 'title' field — add 'title: <Rule Name>' to your Sigma YAML",
+                "title": None,
+            })
             continue
 
         name = sigma.get("title", "Untitled Sigma Rule")
         if name.lower() in existing_names:
             skipped += 1
+            skip_reasons.append({"reason": f"A rule named '{name}' already exists in the library", "title": name})
             continue
 
         query    = _sigma_to_es_query(sigma)
@@ -306,7 +317,7 @@ def import_sigma_rules(body: dict):
     if new_rules:
         r.set(GLOBAL_KEY, json.dumps(rules))
 
-    return {"imported": imported, "skipped": skipped, "rules": new_rules}
+    return {"imported": imported, "skipped": skipped, "rules": new_rules, "skip_reasons": skip_reasons}
 
 
 # ── Sigma helpers ─────────────────────────────────────────────────────────────
