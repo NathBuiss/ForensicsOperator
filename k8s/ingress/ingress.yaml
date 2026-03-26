@@ -1,20 +1,5 @@
 # ── Traefik Middlewares ────────────────────────────────────────────────────────
 
-# Large-file upload support:
-# - maxRequestBodyBytes: 0  → no body-size limit (Traefik default may cap large uploads)
-# - memRequestBodyBytes:   → first 32 MB kept in memory; remainder spooled to disk
-# - maxResponseBodyBytes: 0 → no limit on response size (large export downloads)
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata:
-  name: upload-buffering
-  namespace: __FO_NAMESPACE__
-spec:
-  buffering:
-    maxRequestBodyBytes: 0
-    memRequestBodyBytes: 33554432   # 32 MB
-    maxResponseBodyBytes: 0
----
 # ServersTransport: disable response-header timeout for the API backend.
 # Without this, Traefik kills connections when the API takes >60 s to start
 # responding — which happened when streaming large (500 MB+) files to MinIO
@@ -89,8 +74,6 @@ metadata:
   namespace: __FO_NAMESPACE__
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
-    # Apply upload-buffering middleware: removes body-size cap for large evidence files
-    traefik.ingress.kubernetes.io/router.middlewares: __FO_NAMESPACE__-upload-buffering@kubernetescrd
     # No response-header timeout: API returns immediately (MinIO upload is async)
     traefik.ingress.kubernetes.io/service.servertransport: __FO_NAMESPACE__-api-no-timeout@kubernetescrd
 spec:
