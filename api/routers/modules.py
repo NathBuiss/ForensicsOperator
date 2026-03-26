@@ -24,7 +24,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 try:
@@ -36,7 +36,8 @@ except ImportError:
 from services.jobs import list_case_jobs
 from services.cases import get_case
 from services import module_runs as run_svc, storage
-from services.module_runs import MALWARE_CASE_ID
+from services.module_runs import MALWARE_CASE_ID, get_redis
+from auth.dependencies import require_admin
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -367,3 +368,53 @@ def validate_yara_rules(req: ValidateYaraRequest):
         return {"valid": True, "warning": "yara-python not available in API; validation skipped"}
     except Exception as exc:
         return {"valid": False, "error": str(exc)}
+
+
+# ── Cuckoo Sandbox integration settings ───────────────────────────────────────
+# Config is stored in Redis so admins can change it from Settings without
+# needing to update K8s env vars or trigger a pod restart.
+# The processor reads this key first, then falls back to CUCKOO_API_URL / CUCKOO_API_TOKEN.
+
+_CUCKOO_CONFIG_KEY = "fo:config:cuckoo"
+
+
+class CuckooConfigUpdate(BaseModel):
+    api_url:   str
+    api_token: str = ""   # leave blank to keep existing token
+
+
+@router.get("/admin/cuckoo-config")
+def get_cuckoo_config():
+    """Return current Cuckoo configuration (token presence only, not the value)."""
+    r    = get_redis()
+    data = r.hgetall(_CUCKOO_CONFIG_KEY) or {}
+    # Also surface env-var fallback so UI shows "configured via env"
+    env_url   = os.getenv("CUCKOO_API_URL", "")
+    env_token = os.getenv("CUCKOO_API_TOKEN", "")
+    api_url   = data.get("api_url") or env_url
+    token_set = bool(data.get("api_token") or env_token)
+    return {
+        "api_url":       api_url,
+        "api_token_set": token_set,
+        "configured":    bool(api_url),
+        "source":        "redis" if data.get("api_url") else ("env" if env_url else "none"),
+    }
+
+
+@router.put("/admin/cuckoo-config", dependencies=[Depends(require_admin)])
+def set_cuckoo_config(req: CuckooConfigUpdate):
+    """Save Cuckoo API URL (and optionally token) to Redis."""
+    r = get_redis()
+    r.hset(_CUCKOO_CONFIG_KEY, "api_url", req.api_url.rstrip("/"))
+    if req.api_token:
+        r.hset(_CUCKOO_CONFIG_KEY, "api_token", req.api_token)
+    token_set = bool(req.api_token or r.hexists(_CUCKOO_CONFIG_KEY, "api_token"))
+    return {"api_url": req.api_url.rstrip("/"), "api_token_set": token_set, "configured": True}
+
+
+@router.delete("/admin/cuckoo-config", dependencies=[Depends(require_admin)])
+def clear_cuckoo_config():
+    """Remove Cuckoo configuration from Redis (env-var fallback still applies)."""
+    get_redis().delete(_CUCKOO_CONFIG_KEY)
+    env_url = os.getenv("CUCKOO_API_URL", "")
+    return {"cleared": True, "env_fallback": bool(env_url), "api_url_env": env_url}

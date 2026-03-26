@@ -1,5 +1,9 @@
 import { useState, useEffect } from 'react'
-import { Settings2, Sparkles, Check, X, Loader2, Trash2, Eye, EyeOff, AlertCircle, Wifi, HardDrive } from 'lucide-react'
+import {
+  Settings2, Sparkles, Check, X, Loader2, Trash2, Eye, EyeOff,
+  AlertCircle, Wifi, HardDrive, FlaskConical, Cpu, Info,
+  Shield, Lock,
+} from 'lucide-react'
 import { api } from '../api/client'
 
 const PROVIDERS = [
@@ -86,6 +90,19 @@ export default function Settings() {
 
   const setS3 = (k, v) => setS3Form(f => ({ ...f, [k]: v }))
 
+  // ── Cuckoo Sandbox config state ────────────────────────────────────────────
+  const [cuckooConfig, setCuckooConfig]         = useState(null)
+  const [cuckooLoading, setCuckooLoading]       = useState(true)
+  const [cuckooSaving, setCuckooSaving]         = useState(false)
+  const [cuckooSaved, setCuckooSaved]           = useState(false)
+  const [cuckooError, setCuckooError]           = useState('')
+  const [showCuckooToken, setShowCuckooToken]   = useState(false)
+  const [cuckooForm, setCuckooForm]             = useState({ api_url: '', api_token: '' })
+  const setCuckoo = (k, v) => setCuckooForm(f => ({ ...f, [k]: v }))
+
+  // ── Worker metrics state ────────────────────────────────────────────────────
+  const [workerMetrics, setWorkerMetrics] = useState(null)
+
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
   useEffect(() => {
@@ -123,6 +140,20 @@ export default function Settings() {
       })
       .catch(() => {})
       .finally(() => setLoading(false))
+
+    // Load Cuckoo config
+    api.cuckooConfig.get()
+      .then(cfg => {
+        setCuckooConfig(cfg)
+        if (cfg.api_url) setCuckooForm(f => ({ ...f, api_url: cfg.api_url }))
+      })
+      .catch(() => {})
+      .finally(() => setCuckooLoading(false))
+
+    // Load worker metrics (from existing /metrics/dashboard)
+    api.metrics.dashboard()
+      .then(m => setWorkerMetrics(m))
+      .catch(() => {})
   }, [])
 
   async function save(e) {
@@ -209,6 +240,35 @@ export default function Settings() {
       setS3TestResult({ ok: false, error: err.message })
     } finally {
       setS3Testing(false)
+    }
+  }
+
+  // ── Cuckoo handlers ────────────────────────────────────────────────────────
+  async function saveCuckoo(e) {
+    e.preventDefault()
+    setCuckooSaving(true)
+    setCuckooError('')
+    setCuckooSaved(false)
+    try {
+      const updated = await api.cuckooConfig.set(cuckooForm)
+      setCuckooConfig(updated)
+      setCuckooSaved(true)
+      setTimeout(() => setCuckooSaved(false), 3000)
+    } catch (err) {
+      setCuckooError(err.message)
+    } finally {
+      setCuckooSaving(false)
+    }
+  }
+
+  async function clearCuckoo() {
+    if (!confirm('Remove Cuckoo Sandbox configuration?')) return
+    try {
+      await api.cuckooConfig.clear()
+      setCuckooConfig({ api_url: '', api_token_set: false, configured: false })
+      setCuckooForm({ api_url: '', api_token: '' })
+    } catch (err) {
+      setCuckooError(err.message)
     }
   }
 
@@ -592,6 +652,219 @@ export default function Settings() {
             )}
           </form>
         )}
+      </section>
+
+      {/* ── Cuckoo Sandbox ───────────────────────────────────────────────── */}
+      <section className="card p-5 space-y-4 mt-6">
+        <div className="flex items-center gap-2">
+          <FlaskConical size={15} className="text-orange-500" />
+          <h2 className="font-semibold text-brand-text">Cuckoo Sandbox</h2>
+          {!cuckooLoading && cuckooConfig?.configured && (
+            <span className="text-xs text-green-600 bg-green-50 border border-green-200 rounded-full px-2 py-0.5 flex items-center gap-1">
+              <Check size={10} /> Configured
+            </span>
+          )}
+          {!cuckooLoading && cuckooConfig?.source === 'env' && (
+            <span className="text-xs text-blue-600 bg-blue-50 border border-blue-200 rounded-full px-2 py-0.5 flex items-center gap-1">
+              <Info size={10} /> Via env var
+            </span>
+          )}
+        </div>
+
+        {/* How Cuckoo isolation works */}
+        <div className="rounded-lg bg-orange-50 border border-orange-200 p-3 space-y-2">
+          <p className="text-xs font-semibold text-orange-800 flex items-center gap-1.5">
+            <Shield size={12} /> Isolation model
+          </p>
+          <p className="text-xs text-orange-700 leading-relaxed">
+            Files submitted to Cuckoo <strong>never execute on this server</strong>. Our processor
+            sends the file bytes to Cuckoo's REST API via HTTP, then polls for the report.
+            Cuckoo runs the sample inside a <strong>fresh VM snapshot</strong> (KVM/VirtualBox guest)
+            that is reset to a clean state after each task — the malware is fully contained within
+            Cuckoo's infrastructure.
+          </p>
+          <p className="text-xs text-orange-600 leading-relaxed">
+            One VM task is created per submitted file. The VM monitors API calls, network connections,
+            file writes, and registry changes, then generates a behavioral report with a severity score.
+          </p>
+        </div>
+
+        <p className="text-xs text-gray-500">
+          Enter the URL of your Cuckoo Sandbox API. Settings saved here are stored securely in Redis
+          and take effect immediately — no pod restart needed.
+          If you also set <code className="bg-gray-100 px-1 rounded font-mono">CUCKOO_API_URL</code> as
+          an environment variable, the UI config takes priority.
+        </p>
+
+        {cuckooLoading ? (
+          <div className="flex items-center gap-2 text-gray-400 py-4">
+            <Loader2 size={14} className="animate-spin" /> Loading…
+          </div>
+        ) : (
+          <form onSubmit={saveCuckoo} className="space-y-4">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Cuckoo API URL</label>
+              <input
+                className="input text-xs font-mono"
+                placeholder="http://cuckoo.internal:8090"
+                value={cuckooForm.api_url}
+                onChange={e => setCuckoo('api_url', e.target.value)}
+                required
+              />
+              <p className="text-[10px] text-gray-400 mt-1">
+                Default Cuckoo API port is 8090. Include the scheme and host.
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                API Token
+                <span className="ml-1 text-gray-400 font-normal">(optional — only if auth is enabled on Cuckoo)</span>
+                {cuckooConfig?.api_token_set && (
+                  <span className="ml-1 text-green-600 font-normal">(token set — leave blank to keep)</span>
+                )}
+              </label>
+              <div className="relative">
+                <input
+                  type={showCuckooToken ? 'text' : 'password'}
+                  className="input text-xs pr-8 font-mono"
+                  placeholder={cuckooConfig?.api_token_set ? '••••••••••••••••' : '(leave blank if no auth)'}
+                  value={cuckooForm.api_token}
+                  onChange={e => setCuckoo('api_token', e.target.value)}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowCuckooToken(v => !v)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                  {showCuckooToken ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              </div>
+            </div>
+
+            {cuckooError && (
+              <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-center gap-1.5">
+                <AlertCircle size={12} /> {cuckooError}
+              </p>
+            )}
+
+            <div className="flex items-center gap-2 flex-wrap">
+              <button type="submit" disabled={cuckooSaving} className="btn-primary text-xs">
+                {cuckooSaving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+                Save
+              </button>
+              {cuckooSaved && (
+                <span className="text-xs text-green-600 flex items-center gap-1">
+                  <Check size={11} /> Saved — takes effect immediately
+                </span>
+              )}
+              {cuckooConfig?.configured && (
+                <button
+                  type="button"
+                  onClick={clearCuckoo}
+                  className="btn-ghost text-xs text-red-500 hover:text-red-700 ml-auto"
+                >
+                  <Trash2 size={12} /> Remove
+                </button>
+              )}
+            </div>
+          </form>
+        )}
+      </section>
+
+      {/* ── Worker Performance ───────────────────────────────────────────────── */}
+      <section className="card p-5 space-y-4 mt-6">
+        <div className="flex items-center gap-2">
+          <Cpu size={15} className="text-brand-accent" />
+          <h2 className="font-semibold text-brand-text">Worker Performance</h2>
+        </div>
+
+        {/* Live metrics */}
+        {workerMetrics && (
+          <div className="grid grid-cols-3 gap-3">
+            {[
+              { label: 'Active Workers', value: workerMetrics.celery?.registered_workers ?? '—' },
+              { label: 'Running Tasks',  value: workerMetrics.celery?.active_tasks ?? '—' },
+              { label: 'Queued Tasks',   value: (
+                (workerMetrics.celery?.queue_lengths?.ingest || 0) +
+                (workerMetrics.celery?.queue_lengths?.modules || 0)
+              )},
+            ].map(({ label, value }) => (
+              <div key={label} className="bg-gray-50 rounded-lg p-3 text-center border border-gray-200">
+                <p className="text-lg font-bold text-brand-text">{value}</p>
+                <p className="text-[10px] text-gray-400 mt-0.5">{label}</p>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Isolation model explainer */}
+        <div className="rounded-lg bg-brand-accentlight border border-brand-accent/20 p-3 space-y-2">
+          <p className="text-xs font-semibold text-brand-accent flex items-center gap-1.5">
+            <Lock size={12} /> Sandbox isolation for custom modules
+          </p>
+          <p className="text-xs text-gray-600 leading-relaxed">
+            Python modules you write in <strong>Studio</strong> run in a double-sandboxed child process:
+            Linux resource limits (CPU time, RAM, file size, max processes), a stripped environment
+            (no MinIO or Redis credentials visible), and a wall-clock kill timer.
+            Built-in analysis tools (Hayabusa, YARA, ExifTool, de4dot) run as trusted binaries with
+            no access to server secrets in their subprocess environment.
+          </p>
+        </div>
+
+        {/* How to scale */}
+        <div className="space-y-3 text-xs">
+          <p className="text-gray-500 font-medium">How to increase compute capacity</p>
+
+          <div className="space-y-2">
+            {[
+              {
+                label: 'CELERY_CONCURRENCY',
+                desc:  'Number of parallel task processes per pod. Set to the number of vCPUs you allocate. Changing this + redeploying is all you need — no image rebuild.',
+                default_: '4',
+              },
+              {
+                label: 'SANDBOX_CPU_SECONDS',
+                desc:  'Max CPU time (seconds) a custom Python module can use. Default 3600 (1 h). Raise for very large memory image analysis.',
+                default_: '3600',
+              },
+              {
+                label: 'SANDBOX_MEMORY_BYTES',
+                desc:  'Max RSS memory a custom Python module can allocate. Default 2 GB. Match this to the pod memory limit.',
+                default_: '2147483648',
+              },
+              {
+                label: 'SANDBOX_TIMEOUT_SEC',
+                desc:  'Wall-clock timeout for a custom module subprocess. Default 30 min. Volatility3 on large images may need 45–60 min.',
+                default_: '1800',
+              },
+            ].map(({ label, desc, default_ }) => (
+              <div key={label} className="flex gap-3 items-start">
+                <code className="text-[10px] font-mono text-brand-accent bg-brand-accentlight px-1.5 py-0.5 rounded flex-shrink-0 mt-0.5">
+                  {label}
+                </code>
+                <div>
+                  <p className="text-gray-600">{desc}</p>
+                  <p className="text-gray-400 text-[10px]">Default: {default_}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="rounded-lg bg-gray-50 border border-gray-200 p-3">
+            <p className="text-gray-500 font-medium mb-1.5">Set in your K8s deployment</p>
+            <pre className="text-[10px] font-mono text-gray-600 whitespace-pre-wrap leading-relaxed">{`# k8s/processor/deployment.yaml
+env:
+  - name: CELERY_CONCURRENCY
+    value: "8"          # match to CPU limit
+  - name: SANDBOX_MEMORY_BYTES
+    value: "4294967296" # 4 GB for Volatility3
+resources:
+  limits:
+    cpu: "8"
+    memory: "12Gi"`}</pre>
+          </div>
+        </div>
       </section>
     </div>
   )

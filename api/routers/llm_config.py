@@ -711,6 +711,61 @@ def explain_events(req: EventExplainRequest) -> Any:
 
 # ── Sigma rule generation ─────────────────────────────────────────────────────
 
+# ── Search AI assistant ────────────────────────────────────────────────────────
+
+_SEARCH_ASSIST_PROMPT = """You are an expert Elasticsearch query builder for a digital forensics SIEM.
+The index contains forensic events with these common fields:
+- timestamp (ISO 8601 date)
+- message (text description of the event)
+- artifact_type (evtx, prefetch, mft, registry, access_log, lnk, hayabusa, ...)
+- fo_source_file (original evidence filename)
+- host.hostname, user.name, user.domain
+- evtx.event_id, evtx.channel, evtx.provider_name
+- access_log.status, access_log.method, access_log.uri, access_log.ip
+- hayabusa.level (critical, high, medium, low, informational)
+- hayabusa.rule_title
+
+Convert the user's natural language request into an Elasticsearch query_string query.
+Return ONLY a JSON object with exactly these keys:
+{"query": "the query_string expression", "explanation": "one-sentence description of what the query finds"}
+No markdown, no extra text — raw JSON only."""
+
+
+class SearchAssistRequest(BaseModel):
+    query: str          # "find all failed logins from last week"
+    case_id: str = ""   # optional: restrict to a specific case
+
+
+@router.post("/search/ai-assist")
+def ai_search_assist(req: SearchAssistRequest) -> Any:
+    """
+    Translate a natural-language search intent into an Elasticsearch query_string.
+    Used by the Search page's AI helper to let analysts search without learning ES syntax.
+    """
+    r = _redis()
+    cfg = _get_config(r)
+    if not cfg or not cfg.get("enabled"):
+        raise HTTPException(status_code=400, detail="LLM not configured. Go to Settings → AI Analysis.")
+
+    user_msg = f"Search request: {req.query}"
+    if req.case_id:
+        user_msg += f"\nCase ID: {req.case_id}"
+
+    try:
+        raw = _call_llm_with_system(cfg, _SEARCH_ASSIST_PROMPT, user_msg)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}")
+
+    try:
+        clean = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        result = json.loads(clean)
+    except (json.JSONDecodeError, ValueError):
+        result = {"query": req.query, "explanation": "Could not parse LLM response. Using your input as-is."}
+
+    result["model_used"] = f"{cfg.get('provider', '?')}/{cfg.get('model', '?')}"
+    return result
+
+
 class GenerateRuleRequest(BaseModel):
     description: str          # "detect failed logon attempts above threshold"
     context: str = ""         # optional: artifact type, log source, example event

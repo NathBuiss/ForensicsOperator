@@ -58,4 +58,8 @@ COPY plugins/ /app/plugins_builtin/
 # Mount point for the shared plugins volume (populated at runtime by init container)
 RUN mkdir -p /app/plugins
 
-CMD ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+# CELERY_CONCURRENCY — number of parallel worker processes per pod replica.
+# Default 4 is a good baseline for mixed I/O + CPU workloads.
+# For CPU-heavy modules (Hayabusa, Volatility3) set to number of vCPUs assigned.
+# For I/O-heavy ingest-only workers set to 8–16.
+CMD ["sh", "-c", "celery -A celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-4} -Q ingest,modules,default"]

@@ -53,6 +53,21 @@ spec:
               value: "forensics-cases"
             - name: BULK_SIZE
               value: "500"
+            # Worker concurrency — number of parallel Celery processes per pod.
+            # Increase to match the CPU limit above (1 process per vCPU is a good rule).
+            # Change here + redeploy; no image rebuild needed.
+            - name: CELERY_CONCURRENCY
+              value: "4"
+            # Sandbox limits for custom Python modules written in Studio.
+            # SANDBOX_CPU_SECONDS  — max CPU time a custom module can consume
+            # SANDBOX_MEMORY_BYTES — max RSS (bytes) — default 2 GB
+            # SANDBOX_TIMEOUT_SEC  — wall-clock kill timer — default 30 min
+            - name: SANDBOX_CPU_SECONDS
+              value: "3600"
+            - name: SANDBOX_MEMORY_BYTES
+              value: "2147483648"
+            - name: SANDBOX_TIMEOUT_SEC
+              value: "1800"
             - name: MINIO_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
@@ -64,12 +79,15 @@ spec:
                   name: minio-secret
                   key: secret_key
           resources:
+            # 4 vCPUs + 8 GB RAM supports CELERY_CONCURRENCY=4 with headroom for
+            # memory-hungry modules (Volatility3 can consume 3–4 GB per analysis).
+            # Scale up requests/limits proportionally if you increase CELERY_CONCURRENCY.
             requests:
-              memory: "512Mi"
-              cpu: "200m"
-            limits:
-              memory: "2Gi"
+              memory: "1Gi"
               cpu: "1"
+            limits:
+              memory: "8Gi"
+              cpu: "4"
           volumeMounts:
             - name: plugins-volume
               mountPath: /app/plugins

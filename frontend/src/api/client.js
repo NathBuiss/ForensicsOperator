@@ -154,6 +154,7 @@ export const api = {
     analyzeAlertRule:  (data)      => request('POST', '/alert-rules/analyze', data),
     explainEvents:     (data)      => request('POST', '/events/explain', data),
     generateRule:      (data)      => request('POST', '/alert-rules/generate', data),
+    searchAssist:      (data)      => request('POST', '/search/ai-assist', data),
   },
 
   editor: {
@@ -208,6 +209,12 @@ export const api = {
     uploadFile: (formData) => request('POST', '/malware-analysis/upload', formData),
     createRun:  (data)     => request('POST', '/malware-analysis/runs', data),
     listRuns:   ()         => request('GET',  '/malware-analysis/runs'),
+  },
+
+  cuckooConfig: {
+    get:   ()     => request('GET',    '/admin/cuckoo-config'),
+    set:   (data) => request('PUT',    '/admin/cuckoo-config', data),
+    clear: ()     => request('DELETE', '/admin/cuckoo-config'),
   },
 
   collector: {

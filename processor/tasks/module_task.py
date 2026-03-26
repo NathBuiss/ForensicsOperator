@@ -64,6 +64,18 @@ LEVEL_INT = {
 # Strip ANSI terminal escape sequences before storing output in Redis / displaying in UI
 _ANSI_RE = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-9;]*[ -/]*[@-~])')
 
+# Minimal subprocess environment — strips MINIO/Redis secrets from child processes
+# so that a compromised binary cannot exfiltrate credentials via env inheritance.
+_SAFE_ENV = {
+    "PATH":   os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+    "HOME":   "/tmp",
+    "LANG":   os.environ.get("LANG", "en_US.UTF-8"),
+    "TMPDIR": "/tmp",
+}
+
+# Redis key for UI-configured Cuckoo integration settings
+_CUCKOO_CONFIG_KEY = "fo:config:cuckoo"
+
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub('', text)
@@ -3193,13 +3205,21 @@ def _run_cuckoo(
     """
     import urllib.parse
 
-    api_url   = os.getenv("CUCKOO_API_URL", "").rstrip("/")
-    api_token = os.getenv("CUCKOO_API_TOKEN", "")
+    # Load config: Redis (UI-configured) first, then env-var fallback.
+    # This lets admins set the Cuckoo URL via Settings without touching K8s env vars.
+    _redis_cfg: dict = {}
+    try:
+        _redis_cfg = get_redis().hgetall(_CUCKOO_CONFIG_KEY) or {}
+    except Exception:
+        pass
+
+    api_url   = (_redis_cfg.get("api_url") or os.getenv("CUCKOO_API_URL", "")).rstrip("/")
+    api_token = _redis_cfg.get("api_token") or os.getenv("CUCKOO_API_TOKEN", "")
 
     if not api_url:
         raise RuntimeError(
-            "Cuckoo not configured — set CUCKOO_API_URL (e.g. http://cuckoo:8090). "
-            "See Settings → Integrations to configure."
+            "Cuckoo not configured — go to Settings → Integrations → Cuckoo Sandbox "
+            "to enter the API URL, or set CUCKOO_API_URL as an environment variable."
         )
 
     def _cuckoo_req(path: str, method: str = "GET", data=None, files=None):
@@ -3391,6 +3411,7 @@ def _run_de4dot(
         try:
             proc = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=120,
+                env=_SAFE_ENV,  # strip MINIO/Redis secrets from subprocess env
             )
             stdout = _strip_ansi(proc.stdout)
             stderr = _strip_ansi(proc.stderr)
