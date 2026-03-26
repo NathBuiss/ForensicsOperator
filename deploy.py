@@ -604,21 +604,42 @@ def rollout_restart_apps():
 
 def clear_stale_celery_tasks():
     """
-    Clear any stuck tasks from the default 'celery' queue in Redis.
-    
-    Tasks should go to 'ingest' or 'modules' queues, but old code may have
-    sent them to 'celery'. Clear them so they don't accumulate.
+    Recover any tasks stuck in the 'celery' default queue.
+
+    Old dispatch code passed exchange=Exchange(...) to a minimal Celery app,
+    causing Kombu to fall back to the 'celery' queue instead of 'ingest' or
+    'modules'.  Workers never consume 'celery', so those tasks would be stuck
+    forever.  This step moves them to 'default', which workers DO listen on.
     """
-    step("Clearing stale Celery tasks from Redis")
-    r = run(
+    step("Recovering tasks stuck in 'celery' queue → moving to 'default'")
+
+    # Check how many tasks are stuck
+    r_len = run(
         ["kubectl", "exec", "-n", NS, "deploy/redis", "--",
-         "redis-cli", "DEL", "celery"],
+         "redis-cli", "LLEN", "celery"],
         capture=True, check=False,
     )
-    if r.returncode == 0:
-        ok("Stale Celery tasks cleared")
+    if r_len.returncode != 0:
+        warn("Could not reach Redis — skipping stuck-task recovery")
+        return
+
+    count = int(r_len.stdout.strip() or "0")
+    if count == 0:
+        ok("No stuck tasks in 'celery' queue")
+        return
+
+    warn(f"Found {count} stuck task(s) in 'celery' queue — moving to 'default'")
+    # Lua script: atomically move all items from 'celery' to 'default'
+    lua = "local n=redis.call('llen','celery'); for i=1,n do redis.call('rpoplpush','celery','default') end; return n"
+    r_move = run(
+        ["kubectl", "exec", "-n", NS, "deploy/redis", "--",
+         "redis-cli", "EVAL", lua, "0"],
+        capture=True, check=False,
+    )
+    if r_move.returncode == 0:
+        ok(f"Moved {count} stuck task(s) from 'celery' → 'default' for reprocessing")
     else:
-        warn("Could not clear stale tasks (Redis may not be ready yet)")
+        warn("Could not move stuck tasks — they may need manual recovery")
 
 
 def verify_celery_queues():
