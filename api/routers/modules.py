@@ -418,3 +418,47 @@ def clear_cuckoo_config():
     get_redis().delete(_CUCKOO_CONFIG_KEY)
     env_url = os.getenv("CUCKOO_API_URL", "")
     return {"cleared": True, "env_fallback": bool(env_url), "api_url_env": env_url}
+
+
+# ── VirusTotal / malwoverview config ──────────────────────────────────────────
+# Config is stored in Redis so admins can set the VT key from Settings without
+# needing a pod restart.  The processor reads fo:config:malwoverview first,
+# then falls back to the VT_API_KEY environment variable.
+
+_MALWOVERVIEW_CONFIG_KEY = "fo:config:malwoverview"
+
+
+class MalwoverviewConfigUpdate(BaseModel):
+    vt_api_key: str = ""   # leave blank to keep existing key
+
+
+@router.get("/admin/malwoverview-config")
+def get_malwoverview_config():
+    """Return current VirusTotal/malwoverview configuration (key presence only, not the value)."""
+    r    = get_redis()
+    data = r.hgetall(_MALWOVERVIEW_CONFIG_KEY) or {}
+    env_key  = os.getenv("VT_API_KEY", "")
+    key_set  = bool(data.get("vt_api_key") or env_key)
+    return {
+        "vt_api_key_set": key_set,
+        "configured":     key_set,
+        "source":         "redis" if data.get("vt_api_key") else ("env" if env_key else "none"),
+    }
+
+
+@router.put("/admin/malwoverview-config", dependencies=[Depends(require_admin)])
+def set_malwoverview_config(req: MalwoverviewConfigUpdate):
+    """Save VirusTotal API key to Redis."""
+    r = get_redis()
+    if req.vt_api_key:
+        r.hset(_MALWOVERVIEW_CONFIG_KEY, "vt_api_key", req.vt_api_key)
+    key_set = bool(req.vt_api_key or r.hexists(_MALWOVERVIEW_CONFIG_KEY, "vt_api_key"))
+    return {"vt_api_key_set": key_set, "configured": key_set}
+
+
+@router.delete("/admin/malwoverview-config", dependencies=[Depends(require_admin)])
+def clear_malwoverview_config():
+    """Remove VirusTotal configuration from Redis (env-var fallback still applies)."""
+    get_redis().delete(_MALWOVERVIEW_CONFIG_KEY)
+    env_key = os.getenv("VT_API_KEY", "")
+    return {"cleared": True, "env_fallback": bool(env_key)}

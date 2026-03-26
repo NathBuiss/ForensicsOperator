@@ -35,7 +35,7 @@ function AiSearchPanel({ caseId, onApply, onClose }) {
   return (
     <>
       <div className="panel-backdrop" onClick={onClose} />
-      <div className="absolute right-0 top-0 h-full w-80 bg-white border-l border-gray-200 shadow-xl z-30 overflow-y-auto flex flex-col">
+      <div className="fixed right-0 top-0 h-full w-80 bg-white border-l border-gray-200 shadow-xl z-50 overflow-y-auto flex flex-col">
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 flex-shrink-0">
           <div className="flex items-center gap-2">
             <Sparkles size={14} className="text-indigo-500" />
@@ -96,7 +96,7 @@ function SearchHelpPanel({ onClose }) {
   return (
     <>
       <div className="panel-backdrop" onClick={onClose} />
-      <div className="absolute right-0 top-0 h-full w-80 bg-white border-l border-gray-200 shadow-xl z-30 overflow-y-auto flex flex-col">
+      <div className="fixed right-0 top-0 h-full w-80 bg-white border-l border-gray-200 shadow-xl z-50 overflow-y-auto flex flex-col">
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 flex-shrink-0">
           <div className="flex items-center gap-2">
             <HelpCircle size={14} className="text-brand-accent" />

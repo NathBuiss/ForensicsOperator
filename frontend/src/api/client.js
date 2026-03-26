@@ -217,6 +217,12 @@ export const api = {
     clear: ()     => request('DELETE', '/admin/cuckoo-config'),
   },
 
+  mwoConfig: {
+    get:   ()     => request('GET',    '/admin/malwoverview-config'),
+    set:   (data) => request('PUT',    '/admin/malwoverview-config', data),
+    clear: ()     => request('DELETE', '/admin/malwoverview-config'),
+  },
+
   collector: {
     downloadUrl: ({ platform = 'py', caseId, apiUrl, collect } = {}) => {
       const params = new URLSearchParams({ platform })

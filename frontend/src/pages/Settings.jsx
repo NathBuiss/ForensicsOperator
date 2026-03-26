@@ -100,6 +100,16 @@ export default function Settings() {
   const [cuckooForm, setCuckooForm]             = useState({ api_url: '', api_token: '' })
   const setCuckoo = (k, v) => setCuckooForm(f => ({ ...f, [k]: v }))
 
+  // ── VirusTotal / malwoverview config state ──────────────────────────────────
+  const [vtConfig, setVtConfig]     = useState(null)
+  const [vtLoading, setVtLoading]   = useState(true)
+  const [vtSaving, setVtSaving]     = useState(false)
+  const [vtSaved, setVtSaved]       = useState(false)
+  const [vtError, setVtError]       = useState('')
+  const [showVtKey, setShowVtKey]   = useState(false)
+  const [vtForm, setVtForm]         = useState({ vt_api_key: '' })
+  const setVt = (k, v) => setVtForm(f => ({ ...f, [k]: v }))
+
   // ── Worker metrics state ────────────────────────────────────────────────────
   const [workerMetrics, setWorkerMetrics] = useState(null)
 
@@ -149,6 +159,12 @@ export default function Settings() {
       })
       .catch(() => {})
       .finally(() => setCuckooLoading(false))
+
+    // Load VirusTotal / malwoverview config
+    api.mwoConfig.get()
+      .then(cfg => setVtConfig(cfg))
+      .catch(() => {})
+      .finally(() => setVtLoading(false))
 
     // Load worker metrics (from existing /metrics/dashboard)
     api.metrics.dashboard()
@@ -269,6 +285,35 @@ export default function Settings() {
       setCuckooForm({ api_url: '', api_token: '' })
     } catch (err) {
       setCuckooError(err.message)
+    }
+  }
+
+  // ── VirusTotal / malwoverview handlers ──────────────────────────────────────
+  async function saveVt(e) {
+    e.preventDefault()
+    setVtSaving(true)
+    setVtError('')
+    setVtSaved(false)
+    try {
+      const updated = await api.mwoConfig.set(vtForm)
+      setVtConfig(updated)
+      setVtSaved(true)
+      setTimeout(() => setVtSaved(false), 3000)
+    } catch (err) {
+      setVtError(err.message)
+    } finally {
+      setVtSaving(false)
+    }
+  }
+
+  async function clearVt() {
+    if (!confirm('Remove VirusTotal API key?')) return
+    try {
+      await api.mwoConfig.clear()
+      setVtConfig({ vt_api_key_set: false, configured: false })
+      setVtForm({ vt_api_key: '' })
+    } catch (err) {
+      setVtError(err.message)
     }
   }
 
@@ -762,6 +807,102 @@ export default function Settings() {
                 <button
                   type="button"
                   onClick={clearCuckoo}
+                  className="btn-ghost text-xs text-red-500 hover:text-red-700 ml-auto"
+                >
+                  <Trash2 size={12} /> Remove
+                </button>
+              )}
+            </div>
+          </form>
+        )}
+      </section>
+
+      {/* ── VirusTotal / malwoverview ────────────────────────────────────────── */}
+      <section className="card p-5 space-y-4 mt-6">
+        <div className="flex items-center gap-2">
+          <Shield size={15} className="text-purple-500" />
+          <h2 className="font-semibold text-brand-text">VirusTotal</h2>
+          {!vtLoading && vtConfig?.vt_api_key_set && (
+            <span className="text-xs text-green-600 bg-green-50 border border-green-200 rounded-full px-2 py-0.5 flex items-center gap-1">
+              <Check size={10} /> Configured
+            </span>
+          )}
+          {!vtLoading && vtConfig?.source === 'env' && (
+            <span className="text-xs text-blue-600 bg-blue-50 border border-blue-200 rounded-full px-2 py-0.5 flex items-center gap-1">
+              <Info size={10} /> Via env var
+            </span>
+          )}
+        </div>
+
+        <p className="text-xs text-gray-500">
+          Required by the <strong className="text-brand-text">Malwoverview</strong> module for file hash
+          lookups against the VirusTotal v3 API. Enter a public (free) or private key. Stored securely
+          in Redis — takes effect immediately without a restart. You can also set{' '}
+          <code className="bg-gray-100 px-1 rounded font-mono">VT_API_KEY</code> as an environment variable.
+        </p>
+
+        {vtLoading ? (
+          <div className="flex items-center gap-2 text-gray-400 py-4">
+            <Loader2 size={14} className="animate-spin" /> Loading…
+          </div>
+        ) : (
+          <form onSubmit={saveVt} className="space-y-4">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                VirusTotal API Key
+                {vtConfig?.vt_api_key_set && (
+                  <span className="ml-1 text-green-600 font-normal">(key set — leave blank to keep)</span>
+                )}
+              </label>
+              <div className="relative">
+                <input
+                  type={showVtKey ? 'text' : 'password'}
+                  className="input text-xs pr-8 font-mono"
+                  placeholder={vtConfig?.vt_api_key_set ? '••••••••••••••••••••••••••••••••' : 'Enter your VirusTotal API key'}
+                  value={vtForm.vt_api_key}
+                  onChange={e => setVt('vt_api_key', e.target.value)}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowVtKey(v => !v)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                  {showVtKey ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              </div>
+              <p className="text-[10px] text-gray-400 mt-1">
+                Get your key at{' '}
+                <a
+                  href="https://www.virustotal.com/gui/my-apikey"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-brand-accent hover:underline"
+                >
+                  virustotal.com/gui/my-apikey
+                </a>
+              </p>
+            </div>
+
+            {vtError && (
+              <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-center gap-1.5">
+                <AlertCircle size={12} /> {vtError}
+              </p>
+            )}
+
+            <div className="flex items-center gap-2 flex-wrap">
+              <button type="submit" disabled={vtSaving} className="btn-primary text-xs">
+                {vtSaving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+                Save
+              </button>
+              {vtSaved && (
+                <span className="text-xs text-green-600 flex items-center gap-1">
+                  <Check size={11} /> Saved — takes effect immediately
+                </span>
+              )}
+              {vtConfig?.vt_api_key_set && (
+                <button
+                  type="button"
+                  onClick={clearVt}
                   className="btn-ghost text-xs text-red-500 hover:text-red-700 ml-auto"
                 >
                   <Trash2 size={12} /> Remove
