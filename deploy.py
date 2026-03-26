@@ -736,12 +736,13 @@ def main():
     info(f"Registry : {cfg['images']['registry'] or '(none — direct load)'}")
     info(f"ES heap  : {cfg['resources']['elasticsearch_heap_mb']} MB")
 
-    # 1. Verify Docker is up (needed for build/load)
-    if not cmd_exists("docker"):
-        die("Docker not found. Install Docker Desktop or the Docker CLI.")
-    if run(["docker", "info"], capture=True, check=False).returncode != 0:
-        die("Docker daemon is not running.")
-    ok("Docker is running")
+    # 1. Verify Docker is up (needed for build/load — not required for --no-build)
+    if not args.no_build:
+        if not cmd_exists("docker"):
+            die("Docker not found. Install Docker Desktop or the Docker CLI.")
+        if run(["docker", "info"], capture=True, check=False).returncode != 0:
+            die("Docker daemon is not running.")
+        ok("Docker is running")
 
     # 2. Verify / switch kubectl context
     setup_cluster(cfg)
@@ -750,8 +751,13 @@ def main():
     if not args.no_build:
         build_images(cfg)
 
-    # 4. Load images into the cluster (auto-detects engine)
-    pull_policy = load_images(cfg)
+    # 4. Load images into the cluster (auto-detects engine).
+    #    Skipped with --no-build: manifests are re-applied as-is, images already present.
+    if not args.no_build:
+        pull_policy = load_images(cfg)
+    else:
+        pull_policy = "IfNotPresent" if cfg["images"]["registry"] else "Never"
+        ok("Skipping image load (--no-build)")
 
     # 5. Ensure Traefik ingress controller is present (k3s includes it by default)
     ensure_traefik_ingress()
