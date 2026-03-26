@@ -524,7 +524,15 @@ def cleanup_stale_resources():
 
 # ── Manifest application ──────────────────────────────────────────────────────
 
-def apply_all_manifests(cfg, pull_policy):
+def _targets_kube_system(path):
+    """Return True if a manifest file contains 'namespace: kube-system'."""
+    try:
+        return "namespace: kube-system" in path.read_text()
+    except OSError:
+        return False
+
+
+def apply_all_manifests(cfg, pull_policy, setup_traefik=False):
     step("Applying Kubernetes manifests")
     subs = build_substitutions(cfg, pull_policy)
 
@@ -544,10 +552,16 @@ def apply_all_manifests(cfg, pull_policy):
 
     for item in APPLY_ORDER:
         if item.is_file() and item.suffix == ".yaml":
+            if _targets_kube_system(item) and not setup_traefik:
+                warn(f"Skipping {item.name} — targets kube-system (use --setup-traefik to apply)")
+                continue
             info(str(item.relative_to(ROOT)))
             apply_one(item)
         elif item.is_dir():
             for f in sorted(item.glob("*.yaml")):
+                if _targets_kube_system(f) and not setup_traefik:
+                    warn(f"Skipping {f.name} — targets kube-system (use --setup-traefik to apply)")
+                    continue
                 info(str(f.relative_to(ROOT)))
                 apply_one(f)
 
@@ -746,10 +760,14 @@ def cmd_destroy(cfg):
 
 def main():
     p = argparse.ArgumentParser(description="TraceX — universal deploy")
-    p.add_argument("--no-build", action="store_true", help="Skip Docker image build")
-    p.add_argument("--status",   action="store_true", help="Show pod/service status")
-    p.add_argument("--destroy",  action="store_true", help="Delete namespace / cluster")
-    p.add_argument("--logs",     metavar="SERVICE",   help="Stream logs (api/processor/frontend)")
+    p.add_argument("--no-build",      action="store_true", help="Skip Docker image build")
+    p.add_argument("--status",        action="store_true", help="Show pod/service status")
+    p.add_argument("--destroy",       action="store_true", help="Delete namespace / cluster")
+    p.add_argument("--logs",          metavar="SERVICE",   help="Stream logs (api/processor/frontend)")
+    p.add_argument("--setup-traefik", action="store_true",
+                   help="Also apply kube-system manifests (traefik-config.yaml). "
+                        "Use only on first deploy or when intentionally reconfiguring Traefik. "
+                        "WARNING: this restarts Traefik and will break Tailscale operator DNS until re-applied.")
     args = p.parse_args()
 
     cfg = load_config()
@@ -804,7 +822,7 @@ def main():
     cleanup_stale_resources()
 
     # 8. Apply all manifests with substituted values
-    apply_all_manifests(cfg, pull_policy)
+    apply_all_manifests(cfg, pull_policy, setup_traefik=args.setup_traefik)
 
     # 9. Force-restart app pods so they pick up the newly loaded images.
     #    (k3s loads images directly into containerd — kubectl apply alone does
