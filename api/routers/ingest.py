@@ -256,10 +256,18 @@ async def ingest_files(
             errors.append({"filename": filename, "error": f"Failed to receive file: {exc}"})
             continue
 
-        if filename.lower().endswith(".zip"):
-            _handle_zip_async(case_id, filename, tmp_path, dispatched, errors, background_tasks)
-        else:
-            _ingest_one_async(case_id, filename, tmp_path, size, dispatched, errors, background_tasks)
+        try:
+            if filename.lower().endswith(".zip"):
+                _handle_zip_async(case_id, filename, tmp_path, dispatched, errors, background_tasks)
+            else:
+                _ingest_one_async(case_id, filename, tmp_path, size, dispatched, errors, background_tasks)
+        except Exception as exc:
+            logger.error("Failed to register ingest job for '%s': %s", filename, exc)
+            errors.append({"filename": filename, "error": f"Server error: {exc}"})
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
     if not dispatched and not errors:
         raise HTTPException(status_code=400, detail="No valid files uploaded")
