@@ -263,7 +263,6 @@ def create_k3d_cluster(cfg):
             "k3d", "cluster", "create", name,
             "--port", f"{port}:{port}@loadbalancer",
             "--port", "443:443@loadbalancer",
-            "--k3s-arg", "--disable=traefik@server:0",
             "--agents", "0",
         ])
         ok(f"Cluster '{name}' created")
@@ -410,18 +409,15 @@ def _load_k3s(cfg):
 
 def ensure_traefik_ingress():
     """
-    k3s ships with Traefik pre-installed in kube-system.
-    For other clusters, check that the traefik IngressClass exists.
+    Check that an IngressClass exists.
+    Does NOT modify Traefik or any ingress controller.
     """
-    step("Checking Traefik Ingress Controller")
-    r = run(["kubectl", "get", "ingressclass", "traefik"], capture=True, check=False)
-    if r.returncode == 0:
-        ok("Traefik IngressClass found")
+    step("Checking for IngressClass")
+    r = run(["kubectl", "get", "ingressclass"], capture=True, check=False)
+    if r.returncode == 0 and r.stdout.strip():
+        ok("IngressClass found")
         return
-    warn(
-        "traefik IngressClass not found.\n"
-        "  k3s includes Traefik automatically."
-    )
+    warn("No IngressClass found - ingress may not work")
 
 
 # ── TLS certificate ───────────────────────────────────────────────────────────
@@ -686,30 +682,16 @@ def apply_es_template():
     ok("Template applied") if r.returncode == 0 else warn("Could not apply template yet — retry with --no-build")
 
 
-def get_ingress_ip():
-    # Traefik's LoadBalancer service in k3s lives in kube-system
-    r = run([
-        "kubectl", "get", "svc", "traefik",
-        "-n", "kube-system",
-        "-o", "jsonpath={.status.loadBalancer.ingress[0].ip}",
-    ], capture=True, check=False)
-    ip = r.stdout.strip()
-    if ip:
-        return ip
-    # Fallback: try the external IP field (some distros populate this instead)
-    r2 = run([
-        "kubectl", "get", "svc", "traefik",
-        "-n", "kube-system",
-        "-o", "jsonpath={.spec.externalIPs[0]}",
-    ], capture=True, check=False)
-    return r2.stdout.strip() or "127.0.0.1"
+def get_ingress_ip(cfg):
+    # Return hostname from config - user manages their own ingress
+    return cfg["access"]["hostname"]
 
 
 def print_summary(cfg):
     hostname   = cfg["access"]["hostname"]
     https_port = cfg["access"].get("https_port", 443)
     port_str   = f":{https_port}" if https_port != 443 else ""
-    ip         = get_ingress_ip()
+    ip         = get_ingress_ip(cfg)
     auto_cert  = not (cfg["access"].get("tls_cert") and cfg["access"].get("tls_key"))
 
     print()
@@ -829,10 +811,7 @@ def main():
         pull_policy = "IfNotPresent" if cfg["images"]["registry"] else "Never"
         ok("Skipping image load (--no-build)")
 
-    # 5. Ensure Traefik ingress controller is present (k3s includes it by default)
-    ensure_traefik_ingress()
-
-    # 6. Ensure namespace exists, then create/verify TLS secret
+    # 5. Ensure namespace exists, then create/verify TLS secret
     _ensure_namespace()
     setup_tls_secret(cfg)
 
