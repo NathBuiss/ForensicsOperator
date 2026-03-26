@@ -10,10 +10,25 @@ const ACCEPTED_NAMES = ['$MFT', 'NTUSER.DAT', 'SYSTEM', 'SOFTWARE', 'SAM', 'SECU
                         'PLACES.SQLITE', 'COOKIES.SQLITE']
 const ACCEPT_ATTR   = [...ACCEPTED_TYPES, ...ACCEPTED_NAMES.map(n => `.${n.replace('$', '')}`)].join(',')
 
+const STUCK_THRESHOLD_MS = 5 * 60 * 1000  // 5 minutes
+
+function useElapsed(isoTimestamp) {
+  const [elapsed, setElapsed] = useState(0)
+  useEffect(() => {
+    if (!isoTimestamp) return
+    const tick = () => setElapsed(Date.now() - new Date(isoTimestamp).getTime())
+    tick()
+    const id = setInterval(tick, 10000)
+    return () => clearInterval(id)
+  }, [isoTimestamp])
+  return elapsed
+}
+
 function JobCard({ jobId, onStatusChange }) {
   const [job, setJob] = useState(null)
   const [retrying, setRetrying] = useState(false)
   const intervalRef = useRef(null)
+  const elapsed = useElapsed(job?.created_at)
 
   function startPolling() {
     const poll = () => {
@@ -89,6 +104,13 @@ function JobCard({ jobId, onStatusChange }) {
       )}
       {job.source_zip && (
         <p className="text-xs text-gray-400">From: <span className="font-mono">{job.source_zip}</span></p>
+      )}
+
+      {(job.status === 'UPLOADING' || job.status === 'PENDING') && elapsed > STUCK_THRESHOLD_MS && (
+        <p className="text-[10px] text-amber-500 mt-0.5 flex items-center gap-1">
+          <AlertTriangle size={10} />
+          Waiting {Math.floor(elapsed / 60000)} min — processor may be busy or unavailable
+        </p>
       )}
 
       {job.status === 'UPLOADING' && (

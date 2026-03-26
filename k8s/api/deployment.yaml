@@ -72,10 +72,15 @@ spec:
           volumeMounts:
             - name: plugins-volume
               mountPath: /app/plugins
+            - name: tmp-storage
+              mountPath: /tmp
       volumes:
         - name: plugins-volume
           persistentVolumeClaim:
             claimName: plugins-pvc
+        - name: tmp-storage
+          emptyDir:
+            sizeLimit: 20Gi
 ---
 apiVersion: v1
 kind: Service

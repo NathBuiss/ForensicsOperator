@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 import redis as redis_lib
@@ -35,6 +36,7 @@ def create_job(
         "error": "",
         "plugin_used": "",
         "plugin_stats": "{}",
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "started_at": "",
         "completed_at": "",
         "task_id": "",
