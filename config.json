@@ -49,7 +49,27 @@
     "elasticsearch_heap_mb": 512,
     "elasticsearch_storage_gi": 10,
     "minio_storage_gi": 20,
-    "redis_storage_gi": 2
+    "redis_storage_gi": 2,
+    "_comment_api": "API resources: increase for better performance with large file uploads",
+    "api_memory_request": "512Mi",
+    "api_memory_limit": "2Gi",
+    "api_cpu_request": "100m",
+    "api_cpu_limit": "1000m",
+    "_comment_processor": "Processor resources: increase for faster forensic analysis",
+    "processor_memory_request": "1Gi",
+    "processor_memory_limit": "8Gi",
+    "processor_cpu_request": "500m",
+    "processor_cpu_limit": "4000m",
+    "_comment_minio": "MinIO resources: critical for upload performance",
+    "minio_memory_request": "1Gi",
+    "minio_memory_limit": "4Gi",
+    "minio_cpu_request": "250m",
+    "minio_cpu_limit": "1000m",
+    "_comment_frontend": "Frontend resources: lightweight",
+    "frontend_memory_request": "128Mi",
+    "frontend_memory_limit": "512Mi",
+    "frontend_cpu_request": "50m",
+    "frontend_cpu_limit": "200m"
   },
 
   "images": {

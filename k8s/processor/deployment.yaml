@@ -79,15 +79,12 @@ spec:
                   name: minio-secret
                   key: secret_key
           resources:
-            # 4 vCPUs + 8 GB RAM supports CELERY_CONCURRENCY=4 with headroom for
-            # memory-hungry modules (Volatility3 can consume 3–4 GB per analysis).
-            # Scale up requests/limits proportionally if you increase CELERY_CONCURRENCY.
             requests:
-              memory: "1Gi"
-              cpu: "1"
+              memory: "__FO_PROCESSOR_MEMORY_REQUEST__"
+              cpu: "__FO_PROCESSOR_CPU_REQUEST__"
             limits:
-              memory: "8Gi"
-              cpu: "4"
+              memory: "__FO_PROCESSOR_MEMORY_LIMIT__"
+              cpu: "__FO_PROCESSOR_CPU_LIMIT__"
           volumeMounts:
             - name: plugins-volume
               mountPath: /app/plugins

@@ -52,11 +52,11 @@ spec:
                   key: ADMIN_PASSWORD
           resources:
             requests:
-              memory: "512Mi"
-              cpu: "100m"
+              memory: "__FO_API_MEMORY_REQUEST__"
+              cpu: "__FO_API_CPU_REQUEST__"
             limits:
-              memory: "2Gi"
-              cpu: "1000m"
+              memory: "__FO_API_MEMORY_LIMIT__"
+              cpu: "__FO_API_CPU_LIMIT__"
           livenessProbe:
             httpGet:
               path: /api/v1/health

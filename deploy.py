@@ -111,6 +111,7 @@ def image_name(svc, cfg):
 def build_substitutions(cfg, pull_policy):
     es_heap = cfg["resources"]["elasticsearch_heap_mb"]
     auth    = cfg.get("auth", {})
+    res     = cfg["resources"]
     return {
         "__FO_NAMESPACE__":        NS,
         "__FO_API_IMAGE__":        image_name("api",       cfg),
@@ -129,6 +130,26 @@ def build_substitutions(cfg, pull_policy):
         "__FO_MINIO_STORAGE__":    f"{cfg['resources']['minio_storage_gi']}Gi",
         "__FO_REDIS_STORAGE__":    f"{cfg['resources']['redis_storage_gi']}Gi",
         "__FO_HOSTNAME__":         cfg["access"]["hostname"],
+        # API resources
+        "__FO_API_MEMORY_REQUEST__":  res.get("api_memory_request", "512Mi"),
+        "__FO_API_MEMORY_LIMIT__":    res.get("api_memory_limit", "2Gi"),
+        "__FO_API_CPU_REQUEST__":     res.get("api_cpu_request", "100m"),
+        "__FO_API_CPU_LIMIT__":       res.get("api_cpu_limit", "1000m"),
+        # Processor resources
+        "__FO_PROCESSOR_MEMORY_REQUEST__":  res.get("processor_memory_request", "1Gi"),
+        "__FO_PROCESSOR_MEMORY_LIMIT__":    res.get("processor_memory_limit", "8Gi"),
+        "__FO_PROCESSOR_CPU_REQUEST__":     res.get("processor_cpu_request", "500m"),
+        "__FO_PROCESSOR_CPU_LIMIT__":       res.get("processor_cpu_limit", "4000m"),
+        # MinIO resources
+        "__FO_MINIO_MEMORY_REQUEST__":  res.get("minio_memory_request", "1Gi"),
+        "__FO_MINIO_MEMORY_LIMIT__":    res.get("minio_memory_limit", "4Gi"),
+        "__FO_MINIO_CPU_REQUEST__":     res.get("minio_cpu_request", "250m"),
+        "__FO_MINIO_CPU_LIMIT__":       res.get("minio_cpu_limit", "1000m"),
+        # Frontend resources
+        "__FO_FRONTEND_MEMORY_REQUEST__":  res.get("frontend_memory_request", "128Mi"),
+        "__FO_FRONTEND_MEMORY_LIMIT__":    res.get("frontend_memory_limit", "512Mi"),
+        "__FO_FRONTEND_CPU_REQUEST__":     res.get("frontend_cpu_request", "50m"),
+        "__FO_FRONTEND_CPU_LIMIT__":       res.get("frontend_cpu_limit", "200m"),
     }
 
 
@@ -592,6 +613,53 @@ def rollout_restart_apps():
             warn(f"Rollout timeout for {svc} — pods may still be starting")
 
 
+def clear_stale_celery_tasks():
+    """
+    Clear any stuck tasks from the default 'celery' queue in Redis.
+    
+    Tasks should go to 'ingest' or 'modules' queues, but old code may have
+    sent them to 'celery'. Clear them so they don't accumulate.
+    """
+    step("Clearing stale Celery tasks from Redis")
+    r = run(
+        ["kubectl", "exec", "-n", NS, "deploy/redis", "--",
+         "redis-cli", "DEL", "celery"],
+        capture=True, check=False,
+    )
+    if r.returncode == 0:
+        ok("Stale Celery tasks cleared")
+    else:
+        warn("Could not clear stale tasks (Redis may not be ready yet)")
+
+
+def verify_celery_queues():
+    """
+    Verify that Celery workers are consuming from the correct queues.
+    """
+    step("Verifying Celery queue configuration")
+    
+    # Check queue lengths
+    for queue in ["ingest", "modules", "celery"]:
+        r = run(
+            ["kubectl", "exec", "-n", NS, "deploy/redis", "--",
+             "redis-cli", "llen", queue],
+            capture=True, check=False,
+        )
+        if r.returncode == 0:
+            count = r.stdout.strip()
+            info(f"Queue '{queue}': {count} tasks")
+    
+    # Check worker logs for queue consumption
+    r = run(
+        ["kubectl", "logs", "-n", NS, "-l", "app=processor", "--tail=20"],
+        capture=True, check=False,
+    )
+    if r.returncode == 0 and "ready" in r.stdout.lower():
+        ok("Celery workers are running")
+    else:
+        warn("Celery workers may not be ready yet")
+
+
 def wait_for_elasticsearch():
     step("Waiting for Elasticsearch (up to 3 minutes)")
     for i in range(36):
@@ -777,11 +845,17 @@ def main():
     #     NOT trigger a rollout when the image tag is unchanged.)
     rollout_restart_apps()
 
-    # 10. Wait for Elasticsearch, apply index template
+    # 10. Clear any stale Celery tasks from the default queue
+    clear_stale_celery_tasks()
+
+    # 11. Verify Celery workers are consuming from correct queues
+    verify_celery_queues()
+
+    # 12. Wait for Elasticsearch, apply index template
     wait_for_elasticsearch()
     apply_es_template()
 
-    # 11. Done
+    # 13. Done
     print_summary(cfg)
 
 

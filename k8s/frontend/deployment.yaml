@@ -21,11 +21,11 @@ spec:
             - containerPort: 80
           resources:
             requests:
-              memory: "64Mi"
-              cpu: "50m"
+              memory: "__FO_FRONTEND_MEMORY_REQUEST__"
+              cpu: "__FO_FRONTEND_CPU_REQUEST__"
             limits:
-              memory: "128Mi"
-              cpu: "200m"
+              memory: "__FO_FRONTEND_MEMORY_LIMIT__"
+              cpu: "__FO_FRONTEND_CPU_LIMIT__"
           livenessProbe:
             httpGet:
               path: /
