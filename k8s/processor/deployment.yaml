@@ -15,7 +15,7 @@ spec:
     spec:
       initContainers:
         # Seed built-in plugins into the shared PVC on first run.
-        # Uses cp -n (no-overwrite) so edits made via Studio / editor API are
+        # Uses cp -rn (recursive, no-overwrite) so edits made via Studio / editor API are
         # preserved across pod restarts. Only new built-in files are added.
         - name: seed-plugins
           image: __FO_PROCESSOR_IMAGE__
@@ -24,7 +24,7 @@ spec:
             - sh
             - -c
             - |
-              cp -n /app/plugins_builtin/. /app/plugins/ 2>/dev/null || true
+              cp -rn /app/plugins_builtin/. /app/plugins/ 2>/dev/null || true
               echo "Built-in plugins seeded (no-overwrite): $(ls /app/plugins)"
           volumeMounts:
             - name: plugins-volume
