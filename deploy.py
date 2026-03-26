@@ -496,6 +496,36 @@ subjectAltName     = DNS:{hostname}
     ok(f"TLS secret '{secret_name}' created (self-signed, valid 10 years)")
 
 
+# ── Stale resource cleanup ────────────────────────────────────────────────────
+
+# Resources that have been removed from the manifests but may still exist in an
+# existing cluster.  `kubectl apply` never deletes objects it no longer manages,
+# so we remove them explicitly here — once they're gone the step is a no-op.
+_STALE_RESOURCES = [
+    # upload-buffering (Buffer middleware) — removed because Traefik's Buffer
+    # middleware reads the *entire* request body before forwarding, triggering
+    # an i/o timeout on large uploads.  The API already streams uploads natively
+    # so this middleware is both redundant and harmful.
+    ("middleware", "upload-buffering"),
+]
+
+
+def cleanup_stale_resources():
+    step("Removing legacy cluster resources")
+    any_removed = False
+    for kind, name in _STALE_RESOURCES:
+        r = run(
+            ["kubectl", "delete", kind, name, "-n", NS, "--ignore-not-found"],
+            capture=True, check=False,
+        )
+        out = (r.stdout or "").strip()
+        if "deleted" in out:
+            ok(f"Removed legacy {kind}/{name} from {NS}")
+            any_removed = True
+    if not any_removed:
+        ok("No legacy resources found — nothing to remove")
+
+
 # ── Manifest application ──────────────────────────────────────────────────────
 
 def apply_all_manifests(cfg, pull_policy):
@@ -730,19 +760,22 @@ def main():
     _ensure_namespace()
     setup_tls_secret(cfg)
 
-    # 7. Apply all manifests with substituted values
+    # 7. Remove any cluster objects that were deleted from the manifests
+    cleanup_stale_resources()
+
+    # 8. Apply all manifests with substituted values
     apply_all_manifests(cfg, pull_policy)
 
-    # 8. Force-restart app pods so they pick up the newly loaded images.
+    # 9. Force-restart app pods so they pick up the newly loaded images.
     #    (k3s loads images directly into containerd — kubectl apply alone does
     #     NOT trigger a rollout when the image tag is unchanged.)
     rollout_restart_apps()
 
-    # 9. Wait for Elasticsearch, apply index template
+    # 10. Wait for Elasticsearch, apply index template
     wait_for_elasticsearch()
     apply_es_template()
 
-    # 8. Done
+    # 11. Done
     print_summary(cfg)
 
 
