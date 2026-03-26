@@ -408,6 +408,82 @@ def _load_k3s(cfg):
 
 # ── Traefik Ingress ───────────────────────────────────────────────────────────
 
+def update_coredns_tailscale_ip(hostname, external_ip):
+    """
+    Update CoreDNS ConfigMap to map the hostname to the Tailscale IP.
+    
+    This ensures DNS resolution works even if the Tailscale IP changes.
+    """
+    if not external_ip:
+        return
+    
+    step(f"Updating CoreDNS for {hostname} → {external_ip}")
+    
+    # Check if CoreDNS ConfigMap exists in analyse namespace (where coredns-csirt is)
+    r = run([
+        "kubectl", "get", "configmap", "coredns", "-n", "analyse",
+        "-o", "jsonpath={.data.Corefile}"
+    ], capture=True, check=False)
+    
+    if r.returncode != 0:
+        # Try kube-system
+        r = run([
+            "kubectl", "get", "configmap", "coredns", "-n", "kube-system",
+            "-o", "jsonpath={.data.Corefile}"
+        ], capture=True, check=False)
+        coredns_ns = "kube-system"
+    else:
+        coredns_ns = "analyse"
+    
+    if r.returncode != 0:
+        warn("CoreDNS ConfigMap not found, skipping DNS update")
+        return
+    
+    current_corefile = r.stdout
+    hosts_entry = f"{external_ip} {hostname}"
+    
+    # Check if entry already exists
+    if hosts_entry in current_corefile:
+        ok(f"CoreDNS already has {hostname} → {external_ip}")
+        return
+    
+    # Add hosts entry to Corefile
+    import re
+    # Find or create hosts block
+    if "hosts {" in current_corefile:
+        # Add to existing hosts block
+        new_corefile = re.sub(
+            r'(hosts\s*\{[^}]*)(\})',
+            f'\\1\n    {hosts_entry}\n    \\2',
+            current_corefile,
+            flags=re.DOTALL
+        )
+    else:
+        # Add new hosts block before the final brace
+        hosts_block = f"""
+    hosts {{
+        {hosts_entry}
+    }}
+"""
+        new_corefile = current_corefile.rstrip() + hosts_block + "\n"
+    
+    # Update ConfigMap
+    r = run([
+        "kubectl", "patch", "configmap", "coredns", "-n", coredns_ns,
+        "-p", f'{{"data":{{"Corefile":{json.dumps(new_corefile)}}}}}'
+    ], capture=True, check=False)
+    
+    if r.returncode == 0:
+        ok(f"CoreDNS updated: {hostname} → {external_ip}")
+        
+        # Restart CoreDNS to pick up changes
+        run(["kubectl", "rollout", "restart", "deployment/coredns", "-n", coredns_ns],
+            capture=True, check=False)
+        ok("CoreDNS restarted")
+    else:
+        warn(f"Could not update CoreDNS: {r.stderr}")
+
+
 def ensure_traefik_ingress():
     """
     k3s ships with Traefik pre-installed in kube-system.
@@ -428,6 +504,57 @@ def ensure_traefik_ingress():
         "    helm install traefik traefik/traefik -n kube-system\n\n"
         "  Continuing anyway — apply will still work if Traefik is present."
     )
+
+
+def ensure_traefik_tailscale(cfg):
+    """
+    Check if Traefik has a Tailscale external IP and update CoreDNS.
+    Does NOT create or modify any services - just reads existing state.
+    """
+    step("Checking Traefik Tailscale configuration")
+    
+    hostname = cfg["access"].get("hostname", "forensics.local")
+    
+    # Try to get external IP from any Traefik service
+    external_ip = None
+    
+    # Check traefik service first
+    r = run([
+        "kubectl", "get", "svc", "traefik", "-n", "kube-system",
+        "-o", "jsonpath={.status.loadBalancer.ingress[0].ip}"
+    ], capture=True, check=False)
+    
+    if r.stdout.strip():
+        external_ip = r.stdout.strip()
+        ok(f"Traefik external IP: {external_ip}")
+    else:
+        # Try traefik-tailscale service
+        r = run([
+            "kubectl", "get", "svc", "traefik-tailscale", "-n", "kube-system",
+            "-o", "jsonpath={.status.loadBalancer.ingress[0].ip}"
+        ], capture=True, check=False)
+        
+        if r.stdout.strip():
+            external_ip = r.stdout.strip()
+            ok(f"Traefik-tailscale external IP: {external_ip}")
+        else:
+            # Try hostname field
+            r = run([
+                "kubectl", "get", "svc", "traefik", "-n", "kube-system",
+                "-o", "jsonpath={.status.loadBalancer.ingress[0].hostname}"
+            ], capture=True, check=False)
+            
+            if r.stdout.strip():
+                external_ip = r.stdout.strip()
+                ok(f"Traefik hostname: {external_ip}")
+    
+    if not external_ip:
+        warn("No Tailscale external IP found yet (may still be provisioning)")
+        info("Check with: kubectl get svc traefik -n kube-system")
+        return
+    
+    # Update CoreDNS if IP found
+    update_coredns_tailscale_ip(hostname, external_ip)
 
 
 # ── TLS certificate ───────────────────────────────────────────────────────────
@@ -829,6 +956,9 @@ def main():
 
     # 5. Ensure Traefik ingress controller is present (k3s includes it by default)
     ensure_traefik_ingress()
+    
+    # 5b. Configure Tailscale LoadBalancer for Traefik (safe, non-destructive)
+    ensure_traefik_tailscale(cfg)
 
     # 6. Ensure namespace exists, then create/verify TLS secret
     _ensure_namespace()
