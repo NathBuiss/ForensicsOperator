@@ -405,21 +405,6 @@ def _load_k3s(cfg):
         pass
 
 
-# ── Traefik Ingress ───────────────────────────────────────────────────────────
-
-def ensure_traefik_ingress():
-    """
-    Check that an IngressClass exists.
-    Does NOT modify Traefik or any ingress controller.
-    """
-    step("Checking for IngressClass")
-    r = run(["kubectl", "get", "ingressclass"], capture=True, check=False)
-    if r.returncode == 0 and r.stdout.strip():
-        ok("IngressClass found")
-        return
-    warn("No IngressClass found - ingress may not work")
-
-
 # ── TLS certificate ───────────────────────────────────────────────────────────
 
 def _ensure_namespace():
