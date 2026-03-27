@@ -368,7 +368,7 @@ def run_module(
                 tool_stdout=tool_meta.get("stdout", "")[:8000] if 'tool_meta' in dir() else "",
                 tool_stderr=tool_meta.get("stderr", "")[:4000] if 'tool_meta' in dir() else "",
                 completed_at=datetime.now(timezone.utc).isoformat())
-        raise
+        raise RuntimeError(str(exc)) from None
 
     finally:
         if work_dir.exists():

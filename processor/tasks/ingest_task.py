@@ -168,7 +168,10 @@ def process_artifact(
                           status="FAILED",
                           error=str(exc),
                           completed_at=datetime.now(timezone.utc).isoformat())
-        raise
+        # Re-raise as RuntimeError so the IPC back to the Celery main process
+        # never requires importing custom exception classes (e.g. PluginFatalError
+        # from plugins.base_plugin), which aren't on the main process's sys.path.
+        raise RuntimeError(str(exc)) from None
 
     finally:
         if work_dir.exists():
