@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 import redis as redis_lib
@@ -35,6 +36,7 @@ def create_job(
         "error": "",
         "plugin_used": "",
         "plugin_stats": "{}",
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "started_at": "",
         "completed_at": "",
         "task_id": "",
@@ -68,6 +70,31 @@ def get_job(job_id: str) -> dict | None:
             except (ValueError, TypeError):
                 data[field] = 0
     return data
+
+
+def update_job(job_id: str, **fields) -> None:
+    """Patch arbitrary fields on an existing job hash."""
+    r = get_redis()
+    key = f"job:{job_id}"
+    r.hset(key, mapping={k: str(v) for k, v in fields.items()})
+    r.expire(key, JOB_TTL)
+
+
+def reset_job_for_retry(job_id: str) -> None:
+    """Reset a FAILED job back to PENDING so it can be re-dispatched."""
+    r = get_redis()
+    key = f"job:{job_id}"
+    r.hset(key, mapping={
+        "status": "PENDING",
+        "error": "",
+        "events_indexed": "0",
+        "plugin_used": "",
+        "plugin_stats": "{}",
+        "started_at": "",
+        "completed_at": "",
+        "task_id": "",
+    })
+    r.expire(key, JOB_TTL)
 
 
 def list_case_jobs(case_id: str) -> list[dict]:

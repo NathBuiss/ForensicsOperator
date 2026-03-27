@@ -1,26 +1,30 @@
 # ── Traefik Middlewares ────────────────────────────────────────────────────────
 
-# Large-file upload support:
-# - maxRequestBodyBytes: 0  → no body-size limit (Traefik default may cap large uploads)
-# - memRequestBodyBytes:   → first 32 MB kept in memory; remainder spooled to disk
-# - maxResponseBodyBytes: 0 → no limit on response size (large export downloads)
+# ServersTransport: disable response-header timeout for the API backend.
+# Without this, Traefik kills connections when the API takes >60 s to start
+# responding — which happened when streaming large (500 MB+) files to MinIO
+# synchronously.  Now that MinIO upload is handled in BackgroundTasks (after
+# the HTTP response is sent), this guard is extra insurance.
 apiVersion: traefik.io/v1alpha1
-kind: Middleware
+kind: ServersTransport
 metadata:
-  name: upload-buffering
-  namespace: forensics-operator
+  name: api-no-timeout
+  namespace: __FO_NAMESPACE__
 spec:
-  buffering:
-    maxRequestBodyBytes: 0
-    memRequestBodyBytes: 33554432   # 32 MB
-    maxResponseBodyBytes: 0
+  serverName: ""
+  insecureSkipVerify: false
+  maxIdleConnsPerHost: 32
+  forwardingTimeouts:
+    dialTimeout: "30s"
+    responseHeaderTimeout: "0s"   # wait indefinitely for response headers
+    idleConnTimeout: "120s"
 ---
 # HTTP → HTTPS permanent redirect
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
   name: redirect-https
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
 spec:
   redirectScheme:
     scheme: https
@@ -31,7 +35,7 @@ apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
   name: strip-minio
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
 spec:
   stripPrefix:
     prefixes:
@@ -44,10 +48,10 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: forensics-http-redirect
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: web
-    traefik.ingress.kubernetes.io/router.middlewares: forensics-operator-redirect-https@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: __FO_NAMESPACE__-redirect-https@kubernetescrd
 spec:
   ingressClassName: traefik
   rules:
@@ -67,11 +71,11 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: forensics-api
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
-    # Apply upload-buffering middleware: removes body-size cap for large evidence files
-    traefik.ingress.kubernetes.io/router.middlewares: forensics-operator-upload-buffering@kubernetescrd
+    # No response-header timeout: API returns immediately (MinIO upload is async)
+    traefik.ingress.kubernetes.io/service.servertransport: __FO_NAMESPACE__-api-no-timeout@kubernetescrd
 spec:
   ingressClassName: traefik
   tls:
@@ -97,7 +101,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: forensics-kibana
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
 spec:
@@ -123,10 +127,10 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: forensics-minio
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
-    traefik.ingress.kubernetes.io/router.middlewares: forensics-operator-strip-minio@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: __FO_NAMESPACE__-strip-minio@kubernetescrd
 spec:
   ingressClassName: traefik
   tls:
@@ -150,7 +154,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: forensics-frontend
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
 spec:

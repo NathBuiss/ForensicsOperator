@@ -1,0 +1,34 @@
+id: malwoverview
+name: Malwoverview
+description: >
+  Multi-source threat intelligence lookup for uploaded files.
+  Computes SHA-256 / MD5 / SHA-1 hashes and queries VirusTotal v3,
+  optionally enriched by the malwoverview CLI (github.com/alexandreborges/malwoverview)
+  when installed.  Reports AV detection counts, malware family names, tags,
+  and per-engine verdicts.
+input_extensions:
+  - .exe
+  - .dll
+  - .msi
+  - .bat
+  - .ps1
+  - .vbs
+  - .js
+  - .doc
+  - .docx
+  - .xls
+  - .xlsx
+  - .pdf
+  - .jar
+  - .apk
+  - .zip
+  - .7z
+  - .rar
+  - .iso
+  - .bin
+  - .so
+  - .elf
+available: true
+run_on_files: true
+config_keys:
+  - vt_api_key

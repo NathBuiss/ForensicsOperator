@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: processor
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
 spec:
   replicas: 2
   selector:
@@ -14,10 +14,9 @@ spec:
         app: processor
     spec:
       initContainers:
-        # Copy built-in plugins from the image into the shared PVC so they are
-        # available at /app/plugins at runtime. Uses cp -r so new versions always
-        # overwrite stale builtins, while user-uploaded plugins with unique names
-        # are preserved.
+        # Seed built-in plugins into the shared PVC on first run.
+        # Uses cp -rn (recursive, no-overwrite) so edits made via Studio / editor API are
+        # preserved across pod restarts. Only new built-in files are added.
         - name: seed-plugins
           image: __FO_PROCESSOR_IMAGE__
           imagePullPolicy: __FO_PULL_POLICY__
@@ -25,8 +24,8 @@ spec:
             - sh
             - -c
             - |
-              cp -r /app/plugins_builtin/. /app/plugins/
-              echo "Built-in plugins seeded: $(ls /app/plugins)"
+              cp -rn /app/plugins_builtin/. /app/plugins/ 2>/dev/null || true
+              echo "Built-in plugins seeded (no-overwrite): $(ls /app/plugins)"
           volumeMounts:
             - name: plugins-volume
               mountPath: /app/plugins
@@ -54,6 +53,21 @@ spec:
               value: "forensics-cases"
             - name: BULK_SIZE
               value: "500"
+            # Worker concurrency — number of parallel Celery processes per pod.
+            # Increase to match the CPU limit above (1 process per vCPU is a good rule).
+            # Change here + redeploy; no image rebuild needed.
+            - name: CELERY_CONCURRENCY
+              value: "4"
+            # Sandbox limits for custom Python modules written in Studio.
+            # SANDBOX_CPU_SECONDS  — max CPU time a custom module can consume
+            # SANDBOX_MEMORY_BYTES — max RSS (bytes) — default 2 GB
+            # SANDBOX_TIMEOUT_SEC  — wall-clock kill timer — default 30 min
+            - name: SANDBOX_CPU_SECONDS
+              value: "3600"
+            - name: SANDBOX_MEMORY_BYTES
+              value: "2147483648"
+            - name: SANDBOX_TIMEOUT_SEC
+              value: "1800"
             - name: MINIO_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
@@ -66,11 +80,11 @@ spec:
                   key: secret_key
           resources:
             requests:
-              memory: "512Mi"
-              cpu: "200m"
+              memory: "__FO_PROCESSOR_MEMORY_REQUEST__"
+              cpu: "__FO_PROCESSOR_CPU_REQUEST__"
             limits:
-              memory: "2Gi"
-              cpu: "1"
+              memory: "__FO_PROCESSOR_MEMORY_LIMIT__"
+              cpu: "__FO_PROCESSOR_CPU_LIMIT__"
           volumeMounts:
             - name: plugins-volume
               mountPath: /app/plugins

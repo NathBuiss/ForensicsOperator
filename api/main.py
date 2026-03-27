@@ -1,4 +1,5 @@
 """TraceX API — FastAPI entrypoint."""
+import asyncio
 import logging
 
 from fastapi import Depends, FastAPI, Request
@@ -6,16 +7,60 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
+from config import settings
+
 from routers import (
     cases, ingest, jobs, search, plugins, health,
     saved_searches, alert_rules, export, global_alert_rules,
-    modules, collector, editor,
+    modules, collector, editor, llm_config, s3_integration, metrics,
+    cti,
 )
 from routers import auth as auth_router
-from auth.dependencies import get_current_user
+from auth.dependencies import get_current_user, require_admin, require_analyst_or_admin
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _bootstrap_admin() -> None:
+    """
+    Called at startup to:
+    1. Migrate pre-RBAC user accounts that lack a 'role' field → promote to admin.
+    2. Create a default admin user from env vars if Redis has no users at all.
+
+    This is idempotent — safe to run on every restart.
+    """
+    from auth.service import (
+        _redis as auth_redis, _USER_KEY, _USERS_SET,
+        create_user, user_count,
+    )
+    try:
+        r = auth_redis()
+
+        # ── Step 1: patch existing users without a role (pre-RBAC migration) ──
+        usernames = r.smembers(_USERS_SET)
+        for username in usernames:
+            key = _USER_KEY.format(username=username)
+            if not r.hget(key, "role"):
+                r.hset(key, "role", "admin")
+                logger.info("Bootstrap: migrated user '%s' → role=admin", username)
+
+        # ── Step 2: seed default admin if no users exist ───────────────────────
+        if user_count() == 0:
+            try:
+                create_user(settings.ADMIN_USERNAME, settings.ADMIN_PASSWORD, role="admin")
+                logger.info(
+                    "Bootstrap: created default admin user '%s'. "
+                    "Change the password immediately after first login.",
+                    settings.ADMIN_USERNAME,
+                )
+            except ValueError:
+                pass  # Already exists (race between replicas)
+    except Exception as exc:
+        # Redis may not be reachable during very early startup; the readinessProbe
+        # ensures requests only arrive after Redis is up, so this is non-fatal.
+        logger.warning("Bootstrap admin failed (Redis not ready?): %s", exc)
+
 
 app = FastAPI(
     title="TraceX API",
@@ -48,9 +93,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Auth dependency applied to all protected routes ───────────────────────────
+# ── Startup hook ─────────────────────────────────────────────────────────────
+
+@app.on_event("startup")
+async def _on_startup():
+    _bootstrap_admin()
+    asyncio.create_task(cti.start_cti_scheduler())
+
+
+# ── Auth dependencies for route protection ────────────────────────────────────
 # Health and auth endpoints are public; everything else requires a valid JWT.
-_protected = [Depends(get_current_user)]
+# Analyst-or-admin: regular forensic operations (cases, search, etc.)
+# Admin-only: system configuration (LLM settings, global alert rules, etc.)
+_analyst_or_admin = [Depends(require_analyst_or_admin)]
+_admin_only       = [Depends(require_admin)]
 
 # ── Routers ────────────────────────────────────────────────────────────────────
 
@@ -58,16 +114,26 @@ _protected = [Depends(get_current_user)]
 app.include_router(health.router,      prefix="/api/v1")
 app.include_router(auth_router.router, prefix="/api/v1")
 
-# Protected — require valid JWT (or AUTH_ENABLED=false for dev)
-app.include_router(cases.router,              prefix="/api/v1", dependencies=_protected)
-app.include_router(ingest.router,             prefix="/api/v1", dependencies=_protected)
-app.include_router(jobs.router,               prefix="/api/v1", dependencies=_protected)
-app.include_router(search.router,             prefix="/api/v1", dependencies=_protected)
-app.include_router(plugins.router,            prefix="/api/v1", dependencies=_protected)
-app.include_router(saved_searches.router,     prefix="/api/v1", dependencies=_protected)
-app.include_router(alert_rules.router,        prefix="/api/v1", dependencies=_protected)
-app.include_router(export.router,             prefix="/api/v1", dependencies=_protected)
-app.include_router(global_alert_rules.router, prefix="/api/v1", dependencies=_protected)
-app.include_router(modules.router,            prefix="/api/v1", dependencies=_protected)
-app.include_router(collector.router,          prefix="/api/v1", dependencies=_protected)
-app.include_router(editor.router,             prefix="/api/v1", dependencies=_protected)
+# Protected — analyst or admin
+app.include_router(cases.router,              prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(ingest.router,             prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(jobs.router,               prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(search.router,             prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(plugins.router,            prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(saved_searches.router,     prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(alert_rules.router,        prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(export.router,             prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(modules.router,            prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(collector.router,          prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(editor.router,             prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(cti.router,               prefix="/api/v1", dependencies=_analyst_or_admin)
+
+# Protected — analyst or admin (alert rules used by analysts too)
+app.include_router(global_alert_rules.router, prefix="/api/v1", dependencies=_analyst_or_admin)
+
+# Protected — admin only (system configuration)
+# llm_config is registered with analyst_or_admin so analysts can use AI analysis.
+# The /admin/llm-config CRUD routes carry their own require_admin dependency.
+app.include_router(llm_config.router,         prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(s3_integration.router,     prefix="/api/v1", dependencies=_admin_only)
+app.include_router(metrics.router,            prefix="/api/v1", dependencies=_analyst_or_admin)

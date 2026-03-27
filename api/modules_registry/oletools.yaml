@@ -1,0 +1,22 @@
+id: oletools
+name: Oletools
+description: >-
+  Office document macro and OLE stream analysis. Detects VBA macros, auto-exec
+  triggers, suspicious keywords (Shell, CreateObject, WScript), embedded PE files,
+  and DDE links in Word, Excel, PowerPoint and RTF documents.
+input_extensions:
+  - .doc
+  - .docx
+  - .docm
+  - .xls
+  - .xlsx
+  - .xlsm
+  - .ppt
+  - .pptx
+  - .pptm
+  - .rtf
+  - .mht
+input_filenames: []
+available: true
+category: Malware Detection
+tags: [office, macro, vba, ole, malware, document]

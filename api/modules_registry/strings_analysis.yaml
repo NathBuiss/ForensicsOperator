@@ -1,0 +1,13 @@
+id: strings_analysis
+name: Strings Analysis
+description: "Extract ASCII and Unicode strings from binary files. Useful for identifying embedded URLs, IPs, commands, and other indicators."
+input_extensions:
+  - .exe
+  - .dll
+  - .bin
+  - .dat
+  - .dmp
+  - .raw
+  - "*"
+available: true
+run_on_files: true

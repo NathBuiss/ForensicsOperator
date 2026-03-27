@@ -1,0 +1,20 @@
+id: access_log_analysis
+name: Access Log Analysis
+description: >
+  Analyzes Apache and Nginx HTTP access logs for suspicious patterns:
+  high error rates, brute-force attempts, path traversal, scanner signatures,
+  abnormal response sizes, and rare user-agents.
+input_extensions:
+  - .log
+input_filenames:
+  - access.log
+  - access_log
+  - error.log
+available: true
+category: Network
+tags:
+  - web
+  - apache
+  - nginx
+  - http
+  - network

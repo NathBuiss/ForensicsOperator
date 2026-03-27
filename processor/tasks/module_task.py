@@ -2,10 +2,20 @@
 Module execution task: download source files, run module binary, store results.
 
 Supported modules:
-  hayabusa  — Sigma-based EVTX threat hunting
-  strings   — Printable string extraction from any file
-  hindsight — Browser forensics (Chrome/Firefox/Edge)
-  regripper — Deep Windows registry analysis
+  hayabusa         — Sigma-based EVTX threat hunting
+  strings          — Printable string extraction from any file
+  strings_analysis — Categorised string extraction with IOC identification
+  hindsight        — Browser forensics (Chrome/Firefox/Edge)
+  regripper        — Deep Windows registry analysis
+  wintriage        — Windows triage collection analysis
+  yara             — YARA rule scanning
+  exiftool         — Metadata extraction
+  volatility3      — Memory forensics
+  oletools         — Office document macro / OLE analysis
+  ole_analysis     — Alias for oletools
+  pe_analysis      — PE executable deep inspection
+  grep_search      — Regex-based IOC / keyword pattern search
+  malwoverview     — VirusTotal / multi-TI hash lookup (malwoverview CLI or direct API)
 """
 from __future__ import annotations
 
@@ -18,6 +28,7 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -54,34 +65,139 @@ LEVEL_INT = {
 # Strip ANSI terminal escape sequences before storing output in Redis / displaying in UI
 _ANSI_RE = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-9;]*[ -/]*[@-~])')
 
+# Minimal subprocess environment — strips MINIO/Redis secrets from child processes
+# so that a compromised binary cannot exfiltrate credentials via env inheritance.
+_SAFE_ENV = {
+    "PATH":   os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+    "HOME":   "/tmp",
+    "LANG":   os.environ.get("LANG", "en_US.UTF-8"),
+    "TMPDIR": "/tmp",
+}
+
+# Redis key for UI-configured Cuckoo integration settings
+_CUCKOO_CONFIG_KEY = "fo:config:cuckoo"
+# Redis key for UI-configured malwoverview / VirusTotal settings
+_MALWOVERVIEW_CONFIG_KEY = "fo:config:malwoverview"
+
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub('', text)
 
 
-def _load_custom_module_runner(module_id: str, tool_meta: dict):
+_SANDBOX_SCRIPT = Path(__file__).parent / "_module_sandbox.py"
+
+# Resource limits for custom module subprocess
+_SANDBOX_CPU_SECONDS  = int(os.getenv("SANDBOX_CPU_SECONDS",  "3600"))
+_SANDBOX_MEMORY_BYTES = int(os.getenv("SANDBOX_MEMORY_BYTES", str(2 * 1024**3)))
+_SANDBOX_FSIZE_BYTES  = int(os.getenv("SANDBOX_FSIZE_BYTES",  str(500 * 1024**2)))
+_SANDBOX_NPROC        = int(os.getenv("SANDBOX_NPROC",        "64"))
+_SANDBOX_TIMEOUT      = int(os.getenv("SANDBOX_TIMEOUT_SEC",  "1800"))  # 30 min wall time
+
+
+def _run_custom_module(
+    run_id: str,
+    case_id: str,
+    module_id: str,
+    work_dir: Path,
+    source_files: list,
+    params: dict,
+    tool_meta: dict,
+) -> list[dict]:
     """
-    Dynamically load and return the run() function from modules/{module_id}_module.py.
-    Returns None if the file doesn't exist or fails to load.
+    Execute a custom *_module.py file in an isolated subprocess.
+
+    The child process:
+      • sets resource limits (CPU, memory, file size, nproc) before importing
+        any module code — limits cascade to any subprocesses the module spawns
+      • receives MinIO/Redis credentials via stdin (not visible in ps/env)
+      • has HOME remapped to work_dir and sensitive env vars stripped
+      • is killed by the parent after SANDBOX_TIMEOUT_SEC wall-clock seconds
+
+    Returns the list of hit dicts produced by the module's run() function.
     """
+    import sys as _sys
+
     module_file = CUSTOM_MODULES_DIR / f"{module_id}_module.py"
     if not module_file.exists():
-        return None
+        raise RuntimeError(
+            f"Custom module file not found: {module_file}. "
+            "Create it in the Studio editor."
+        )
+
+    args_payload = json.dumps({
+        "run_id":        run_id,
+        "case_id":       case_id,
+        "module_file":   str(module_file),
+        "source_files":  source_files,
+        "params":        params,
+        "work_dir":      str(work_dir),
+        "minio_endpoint": MINIO_ENDPOINT,
+        "minio_access":  MINIO_ACCESS,
+        "minio_secret":  MINIO_SECRET,
+        "minio_bucket":  MINIO_BUCKET,
+        "redis_url":     REDIS_URL,
+        # Propagate limit overrides so sandbox can log them
+        "limit_cpu_seconds":  _SANDBOX_CPU_SECONDS,
+        "limit_memory_bytes": _SANDBOX_MEMORY_BYTES,
+        "limit_fsize_bytes":  _SANDBOX_FSIZE_BYTES,
+        "limit_nproc":        _SANDBOX_NPROC,
+    })
+
+    logger.info("[%s] Launching custom module '%s' in sandbox (timeout=%ss)",
+                run_id, module_id, _SANDBOX_TIMEOUT)
+    tool_meta["log"] += (
+        f"[sandbox] executing {module_file.name} in subprocess "
+        f"(cpu={_SANDBOX_CPU_SECONDS}s mem={_SANDBOX_MEMORY_BYTES // 1024**2}MB "
+        f"fsize={_SANDBOX_FSIZE_BYTES // 1024**2}MB nproc={_SANDBOX_NPROC})\n"
+    )
+
     try:
-        import importlib.util as _ilu
-        spec = _ilu.spec_from_file_location(f"_fo_cmod_{module_id}", module_file)
-        mod  = _ilu.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        run_fn = getattr(mod, "run", None)
-        if run_fn is None:
-            raise RuntimeError("Module file has no run() function")
-        logger.info("Loaded custom module: %s", module_file)
-        tool_meta["log"] += f"[custom module] Loaded from {module_file}\n"
-        return run_fn
-    except Exception as exc:
-        logger.error("Failed to load custom module %s: %s", module_file, exc)
-        tool_meta["log"] += f"[custom module] Load error: {exc}\n"
-        raise RuntimeError(f"Custom module '{module_id}' failed to load: {exc}") from exc
+        proc = subprocess.run(
+            [_sys.executable, str(_SANDBOX_SCRIPT)],
+            input=args_payload,
+            capture_output=True,
+            text=True,
+            timeout=_SANDBOX_TIMEOUT,
+            # Inherit only a minimal environment — no secrets in child env
+            env={
+                "PATH":       os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+                "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
+                "HOME":       str(work_dir),
+            },
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"Custom module '{module_id}' timed out after {_SANDBOX_TIMEOUT}s"
+        )
+
+    stderr_out = (proc.stderr or "").strip()
+    if stderr_out:
+        tool_meta["log"] += f"\n[sandbox stderr]\n{stderr_out[:8000]}\n"
+        logger.info("[%s] Sandbox stderr:\n%s", run_id, stderr_out[:3000])
+
+    stdout_out = (proc.stdout or "").strip()
+    tool_meta["stdout"] = stdout_out[:4000] if stdout_out else ""
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Custom module '{module_id}' subprocess exited {proc.returncode}. "
+            f"stderr: {stderr_out[:500]}"
+        )
+
+    try:
+        result = json.loads(stdout_out)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"Custom module '{module_id}' produced invalid JSON output: {exc}. "
+            f"stdout: {stdout_out[:300]}"
+        ) from exc
+
+    if "error" in result:
+        raise RuntimeError(f"Custom module '{module_id}' failed: {result['error']}")
+
+    hits = result.get("hits", [])
+    logger.info("[%s] Custom module returned %d hits", run_id, len(hits))
+    return hits
 
 
 def get_redis() -> redis.Redis:
@@ -91,6 +207,30 @@ def get_redis() -> redis.Redis:
 def get_minio():
     from minio import Minio
     return Minio(MINIO_ENDPOINT, access_key=MINIO_ACCESS, secret_key=MINIO_SECRET, secure=False)
+
+
+_CONN_ERRORS = ("connection refused", "max retries", "timeout", "connect", "reset by peer",
+                "broken pipe", "connection reset", "econnrefused")
+
+
+def _minio_op(fn, max_tries: int = 4, base_delay: float = 3.0):
+    """Execute fn(), retrying on transient MinIO connectivity errors with exponential backoff."""
+    last_exc = None
+    for attempt in range(max_tries):
+        try:
+            return fn()
+        except Exception as exc:
+            msg = str(exc).lower()
+            if any(k in msg for k in _CONN_ERRORS):
+                last_exc = exc
+                if attempt < max_tries - 1:
+                    wait = base_delay * (2 ** attempt)
+                    logger.warning("MinIO attempt %d/%d failed (%s). Retrying in %.0fs…",
+                                   attempt + 1, max_tries, exc, wait)
+                    time.sleep(wait)
+                    continue
+            raise
+    raise last_exc  # type: ignore[misc]
 
 
 def _update(r: redis.Redis, run_id: str, **fields) -> None:
@@ -136,7 +276,7 @@ def run_module(
         for sf in source_files:
             dest = sources_dir / sf["filename"]
             logger.info("[%s] Downloading %s", run_id, sf["minio_key"])
-            minio.fget_object(MINIO_BUCKET, sf["minio_key"], str(dest))
+            _minio_op(lambda d=dest, k=sf["minio_key"]: minio.fget_object(MINIO_BUCKET, k, str(d)))
 
         logger.info("[%s] Sources: %s", run_id,
                     [p.name for p in sorted(sources_dir.iterdir()) if p.is_file()])
@@ -146,23 +286,34 @@ def run_module(
         tool_meta: dict[str, str] = {"stdout": "", "stderr": "", "log": ""}
 
         RUNNERS = {
-            "hayabusa":    _run_hayabusa,
-            "strings":     _run_strings,
-            "hindsight":   _run_hindsight,
-            "regripper":   _run_regripper,
-            "wintriage":   _run_wintriage,
-            "yara":        _run_yara,
-            "exiftool":    _run_exiftool,
+            "hayabusa":            _run_hayabusa,
+            "strings":             _run_strings,
+            "hindsight":           _run_hindsight,
+            "regripper":           _run_regripper,
+            "wintriage":           _run_wintriage,
+            "yara":                _run_yara,
+            "exiftool":            _run_exiftool,
+            "volatility3":         _run_volatility3,
+            "oletools":            _run_oletools,
+            "pe_analysis":         _run_pe_analysis,
+            "strings_analysis":    _run_strings_analysis,
+            "grep_search":         _run_grep_search,
+            "ole_analysis":        _run_oletools,        # alias
+            "access_log_analysis": _run_access_log_analysis,
+            "cuckoo":              _run_cuckoo,
+            "de4dot":              _run_de4dot,
+            "malwoverview":        _run_malwoverview,
         }
         runner = RUNNERS.get(module_id)
 
-        # Fall back to custom module from modules/ directory
-        if runner is None:
-            runner = _load_custom_module_runner(module_id, tool_meta)
-        if not runner:
-            raise RuntimeError(f"Unknown module: {module_id}")
-
-        results = runner(run_id, work_dir, sources_dir, params, tool_meta)
+        if runner is not None:
+            # Built-in module — run directly in this process
+            results = runner(run_id, work_dir, sources_dir, params, tool_meta)
+        else:
+            # Custom module — run in isolated sandboxed subprocess
+            results = _run_custom_module(
+                run_id, case_id, module_id, work_dir, source_files, params, tool_meta
+            )
 
         # ── 3a. For Hayabusa: also index into Elasticsearch so hits appear in Timeline ──
         if module_id == "hayabusa" and results:
@@ -179,8 +330,8 @@ def run_module(
         results_json = work_dir / "results.json"
         results_json.write_text(json.dumps(results, ensure_ascii=False))
         output_key = f"cases/{case_id}/modules/{run_id}/results.json"
-        minio.fput_object(MINIO_BUCKET, output_key, str(results_json),
-                          content_type="application/json")
+        _minio_op(lambda: minio.fput_object(MINIO_BUCKET, output_key, str(results_json),
+                                            content_type="application/json"))
         logger.info("[%s] Uploaded %d hits to MinIO", run_id, len(results))
 
         # ── 4. Level summary ─────────────────────────────────────────────────
@@ -217,7 +368,7 @@ def run_module(
                 tool_stdout=tool_meta.get("stdout", "")[:8000] if 'tool_meta' in dir() else "",
                 tool_stderr=tool_meta.get("stderr", "")[:4000] if 'tool_meta' in dir() else "",
                 completed_at=datetime.now(timezone.utc).isoformat())
-        raise
+        raise RuntimeError(str(exc)) from None
 
     finally:
         if work_dir.exists():
@@ -1981,4 +2132,1517 @@ def _run_exiftool(run_id: str, work_dir: Path, sources_dir: Path, params: dict, 
             },
         })
 
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Volatility 3 — memory forensics
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Supported memory dump extensions
+_MEMORY_EXTS = frozenset({
+    ".dmp", ".vmem", ".raw", ".mem", ".img",
+    ".lime", ".dd", ".bin", ".elf", ".e01",
+})
+
+# Plugins: (plugin_name, display_label, base_level, max_rows)
+_VOL_WIN_PLUGINS = [
+    ("windows.pslist.PsList",               "Process List",           "informational", 500),
+    ("windows.cmdline.CmdLine",             "Command Lines",          "informational", 500),
+    ("windows.netscan.NetScan",             "Network Connections",    "informational", 500),
+    ("windows.malfind.Malfind",             "Injected Code (Malfind)","high",          200),
+    ("windows.svcscan.SvcScan",             "Services",               "informational", 400),
+    ("windows.dlllist.DllList",             "Loaded DLLs",            "informational", 300),
+    ("windows.registry.hivescan.HiveScan",  "Registry Hives",         "informational", 200),
+]
+
+_VOL_LINUX_PLUGINS = [
+    ("linux.pslist.PsList",   "Process List",        "informational", 500),
+    ("linux.bash.Bash",       "Bash History",        "informational", 300),
+    ("linux.netstat.Netstat", "Network Connections", "informational", 500),
+    ("linux.lsof.Lsof",      "Open Files",          "informational", 300),
+]
+
+
+def _find_vol_binary() -> tuple[str, str | None]:
+    """
+    Return (interpreter, vol_script_or_None).
+    Tries: vol3, vol, then common install paths.
+    Raises RuntimeError if not found.
+    """
+    for name in ("vol3", "vol"):
+        found = shutil.which(name)
+        if found:
+            return (found, None)
+
+    # Fallback: look for vol.py in known paths
+    candidates = [
+        "/opt/volatility3/vol.py",
+        "/usr/local/lib/volatility3/vol.py",
+        str(Path.home() / "volatility3" / "vol.py"),
+    ]
+    python3 = shutil.which("python3") or "python3"
+    for c in candidates:
+        if Path(c).exists():
+            return (python3, c)
+
+    raise RuntimeError(
+        "Volatility 3 not found in PATH. Install with:\n"
+        "  pip install volatility3\n"
+        "or place vol3/vol in PATH."
+    )
+
+
+def _run_vol_plugin(
+    vol_bin: str,
+    vol_script: str | None,
+    mem_file: Path,
+    plugin: str,
+    work_dir: Path,
+    tool_meta: dict,
+) -> tuple[list[str], list[list]]:
+    """
+    Run one Volatility 3 plugin with --renderer json.
+    Returns (columns, rows) on success, or ([], []) on failure.
+    """
+    cmd = [vol_bin]
+    if vol_script:
+        cmd.append(vol_script)
+    cmd += ["-f", str(mem_file), "--renderer", "json", plugin]
+
+    tool_meta["log"] += f"  cmd: {' '.join(cmd)}\n"
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,    # 10 min per plugin
+            cwd=str(work_dir),
+        )
+    except subprocess.TimeoutExpired:
+        tool_meta["stdout"] += f"  → TIMEOUT (>10 min)\n"
+        tool_meta["log"]    += f"  [{plugin}] timeout\n"
+        return [], []
+
+    stdout = _strip_ansi((proc.stdout or "").strip())
+    stderr = _strip_ansi((proc.stderr or "").strip())
+
+    if stderr:
+        tool_meta["log"] += f"  stderr: {stderr[:600]}\n"
+
+    if not stdout:
+        tool_meta["stdout"] += f"  → no output (code={proc.returncode})\n"
+        if stderr:
+            tool_meta["stdout"] += f"  {stderr[:200]}\n"
+        return [], []
+
+    # Find the JSON object in stdout (Volatility may print progress lines first)
+    json_start = stdout.find("{")
+    if json_start == -1:
+        tool_meta["stdout"] += f"  → no JSON found in output\n"
+        return [], []
+
+    try:
+        data = json.loads(stdout[json_start:])
+    except json.JSONDecodeError as exc:
+        tool_meta["stdout"] += f"  → JSON decode error: {exc}\n"
+        return [], []
+
+    columns = data.get("columns", [])
+    rows    = data.get("rows",    [])
+    return columns, rows
+
+
+def _volatility_rows_to_hits(
+    plugin: str,
+    label: str,
+    base_level: str,
+    columns: list[str],
+    rows: list[list],
+    source_file: str,
+) -> list[dict]:
+    """Convert Volatility 3 JSON rows into FO hit dicts."""
+    col_lower = [c.lower() for c in columns]
+
+    def _col(row: list, *names: str) -> str:
+        for name in names:
+            try:
+                idx = col_lower.index(name.lower())
+                v = row[idx]
+                return str(v) if v not in (None, "", 0) else ""
+            except (ValueError, IndexError):
+                pass
+        return ""
+
+    results: list[dict] = []
+    p_lower = plugin.lower()
+
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+
+        # Build generic details from all non-empty columns
+        parts = [f"{c}: {v}" for c, v in zip(columns, row)
+                 if v is not None and v != "" and v != 0]
+        details = " | ".join(parts[:15])
+
+        pid      = _col(row, "PID", "pid")
+        level    = base_level
+        tags     = [f"volatility.{plugin.split('.')[0]}"]
+
+        # Per-plugin rule_title and enrichment
+        if "pslist" in p_lower or "pstree" in p_lower:
+            name  = _col(row, "ImageFileName", "Name", "name")
+            ppid  = _col(row, "PPID", "ppid")
+            title = f"Process: {name or '?'}"
+            if pid:  title += f" (PID {pid})"
+            if ppid: title += f" ← {ppid}"
+
+        elif "cmdline" in p_lower:
+            name  = _col(row, "ImageFileName", "Name", "Process")
+            args  = _col(row, "Args", "CommandLine", "cmdline", "Cmd")
+            title = f"CmdLine: {name or '?'}"
+            if pid:  title += f" (PID {pid})"
+            details = args or details
+            # Flag suspicious patterns
+            for pattern in ("encodedcommand", "frombase64", "invoke-expression", "iex(", "bypass"):
+                if pattern in (args or "").lower():
+                    level = "high"
+                    tags.append("suspicious.cmdline")
+                    break
+
+        elif "netscan" in p_lower or "netstat" in p_lower:
+            proto  = _col(row, "Proto", "Type", "proto")
+            local  = _col(row, "LocalAddr", "LocalIp", "local_addr")
+            lport  = _col(row, "LocalPort", "lport")
+            remote = _col(row, "ForeignAddr", "ForeignIp", "RemoteAddr", "remote_addr")
+            rport  = _col(row, "ForeignPort", "rport", "RemotePort")
+            state  = _col(row, "State", "state")
+            owner  = _col(row, "Owner", "ImageFileName")
+            laddr  = f"{local}:{lport}" if lport else local
+            raddr  = f"{remote}:{rport}" if rport else remote
+            title  = f"Network: {proto} {laddr} → {raddr}"
+            if state:  title += f" [{state}]"
+            if owner:  title += f" ({owner})"
+
+        elif "malfind" in p_lower:
+            name      = _col(row, "ImageFileName", "Process", "Name")
+            protection= _col(row, "Protection", "Vad Tag", "VadTag")
+            title     = f"Malfind: {name or '?'}"
+            if pid:   title += f" (PID {pid})"
+            if protection: title += f" [{protection}]"
+            level = "high"
+            tags.append("malware.injected-code")
+
+        elif "svcscan" in p_lower or "services" in p_lower:
+            svc   = _col(row, "ServiceName", "Name", "DisplayName")
+            state = _col(row, "State", "state")
+            start = _col(row, "Start", "StartType")
+            title = f"Service: {svc or '?'}"
+            if state: title += f" [{state}]"
+            if start: title += f" ({start})"
+
+        elif "dlllist" in p_lower:
+            proc = _col(row, "ImageFileName", "Name", "Process")
+            path = _col(row, "Path", "FullDllName", "Base")
+            title = f"DLL: {proc or '?'} → {Path(path).name if path else '?'}"
+
+        elif "bash" in p_lower:
+            cmd   = _col(row, "Command", "command", "History")
+            uname = _col(row, "Name", "Process", "pid")
+            title = f"Bash: {(cmd or '?')[:80]}"
+            details = cmd or details
+
+        elif "hive" in p_lower:
+            hive  = _col(row, "Name", "HiveName", "FileFullPath", "File")
+            title = f"Registry Hive: {hive or '?'}"
+
+        elif "lsof" in p_lower:
+            proc  = _col(row, "Name", "ImageFileName", "pid")
+            fpath = _col(row, "File", "Path", "FdType")
+            title = f"Open File: {proc or '?'} → {fpath or '?'}"
+
+        else:
+            title = label
+
+        try:
+            pid_int = int(pid) if pid and str(pid).isdigit() else None
+        except (ValueError, TypeError):
+            pid_int = None
+
+        results.append({
+            "id":          str(uuid.uuid4()),
+            "timestamp":   "",
+            "level":       level,
+            "level_int":   LEVEL_INT.get(level, 1),
+            "rule_title":  title[:200],
+            "computer":    source_file,
+            "channel":     plugin,
+            "event_id":    pid_int,
+            "details_raw": details[:2000],
+            "tags":        tags,
+        })
+
+    return results
+
+
+def _run_volatility3(
+    run_id: str,
+    work_dir: Path,
+    sources_dir: Path,
+    params: dict,
+    tool_meta: dict,
+) -> list[dict]:
+    """
+    Run Volatility 3 memory forensics against an uploaded memory dump.
+
+    Params:
+      os:      "windows" (default) | "linux"
+      plugins: comma-separated short plugin names to override the default set
+               e.g. "pslist,cmdline,malfind"
+    """
+    vol_bin, vol_script = _find_vol_binary()
+
+    # Find the memory dump — prefer files with known extensions, fall back to largest
+    mem_files = [p for p in sources_dir.iterdir()
+                 if p.is_file() and p.suffix.lower() in _MEMORY_EXTS]
+    if not mem_files:
+        all_files = [p for p in sources_dir.iterdir() if p.is_file()]
+        if not all_files:
+            raise RuntimeError("No source files found for Volatility analysis.")
+        # Use the largest file as a heuristic for the memory image
+        mem_files = sorted(all_files, key=lambda p: p.stat().st_size, reverse=True)[:1]
+
+    mem_file = mem_files[0]
+    size_mb  = mem_file.stat().st_size / (1024 * 1024)
+    logger.info("[%s] Volatility: %s (%.0f MB)", run_id, mem_file.name, size_mb)
+    tool_meta["log"]    += f"Memory file: {mem_file.name} ({size_mb:.0f} MB)\n"
+    tool_meta["stdout"] += (
+        f"=== Volatility 3 Memory Forensics ===\n"
+        f"File : {mem_file.name}  ({size_mb:.0f} MB)\n"
+        f"Tool : {vol_script or vol_bin}\n\n"
+    )
+
+    os_hint = (params.get("os") or "windows").lower()
+    all_plugins = _VOL_WIN_PLUGINS if os_hint != "linux" else _VOL_LINUX_PLUGINS
+
+    # Allow user to restrict plugins via params
+    plugin_filter = [p.strip().lower() for p in (params.get("plugins") or "").split(",") if p.strip()]
+    if plugin_filter:
+        all_plugins = [
+            (p, lbl, lvl, mr) for p, lbl, lvl, mr in all_plugins
+            if any(f in p.lower() for f in plugin_filter)
+        ]
+        if not all_plugins:
+            raise RuntimeError(
+                f"No matching plugins for filter {plugin_filter}. "
+                f"Available: {[p for p, *_ in (_VOL_WIN_PLUGINS if os_hint != 'linux' else _VOL_LINUX_PLUGINS)]}"
+            )
+
+    results: list[dict] = []
+
+    for plugin, label, base_level, max_rows in all_plugins:
+        tool_meta["stdout"] += f"\n--- {label} ({plugin}) ---\n"
+        tool_meta["log"]    += f"\n[{plugin}]\n"
+
+        columns, rows = _run_vol_plugin(vol_bin, vol_script, mem_file, plugin, work_dir, tool_meta)
+
+        if not rows:
+            tool_meta["stdout"] += "  0 rows\n"
+            continue
+
+        tool_meta["stdout"] += f"  {len(rows):,} rows\n"
+        hits = _volatility_rows_to_hits(plugin, label, base_level, columns, rows[:max_rows], mem_file.name)
+        results.extend(hits)
+        logger.info("[%s] %s → %d hits", run_id, plugin, len(hits))
+
+    tool_meta["stdout"] += f"\n=== Total: {len(results):,} hits across {len(all_plugins)} plugins ===\n"
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Oletools — Office macro / VBA / OLE analysis
+# ─────────────────────────────────────────────────────────────────────────────
+
+_OFFICE_EXTS = frozenset({
+    '.doc', '.docx', '.docm', '.dot', '.dotm',
+    '.xls', '.xlsx', '.xlsm', '.xla', '.xlam',
+    '.ppt', '.pptx', '.pptm',
+    '.rtf', '.mht',
+})
+
+# Oletools risk level → FO level
+_OLE_RISK_MAP = {
+    "HIGH":   "high",
+    "MEDIUM": "medium",
+    "LOW":    "low",
+    "ERROR":  "medium",
+}
+
+# Keywords that escalate a hit to high
+_VBA_SUSPICIOUS_KEYWORDS = {
+    "shell", "createobject", "wscript", "powershell", "cmd.exe",
+    "regwrite", "environ", "shlobj", "dde", "autoopen", "autoclose",
+    "document_open", "workbook_open", "auto_open", "auto_close",
+    "download", "urldownloadtofile", "winexec", "shellexecute",
+}
+
+
+def _run_oletools(
+    run_id: str,
+    work_dir: Path,
+    sources_dir: Path,
+    params: dict,
+    tool_meta: dict,
+) -> list[dict]:
+    """Analyse Office documents with oletools (olevba + oleid)."""
+    try:
+        import oletools.olevba as _olevba  # type: ignore
+        import oletools.oleid as _oleid    # type: ignore
+        _OT_AVAILABLE = True
+    except ImportError:
+        _OT_AVAILABLE = False
+
+    if not _OT_AVAILABLE:
+        # Try CLI fallback
+        olevba_bin = shutil.which("olevba") or shutil.which("olevba3")
+        if not olevba_bin:
+            raise RuntimeError(
+                "oletools not installed. Run: pip install oletools  in the processor image."
+            )
+        return _run_oletools_cli(run_id, sources_dir, olevba_bin, tool_meta)
+
+    results: list[dict] = []
+    doc_files = [
+        p for p in sorted(sources_dir.iterdir())
+        if p.is_file() and p.suffix.lower() in _OFFICE_EXTS
+    ]
+    if not doc_files:
+        tool_meta["log"] += "No Office files found in source set.\n"
+        return []
+
+    for doc in doc_files:
+        tool_meta["stdout"] += f"\n=== {doc.name} ===\n"
+        try:
+            # ── olevba ───────────────────────────────────────────────────────
+            vba_parser = _olevba.VBA_Parser(str(doc))
+            if vba_parser.detect_vba_macros():
+                for (filename, stream_path, vba_filename, vba_code) in vba_parser.extract_macros():
+                    if not vba_code:
+                        continue
+                    # Scan for IOCs
+                    analysis = vba_parser.analyze_macros()
+                    for kw_type, keyword, description in analysis:
+                        level = "high" if keyword.lower() in _VBA_SUSPICIOUS_KEYWORDS else "medium"
+                        results.append({
+                            "id":          str(uuid.uuid4()),
+                            "timestamp":   "",
+                            "level":       level,
+                            "level_int":   LEVEL_INT.get(level, 1),
+                            "rule_title":  f"VBA Macro — {kw_type}: {keyword}",
+                            "computer":    doc.name,
+                            "details_raw": description[:1000],
+                            "filename":    doc.name,
+                            "vba_keyword": keyword,
+                            "vba_type":    kw_type,
+                        })
+                    # Add summary hit for each macro module found
+                    results.append({
+                        "id":          str(uuid.uuid4()),
+                        "timestamp":   "",
+                        "level":       "medium",
+                        "level_int":   LEVEL_INT.get("medium", 3),
+                        "rule_title":  f"VBA Module: {vba_filename or stream_path}",
+                        "computer":    doc.name,
+                        "details_raw": vba_code[:2000],
+                        "filename":    doc.name,
+                        "stream_path": stream_path,
+                    })
+                tool_meta["stdout"] += f"  VBA macros detected in {doc.name}\n"
+            else:
+                tool_meta["stdout"] += f"  No VBA macros in {doc.name}\n"
+                results.append({
+                    "id":          str(uuid.uuid4()),
+                    "timestamp":   "",
+                    "level":       "informational",
+                    "level_int":   1,
+                    "rule_title":  "No Macros Detected",
+                    "computer":    doc.name,
+                    "details_raw": f"No VBA macros found in {doc.name}",
+                    "filename":    doc.name,
+                })
+        except Exception as exc:
+            logger.warning("[%s] oletools error on %s: %s", run_id, doc.name, exc)
+            results.append({
+                "id":          str(uuid.uuid4()),
+                "timestamp":   "",
+                "level":       "medium",
+                "level_int":   3,
+                "rule_title":  "Oletools Parse Error",
+                "computer":    doc.name,
+                "details_raw": str(exc)[:500],
+                "filename":    doc.name,
+            })
+
+    tool_meta["log"] += f"\nProcessed {len(doc_files)} Office file(s), {len(results)} hits\n"
+    return results
+
+
+def _run_oletools_cli(
+    run_id: str,
+    sources_dir: Path,
+    olevba_bin: str,
+    tool_meta: dict,
+) -> list[dict]:
+    """CLI fallback for oletools when the Python library is not importable."""
+    results: list[dict] = []
+    doc_files = [
+        p for p in sorted(sources_dir.iterdir())
+        if p.is_file() and p.suffix.lower() in _OFFICE_EXTS
+    ]
+    for doc in doc_files:
+        try:
+            proc = subprocess.run(
+                [olevba_bin, "--json", str(doc)],
+                capture_output=True, text=True, timeout=120,
+            )
+            if proc.stdout:
+                try:
+                    data = json.loads(proc.stdout)
+                    for item in (data if isinstance(data, list) else [data]):
+                        for macro in item.get("macros", []):
+                            keyword = macro.get("keyword", "")
+                            level = "high" if keyword.lower() in _VBA_SUSPICIOUS_KEYWORDS else "medium"
+                            results.append({
+                                "id":          str(uuid.uuid4()),
+                                "timestamp":   "",
+                                "level":       level,
+                                "level_int":   LEVEL_INT.get(level, 1),
+                                "rule_title":  f"VBA Macro — {macro.get('type', 'unknown')}: {keyword}",
+                                "computer":    doc.name,
+                                "details_raw": macro.get("description", "")[:1000],
+                                "filename":    doc.name,
+                                "vba_keyword": keyword,
+                            })
+                except json.JSONDecodeError:
+                    if "VBA" in proc.stdout or "macro" in proc.stdout.lower():
+                        results.append({
+                            "id":          str(uuid.uuid4()),
+                            "timestamp":   "",
+                            "level":       "medium",
+                            "level_int":   3,
+                            "rule_title":  "VBA Macros Detected",
+                            "computer":    doc.name,
+                            "details_raw": proc.stdout[:2000],
+                            "filename":    doc.name,
+                        })
+        except subprocess.TimeoutExpired:
+            logger.warning("[%s] olevba timed out on %s", run_id, doc.name)
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PE Analysis — pefile-based executable inspection
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PE_EXTS = frozenset({'.exe', '.dll', '.sys', '.ocx', '.scr', '.drv', '.cpl', '.com'})
+
+# Entropy thresholds
+_ENTROPY_HIGH   = 7.0   # likely packed / encrypted section
+_ENTROPY_MEDIUM = 6.0
+
+# Suspicious imported functions
+_SUSPICIOUS_IMPORTS = {
+    "virtualalloc", "virtualallocex", "writeprocessmemory",
+    "createremotethread", "openprocess", "ntunmapviewofsection",
+    "rtldecompressbuffer", "rtlmovememory",
+    "loadlibrarya", "loadlibraryexw", "getprocaddress",
+    "createprocessw", "createprocessa", "shellexecutea", "shellexecutew",
+    "winexec", "system", "isdebuggerpresent", "checkremotedebuggerpresent",
+    "ntqueryinformationprocess", "gettickcount", "sleep",
+    "regsetvalueexa", "regcreatekeyexa",
+    "internetopena", "internetconnecta", "httpopenrequesta",
+    "wsastartup", "socket", "connect", "send", "recv",
+}
+
+
+def _entropy(data: bytes) -> float:
+    if not data:
+        return 0.0
+    import math
+    freq = [0] * 256
+    for b in data:
+        freq[b] += 1
+    n = len(data)
+    return -sum((c / n) * math.log2(c / n) for c in freq if c)
+
+
+def _run_pe_analysis(
+    run_id: str,
+    work_dir: Path,
+    sources_dir: Path,
+    params: dict,
+    tool_meta: dict,
+) -> list[dict]:
+    """Analyse PE files with pefile."""
+    try:
+        import pefile as _pefile  # type: ignore
+    except ImportError:
+        raise RuntimeError(
+            "pefile not installed. Run: pip install pefile  in the processor image."
+        )
+
+    results: list[dict] = []
+    pe_files = [
+        p for p in sorted(sources_dir.iterdir())
+        if p.is_file() and p.suffix.lower() in _PE_EXTS
+    ]
+    if not pe_files:
+        tool_meta["log"] += "No PE files (exe/dll/sys) found in source set.\n"
+        return []
+
+    for pe_path in pe_files:
+        tool_meta["stdout"] += f"\n=== {pe_path.name} ===\n"
+        try:
+            pe = _pefile.PE(str(pe_path), fast_load=False)
+        except Exception as exc:
+            results.append({
+                "id":          str(uuid.uuid4()),
+                "timestamp":   "",
+                "level":       "medium",
+                "level_int":   3,
+                "rule_title":  "PE Parse Error",
+                "computer":    pe_path.name,
+                "details_raw": str(exc)[:500],
+                "filename":    pe_path.name,
+            })
+            continue
+
+        # ── PE Header summary ─────────────────────────────────────────────
+        try:
+            machine     = pe.FILE_HEADER.Machine
+            num_sects   = pe.FILE_HEADER.NumberOfSections
+            ts          = getattr(pe.FILE_HEADER, "TimeDateStamp", 0)
+            compile_ts  = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else ""
+            subsystem   = getattr(pe.OPTIONAL_HEADER, "Subsystem", 0)
+            entry_point = hex(getattr(pe.OPTIONAL_HEADER, "AddressOfEntryPoint", 0))
+            arch        = "x86" if machine == 0x014c else ("x64" if machine == 0x8664 else hex(machine))
+        except Exception:
+            arch, num_sects, compile_ts, entry_point = "unknown", 0, "", ""
+
+        results.append({
+            "id":          str(uuid.uuid4()),
+            "timestamp":   compile_ts,
+            "level":       "informational",
+            "level_int":   1,
+            "rule_title":  f"PE Header — {pe_path.name}",
+            "computer":    pe_path.name,
+            "details_raw": (
+                f"Architecture: {arch}  |  Sections: {num_sects}  |  "
+                f"Compile time: {compile_ts or 'unknown'}  |  EntryPoint: {entry_point}"
+            ),
+            "filename":    pe_path.name,
+            "pe_arch":     arch,
+        })
+        tool_meta["stdout"] += f"  Arch: {arch}, Sections: {num_sects}, Compile: {compile_ts or '?'}\n"
+
+        # ── Section entropy ───────────────────────────────────────────────
+        try:
+            for section in pe.sections:
+                name = section.Name.decode("utf-8", errors="replace").rstrip("\x00")
+                data = section.get_data()
+                ent  = _entropy(data)
+                if ent >= _ENTROPY_HIGH:
+                    level = "high"
+                elif ent >= _ENTROPY_MEDIUM:
+                    level = "medium"
+                else:
+                    level = "informational"
+                results.append({
+                    "id":          str(uuid.uuid4()),
+                    "timestamp":   "",
+                    "level":       level,
+                    "level_int":   LEVEL_INT.get(level, 1),
+                    "rule_title":  f"Section Entropy — {name.strip() or '(unnamed)'}",
+                    "computer":    pe_path.name,
+                    "details_raw": f"Entropy: {ent:.2f}  |  Size: {len(data):,} bytes",
+                    "filename":    pe_path.name,
+                    "entropy":     round(ent, 3),
+                })
+                if ent >= _ENTROPY_HIGH:
+                    tool_meta["stdout"] += f"  HIGH ENTROPY section {name}: {ent:.2f}\n"
+        except Exception:
+            pass
+
+        # ── Suspicious imports ────────────────────────────────────────────
+        try:
+            if hasattr(pe, "DIRECTORY_ENTRY_IMPORT"):
+                for entry in pe.DIRECTORY_ENTRY_IMPORT:
+                    dll = entry.dll.decode("utf-8", errors="replace") if entry.dll else ""
+                    for imp in entry.imports:
+                        fn_name = (imp.name or b"").decode("utf-8", errors="replace")
+                        if fn_name.lower() in _SUSPICIOUS_IMPORTS:
+                            results.append({
+                                "id":          str(uuid.uuid4()),
+                                "timestamp":   "",
+                                "level":       "medium",
+                                "level_int":   3,
+                                "rule_title":  f"Suspicious Import — {fn_name}",
+                                "computer":    pe_path.name,
+                                "details_raw": f"{dll}::{fn_name}",
+                                "filename":    pe_path.name,
+                                "import_dll":  dll,
+                                "import_fn":   fn_name,
+                            })
+        except Exception:
+            pass
+
+        pe.close()
+        tool_meta["log"] += f"{pe_path.name}: {len(results)} hits\n"
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Strings Analysis — categorised string extraction with IOC identification
+# ─────────────────────────────────────────────────────────────────────────────
+
+_IOC_PATTERNS = {
+    "urls":     re.compile(r'https?://'),
+    "ips":      re.compile(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'),
+    "emails":   re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'),
+    "paths":    re.compile(r'[A-Z]:\\|/usr/|/etc/|/var/'),
+    "registry": re.compile(r'HKEY_|HKLM\\|HKCU\\'),
+}
+
+
+def _run_strings_analysis(
+    run_id: str,
+    work_dir: Path,
+    sources_dir: Path,
+    params: dict,
+    tool_meta: dict,
+) -> list[dict]:
+    """Extract ASCII and Unicode strings, then categorise IOCs."""
+    strings_bin = shutil.which("strings")
+    if not strings_bin:
+        raise RuntimeError(
+            "'strings' binary not found. Ensure binutils is installed in the processor image."
+        )
+
+    results: list[dict] = []
+
+    for file_path in sorted(sources_dir.iterdir()):
+        if not file_path.is_file():
+            continue
+
+        logger.info("[%s] strings_analysis: extracting from %s", run_id, file_path.name)
+        tool_meta["stdout"] += f"\n=== {file_path.name} ===\n"
+
+        # ASCII strings (min length 6)
+        try:
+            proc_ascii = subprocess.run(
+                [strings_bin, "-a", "-n", "6", str(file_path)],
+                capture_output=True, text=True, timeout=120,
+            )
+            ascii_strings = proc_ascii.stdout.strip().split("\n") if proc_ascii.stdout.strip() else []
+        except subprocess.TimeoutExpired:
+            logger.warning("[%s] strings (ASCII) timed out on %s", run_id, file_path.name)
+            ascii_strings = []
+
+        # Unicode strings (min length 6)
+        try:
+            proc_unicode = subprocess.run(
+                [strings_bin, "-a", "-n", "6", "-el", str(file_path)],
+                capture_output=True, text=True, timeout=120,
+            )
+            unicode_strings = proc_unicode.stdout.strip().split("\n") if proc_unicode.stdout.strip() else []
+        except subprocess.TimeoutExpired:
+            logger.warning("[%s] strings (Unicode) timed out on %s", run_id, file_path.name)
+            unicode_strings = []
+
+        all_strings = list(set(ascii_strings + unicode_strings))
+
+        # Categorise interesting strings
+        iocs: dict[str, list[str]] = {cat: [] for cat in _IOC_PATTERNS}
+        for s in all_strings:
+            for cat, pat in _IOC_PATTERNS.items():
+                if pat.search(s):
+                    iocs[cat].append(s)
+
+        # Emit one summary hit per file
+        ioc_count = sum(len(v) for v in iocs.values())
+        level = "high" if ioc_count > 20 else ("medium" if ioc_count > 5 else "informational")
+        results.append({
+            "id":             str(uuid.uuid4()),
+            "timestamp":      "",
+            "level":          level,
+            "level_int":      LEVEL_INT.get(level, 1),
+            "rule_title":     f"Strings Analysis — {file_path.name}",
+            "computer":       file_path.name,
+            "details_raw":    json.dumps({
+                "total_strings": len(all_strings),
+                "interesting_strings": {k: v[:50] for k, v in iocs.items()},
+                "sample_strings": all_strings[:200],
+            }),
+            "filename":       file_path.name,
+            "total_strings":  len(all_strings),
+        })
+
+        # Emit individual IOC hits so they show up in the results table
+        for cat, matches in iocs.items():
+            for m in matches[:50]:
+                results.append({
+                    "id":          str(uuid.uuid4()),
+                    "timestamp":   "",
+                    "level":       "medium",
+                    "level_int":   LEVEL_INT.get("medium", 3),
+                    "rule_title":  f"IOC String ({cat})",
+                    "computer":    file_path.name,
+                    "details_raw": m,
+                    "filename":    file_path.name,
+                    "ioc_type":    cat,
+                })
+
+        tool_meta["stdout"] += (
+            f"  Total strings: {len(all_strings)}  |  IOCs: {ioc_count} "
+            f"(urls={len(iocs['urls'])}, ips={len(iocs['ips'])}, emails={len(iocs['emails'])})\n"
+        )
+
+    tool_meta["log"] += f"\nProcessed {len(list(sources_dir.iterdir()))} file(s), {len(results)} hits\n"
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pattern Search (grep) — regex-based IOC / keyword scanning
+# ─────────────────────────────────────────────────────────────────────────────
+
+_DEFAULT_GREP_PATTERNS = [
+    r'https?://[^\s<>"]+',
+    r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b',
+    r'[a-fA-F0-9]{32}',   # MD5
+    r'[a-fA-F0-9]{40}',   # SHA1
+    r'[a-fA-F0-9]{64}',   # SHA256
+    r'(?:powershell|cmd\.exe|wscript|cscript|mshta|certutil|bitsadmin)',
+]
+
+
+def _run_grep_search(
+    run_id: str,
+    work_dir: Path,
+    sources_dir: Path,
+    params: dict,
+    tool_meta: dict,
+) -> list[dict]:
+    """Search files for regex patterns — IOCs, keywords, encoded payloads."""
+    grep_bin = shutil.which("grep")
+    if not grep_bin:
+        raise RuntimeError(
+            "'grep' binary not found. Ensure coreutils is installed in the processor image."
+        )
+
+    run_config = params or {}
+    patterns = run_config.get("patterns", []) if isinstance(run_config, dict) else []
+    if not patterns:
+        patterns = list(_DEFAULT_GREP_PATTERNS)
+
+    tool_meta["log"] += f"Patterns ({len(patterns)}): {patterns}\n"
+    results: list[dict] = []
+
+    for file_path in sorted(sources_dir.iterdir()):
+        if not file_path.is_file():
+            continue
+
+        logger.info("[%s] grep_search: scanning %s with %d patterns", run_id, file_path.name, len(patterns))
+        tool_meta["stdout"] += f"\n=== {file_path.name} ===\n"
+
+        for pat in patterns:
+            # Count matches
+            try:
+                proc_count = subprocess.run(
+                    [grep_bin, "-oPc", pat, str(file_path)],
+                    capture_output=True, text=True, timeout=60,
+                )
+                count = int(proc_count.stdout.strip()) if proc_count.stdout.strip().isdigit() else 0
+            except (subprocess.TimeoutExpired, ValueError):
+                count = 0
+
+            if count > 0:
+                # Extract actual matches (deduplicated, capped at 50)
+                try:
+                    proc_matches = subprocess.run(
+                        [grep_bin, "-oP", pat, str(file_path)],
+                        capture_output=True, text=True, timeout=60,
+                    )
+                    matches = list(set(proc_matches.stdout.strip().split("\n")))[:50]
+                except subprocess.TimeoutExpired:
+                    matches = []
+
+                level = "high" if count > 10 else ("medium" if count > 2 else "low")
+                results.append({
+                    "id":            str(uuid.uuid4()),
+                    "timestamp":     "",
+                    "level":         level,
+                    "level_int":     LEVEL_INT.get(level, 1),
+                    "rule_title":    f"Pattern Match — {pat[:60]}",
+                    "computer":      file_path.name,
+                    "details_raw":   json.dumps({"count": count, "samples": matches}),
+                    "filename":      file_path.name,
+                    "pattern":       pat,
+                    "match_count":   count,
+                })
+
+                tool_meta["stdout"] += f"  [{pat[:40]}…] → {count} match(es)\n"
+
+    tool_meta["log"] += f"\nScanned {len(list(sources_dir.iterdir()))} file(s), {len(results)} pattern hits\n"
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Access Log Analysis
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ACCESS_LOG_RE = re.compile(
+    r'(?P<ip>\S+) \S+ \S+ \[(?P<ts>[^\]]+)\] "(?P<method>\S+) (?P<path>\S+) [^"]*" '
+    r'(?P<status>\d{3}) (?P<size>\S+)(?: "(?P<referer>[^"]*)" "(?P<ua>[^"]*)")?'
+)
+
+_SCANNER_UAS = re.compile(
+    r'sqlmap|nikto|nmap|masscan|dirbuster|wfuzz|gobuster|burpsuite|nessus|openvas'
+    r'|acunetix|w3af|nuclei|metasploit|zgrab|shodan|censys|internetmeasurement',
+    re.IGNORECASE,
+)
+
+_PATH_TRAVERSAL_RE = re.compile(
+    r'(?:\.\./|%2e%2e|%252e%252e|/etc/passwd|/etc/shadow|/proc/self|/windows/system32)',
+    re.IGNORECASE,
+)
+
+_ADMIN_PATHS_RE = re.compile(
+    r'(?:/wp-admin|/wp-login|/admin|/administrator|/phpmyadmin|/\.env|/\.git/|/config\.php'
+    r'|/shell\.php|/cmd\.php|/webshell)',
+    re.IGNORECASE,
+)
+
+_CMD_INJECT_RE = re.compile(r'(?:;ls|;id|;cat|%7cid|%3bls|\$\(|`cmd|%7C|union\s+select)', re.IGNORECASE)
+
+
+def _run_access_log_analysis(
+    run_id: str, work_dir: Path, sources_dir: Path, params: dict, tool_meta: dict
+) -> list[dict]:
+    """
+    Parse Apache / Nginx access logs and detect suspicious patterns:
+    path traversal, scanner user-agents, brute force, admin probing,
+    command injection, high error rates per IP.
+    """
+    results: list[dict] = []
+    files_processed = 0
+
+    for log_path in sorted(sources_dir.rglob("*")):
+        if not log_path.is_file():
+            continue
+        ext = log_path.suffix.lower()
+        if ext not in (".log", ".txt", "") and log_path.name.lower() not in (
+            "access.log", "access_log", "error.log"
+        ):
+            continue
+
+        tool_meta["stdout"] += f"\n=== Analysing {log_path.name} ===\n"
+        files_processed += 1
+
+        # Per-IP counters  {ip: {"4xx": N, "5xx": N, "req": N}}
+        ip_stats: dict[str, dict] = {}
+        # Auth brute force: {ip: {path: count}}
+        auth_attempts: dict[str, dict] = {}
+
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as fh:
+                for line_no, line in enumerate(fh, 1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    m = _ACCESS_LOG_RE.match(line)
+                    if not m:
+                        continue
+
+                    ip       = m.group("ip")
+                    ts_raw   = m.group("ts")
+                    method   = m.group("method")
+                    path     = m.group("path")
+                    status   = int(m.group("status"))
+                    size_raw = m.group("size")
+                    ua       = m.group("ua") or ""
+                    size     = int(size_raw) if size_raw.isdigit() else 0
+
+                    # Parse timestamp (Apache format: 01/Jan/2024:12:00:00 +0000)
+                    try:
+                        ts = datetime.strptime(ts_raw[:20], "%d/%b/%Y:%H:%M:%S").isoformat() + "Z"
+                    except ValueError:
+                        ts = ""
+
+                    # IP stats
+                    stat = ip_stats.setdefault(ip, {"4xx": 0, "5xx": 0, "req": 0})
+                    stat["req"] += 1
+                    if 400 <= status < 500:
+                        stat["4xx"] += 1
+                    elif 500 <= status < 600:
+                        stat["5xx"] += 1
+
+                    # Auth brute force (401 responses)
+                    if status == 401:
+                        auth_attempts.setdefault(ip, {}).setdefault(path, 0)
+                        auth_attempts[ip][path] += 1
+
+                    details_extra = {"ip": ip, "method": method, "path": path[:256],
+                                     "status": status, "ua": ua[:200]}
+
+                    # 1. Path traversal
+                    if _PATH_TRAVERSAL_RE.search(path):
+                        results.append({
+                            "id":          str(uuid.uuid4()),
+                            "timestamp":   ts,
+                            "level":       "high",
+                            "level_int":   LEVEL_INT["high"],
+                            "rule_title":  "Path Traversal Attempt",
+                            "computer":    log_path.name,
+                            "details_raw": json.dumps({**details_extra, "matched": path[:200]}),
+                            "message":     f"{ip} → {method} {path[:200]} ({status})",
+                        })
+
+                    # 2. Scanner user-agent
+                    if _SCANNER_UAS.search(ua):
+                        results.append({
+                            "id":          str(uuid.uuid4()),
+                            "timestamp":   ts,
+                            "level":       "high",
+                            "level_int":   LEVEL_INT["high"],
+                            "rule_title":  "Known Scanner User-Agent",
+                            "computer":    log_path.name,
+                            "details_raw": json.dumps({**details_extra, "ua": ua[:200]}),
+                            "message":     f"{ip} → Scanner detected: {ua[:100]}",
+                        })
+
+                    # 3. Admin path probing
+                    if _ADMIN_PATHS_RE.search(path) and status not in (200, 301, 302):
+                        results.append({
+                            "id":          str(uuid.uuid4()),
+                            "timestamp":   ts,
+                            "level":       "medium",
+                            "level_int":   LEVEL_INT["medium"],
+                            "rule_title":  "Admin/Sensitive Path Probe",
+                            "computer":    log_path.name,
+                            "details_raw": json.dumps(details_extra),
+                            "message":     f"{ip} → Probed {path[:200]} ({status})",
+                        })
+
+                    # 4. Command injection in URL
+                    if _CMD_INJECT_RE.search(path):
+                        results.append({
+                            "id":          str(uuid.uuid4()),
+                            "timestamp":   ts,
+                            "level":       "critical",
+                            "level_int":   LEVEL_INT["critical"],
+                            "rule_title":  "Command Injection Attempt in URL",
+                            "computer":    log_path.name,
+                            "details_raw": json.dumps(details_extra),
+                            "message":     f"{ip} → Injection payload in {path[:200]}",
+                        })
+
+        except Exception as exc:
+            tool_meta["stderr"] += f"\nError reading {log_path.name}: {exc}\n"
+            continue
+
+        # Post-scan: emit aggregate findings
+
+        # 5. Brute force: IP with ≥10 auth failures on same path
+        for ip, paths in auth_attempts.items():
+            for path, count in paths.items():
+                if count >= 10:
+                    level = "critical" if count >= 50 else "high"
+                    results.append({
+                        "id":          str(uuid.uuid4()),
+                        "timestamp":   "",
+                        "level":       level,
+                        "level_int":   LEVEL_INT[level],
+                        "rule_title":  "Authentication Brute Force",
+                        "computer":    log_path.name,
+                        "details_raw": json.dumps({"ip": ip, "path": path[:200], "401_count": count}),
+                        "message":     f"{ip} → {count} failed auth attempts on {path[:200]}",
+                    })
+
+        # 6. High error rate: IP with ≥20 4xx/5xx out of ≥30 total requests
+        for ip, stat in ip_stats.items():
+            errors = stat["4xx"] + stat["5xx"]
+            total  = stat["req"]
+            if total >= 30 and errors / total >= 0.5:
+                level = "high" if errors >= 100 else "medium"
+                results.append({
+                    "id":          str(uuid.uuid4()),
+                    "timestamp":   "",
+                    "level":       level,
+                    "level_int":   LEVEL_INT[level],
+                    "rule_title":  "High Error Rate from Single IP",
+                    "computer":    log_path.name,
+                    "details_raw": json.dumps({"ip": ip, "requests": total, "errors": errors,
+                                               "4xx": stat["4xx"], "5xx": stat["5xx"]}),
+                    "message":     f"{ip} → {errors}/{total} error responses ({int(100*errors/total)}%)",
+                })
+
+        tool_meta["stdout"] += f"  {files_processed} log file(s) — {len(results)} finding(s) so far\n"
+
+    tool_meta["log"] += f"\nAccess log analysis: {files_processed} file(s), {len(results)} findings\n"
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cuckoo Sandbox
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_cuckoo(
+    run_id: str, work_dir: Path, sources_dir: Path, params: dict, tool_meta: dict
+) -> list[dict]:
+    """
+    Submit files to a Cuckoo Sandbox instance and collect behavioral reports.
+    Requires CUCKOO_API_URL (and optionally CUCKOO_API_TOKEN) env vars.
+    """
+    import urllib.parse
+
+    # Load config: Redis (UI-configured) first, then env-var fallback.
+    # This lets admins set the Cuckoo URL via Settings without touching K8s env vars.
+    _redis_cfg: dict = {}
+    try:
+        _redis_cfg = get_redis().hgetall(_CUCKOO_CONFIG_KEY) or {}
+    except Exception:
+        pass
+
+    api_url   = (_redis_cfg.get("api_url") or os.getenv("CUCKOO_API_URL", "")).rstrip("/")
+    api_token = _redis_cfg.get("api_token") or os.getenv("CUCKOO_API_TOKEN", "")
+
+    if not api_url:
+        raise RuntimeError(
+            "Cuckoo not configured — go to Settings → Integrations → Cuckoo Sandbox "
+            "to enter the API URL, or set CUCKOO_API_URL as an environment variable."
+        )
+
+    def _cuckoo_req(path: str, method: str = "GET", data=None, files=None):
+        """Simple urllib-based Cuckoo API request."""
+        url     = f"{api_url}{path}"
+        headers = {}
+        if api_token:
+            headers["Authorization"] = f"Bearer {api_token}"
+
+        if files:
+            # Multipart form — build manually
+            boundary  = f"----FormBoundary{uuid.uuid4().hex}"
+            body_parts: list[bytes] = []
+            for field_name, (fname, fdata, ctype) in files.items():
+                body_parts.append(
+                    f"--{boundary}\r\nContent-Disposition: form-data; name=\"{field_name}\"; "
+                    f"filename=\"{fname}\"\r\nContent-Type: {ctype}\r\n\r\n".encode()
+                )
+                body_parts.append(fdata if isinstance(fdata, bytes) else fdata.read())
+                body_parts.append(b"\r\n")
+            body_parts.append(f"--{boundary}--\r\n".encode())
+            body = b"".join(body_parts)
+            headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+            req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        elif data is not None:
+            body = json.dumps(data).encode()
+            headers["Content-Type"] = "application/json"
+            req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        else:
+            req = urllib.request.Request(url, headers=headers, method=method)
+
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read())
+
+    results: list[dict] = []
+
+    for file_path in sorted(sources_dir.rglob("*")):
+        if not file_path.is_file():
+            continue
+
+        tool_meta["stdout"] += f"\n=== Submitting {file_path.name} to Cuckoo ===\n"
+
+        try:
+            # Submit file
+            with open(file_path, "rb") as fh:
+                resp = _cuckoo_req(
+                    "/tasks/create/file",
+                    method="POST",
+                    files={"file": (file_path.name, fh, "application/octet-stream")},
+                )
+            task_id = resp.get("task_id")
+            if not task_id:
+                tool_meta["stderr"] += f"No task_id returned for {file_path.name}\n"
+                continue
+
+            tool_meta["stdout"] += f"  Task ID: {task_id} — polling for completion…\n"
+
+            # Poll for completion (max 10 min)
+            max_wait = 600
+            waited   = 0
+            while waited < max_wait:
+                time.sleep(15)
+                waited += 15
+                status_resp = _cuckoo_req(f"/tasks/view/{task_id}")
+                status = (status_resp.get("task") or {}).get("status", "")
+                if status == "reported":
+                    break
+                if status in ("failed_analysis", "failed_processing"):
+                    raise RuntimeError(f"Cuckoo task {task_id} failed: {status}")
+
+            # Fetch report
+            report = _cuckoo_req(f"/tasks/report/{task_id}")
+
+            # Parse behavioral indicators
+            info      = report.get("info", {})
+            behavior  = report.get("behavior", {})
+            network   = report.get("network", {})
+            signatures = report.get("signatures", [])
+            score     = info.get("score", 0)
+
+            level = "critical" if score >= 8 else ("high" if score >= 5 else
+                    "medium" if score >= 3 else "low")
+
+            # One hit per signature detected
+            for sig in signatures:
+                sig_name = sig.get("name", "Unknown")
+                sig_desc = sig.get("description", "")
+                sig_severity = sig.get("severity", 1)
+                sig_level = "critical" if sig_severity >= 3 else ("high" if sig_severity == 2 else "medium")
+                results.append({
+                    "id":          str(uuid.uuid4()),
+                    "timestamp":   "",
+                    "level":       sig_level,
+                    "level_int":   LEVEL_INT.get(sig_level, 2),
+                    "rule_title":  f"Cuckoo: {sig_name}",
+                    "computer":    file_path.name,
+                    "details_raw": json.dumps({"description": sig_desc, "file": file_path.name,
+                                               "task_id": task_id, "score": score}),
+                    "message":     f"{file_path.name} — {sig_desc[:200]}",
+                })
+
+            # Network indicators
+            domains  = [d.get("domain", "") for d in network.get("domains", [])][:20]
+            hosts    = [h.get("ip", "") for h in network.get("hosts", [])][:20]
+            if domains or hosts:
+                results.append({
+                    "id":          str(uuid.uuid4()),
+                    "timestamp":   "",
+                    "level":       "medium",
+                    "level_int":   LEVEL_INT["medium"],
+                    "rule_title":  "Cuckoo: Network Activity",
+                    "computer":    file_path.name,
+                    "details_raw": json.dumps({"domains": domains, "hosts": hosts,
+                                               "task_id": task_id}),
+                    "message":     f"{file_path.name} — contacted {len(domains)} domain(s), {len(hosts)} host(s)",
+                })
+
+            # Summary hit
+            results.append({
+                "id":          str(uuid.uuid4()),
+                "timestamp":   "",
+                "level":       level,
+                "level_int":   LEVEL_INT.get(level, 1),
+                "rule_title":  f"Cuckoo: Analysis Score {score}/10",
+                "computer":    file_path.name,
+                "details_raw": json.dumps({"score": score, "task_id": task_id,
+                                           "file": file_path.name}),
+                "message":     f"{file_path.name} — Cuckoo score {score}/10",
+            })
+
+            tool_meta["stdout"] += f"  Score: {score}/10 — {len(signatures)} signature(s)\n"
+
+        except Exception as exc:
+            tool_meta["stderr"] += f"Cuckoo error for {file_path.name}: {exc}\n"
+            results.append({
+                "id":          str(uuid.uuid4()),
+                "timestamp":   "",
+                "level":       "low",
+                "level_int":   LEVEL_INT["low"],
+                "rule_title":  "Cuckoo: Submission Error",
+                "computer":    file_path.name,
+                "details_raw": json.dumps({"error": str(exc), "file": file_path.name}),
+                "message":     f"{file_path.name} — {exc}",
+            })
+
+    tool_meta["log"] += f"\nCuckoo analysis: {len(results)} findings\n"
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# de4dot — .NET Deobfuscator
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_de4dot(
+    run_id: str, work_dir: Path, sources_dir: Path, params: dict, tool_meta: dict
+) -> list[dict]:
+    """
+    Deobfuscate .NET assemblies using de4dot.
+    Looks for de4dot binary (native Linux build) or de4dot.exe via mono.
+    Reports the detected obfuscator type and deobfuscated output filename.
+    """
+    # Locate binary — native Linux build first, then Mono fallback
+    de4dot_bin  = shutil.which("de4dot")
+    mono_bin    = shutil.which("mono")
+    de4dot_exe  = shutil.which("de4dot.exe") or "/usr/local/bin/de4dot.exe"
+
+    if de4dot_bin:
+        cmd_prefix = [de4dot_bin]
+    elif mono_bin and Path(de4dot_exe).exists():
+        cmd_prefix = [mono_bin, de4dot_exe]
+    else:
+        raise RuntimeError(
+            "de4dot binary not found. Install de4dot (Linux build) or Mono + de4dot.exe. "
+            "See the Studio docs for setup instructions."
+        )
+
+    results: list[dict] = []
+
+    for file_path in sorted(sources_dir.rglob("*")):
+        if not file_path.is_file():
+            continue
+        if file_path.suffix.lower() not in (".exe", ".dll"):
+            continue
+
+        out_path = work_dir / f"{file_path.stem}_deob{file_path.suffix}"
+        cmd = cmd_prefix + [str(file_path), "-o", str(out_path)]
+        tool_meta["stdout"] += f"\n=== de4dot: {file_path.name} ===\n"
+
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120,
+                env=_SAFE_ENV,  # strip MINIO/Redis secrets from subprocess env
+            )
+            stdout = _strip_ansi(proc.stdout)
+            stderr = _strip_ansi(proc.stderr)
+            tool_meta["stdout"] += stdout
+            tool_meta["stderr"] += stderr
+
+            # Parse detected obfuscator from output
+            # de4dot prints: "Detected: Dotfuscator v4.x (7a8b...)"
+            obf_match = re.search(r'Detected:\s*(.+)', stdout, re.IGNORECASE)
+            obfuscator = obf_match.group(1).strip() if obf_match else "Unknown"
+
+            level     = "high" if obfuscator != "Unknown" else "medium"
+            success   = out_path.exists()
+
+            results.append({
+                "id":          str(uuid.uuid4()),
+                "timestamp":   "",
+                "level":       level,
+                "level_int":   LEVEL_INT.get(level, 2),
+                "rule_title":  f"Obfuscated .NET Assembly — {obfuscator}",
+                "computer":    file_path.name,
+                "details_raw": json.dumps({
+                    "file":         file_path.name,
+                    "obfuscator":   obfuscator,
+                    "deobfuscated": out_path.name if success else None,
+                    "exit_code":    proc.returncode,
+                }),
+                "message": (
+                    f"{file_path.name} — obfuscated with {obfuscator}; "
+                    f"{'deobfuscated OK' if success else 'deobfuscation failed'}"
+                ),
+            })
+
+            if success:
+                tool_meta["stdout"] += f"  → Deobfuscated output: {out_path.name}\n"
+            else:
+                tool_meta["stderr"] += f"  Deobfuscation may have failed (exit {proc.returncode})\n"
+
+        except subprocess.TimeoutExpired:
+            tool_meta["stderr"] += f"de4dot timed out for {file_path.name}\n"
+        except Exception as exc:
+            tool_meta["stderr"] += f"de4dot error for {file_path.name}: {exc}\n"
+
+    tool_meta["log"] += f"\nde4dot: {len(results)} file(s) processed\n"
+    return results
+
+
+# ── malwoverview — VirusTotal / multi-source TI hash lookup ───────────────────
+
+def _vt_file_report(sha256: str, api_key: str, filename: str, tool_meta: dict) -> list[dict]:
+    """
+    Query VirusTotal v3 for a file hash.
+    Returns a list of standardised result dicts (one entry per file).
+    """
+    import hashlib as _hl  # already in stdlib; reimport locally for clarity
+
+    url = f"https://www.virustotal.com/api/v3/files/{sha256}"
+    req = urllib.request.Request(url, headers={"x-apikey": api_key})
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            tool_meta["stdout"] += f"  {sha256[:16]}… not found in VirusTotal — file may be new or private.\n"
+            return [{
+                "id":          str(uuid.uuid4()),
+                "timestamp":   "",
+                "level":       "info",
+                "level_int":   LEVEL_INT["info"],
+                "rule_title":  "Not in VirusTotal",
+                "computer":    filename,
+                "details_raw": json.dumps({"sha256": sha256, "status": "not_found", "file": filename}),
+                "message":     f"{filename} — hash not found in VirusTotal (may be new or unknown sample)",
+            }]
+        raise
+
+    attrs  = data.get("data", {}).get("attributes", {})
+    stats  = attrs.get("last_analysis_stats", {})
+
+    malicious  = int(stats.get("malicious",  0))
+    suspicious = int(stats.get("suspicious", 0))
+    total      = sum(stats.values())
+
+    # Map detection count to severity level
+    if   malicious >= 10:                   level = "critical"
+    elif malicious >= 5:                    level = "high"
+    elif malicious >= 2 or suspicious >= 5: level = "medium"
+    elif malicious >= 1 or suspicious >= 1: level = "low"
+    else:                                   level = "info"
+
+    # Collect engine verdicts for detected engines only
+    engine_verdicts: dict[str, str] = {}
+    for engine, result in (attrs.get("last_analysis_results") or {}).items():
+        if result.get("category") in ("malicious", "suspicious"):
+            engine_verdicts[engine] = result.get("result") or result.get("category", "")
+
+    names = attrs.get("names", [])
+    tags  = attrs.get("tags",  [])
+
+    tool_meta["stdout"] += (
+        f"  VirusTotal: {malicious}/{total} engines flagged as malicious\n"
+        + (f"  Known names: {', '.join(names[:5])}\n" if names else "")
+        + (f"  Tags: {', '.join(tags[:5])}\n"         if tags  else "")
+    )
+
+    return [{
+        "id":          str(uuid.uuid4()),
+        "timestamp":   "",
+        "level":       level,
+        "level_int":   LEVEL_INT.get(level, 1),
+        "rule_title":  f"VirusTotal: {malicious}/{total} detections",
+        "computer":    filename,
+        "details_raw": json.dumps({
+            "sha256":          sha256,
+            "malicious":       malicious,
+            "suspicious":      suspicious,
+            "total_engines":   total,
+            "names":           names[:10],
+            "tags":            tags,
+            "engine_verdicts": dict(list(engine_verdicts.items())[:20]),
+        }),
+        "message": (
+            f"{filename} — {malicious}/{total} AV engines detected malware"
+            + (f" | {', '.join(names[:2])}"   if names else "")
+            + (f" [{', '.join(tags[:3])}]"    if tags  else "")
+        ),
+    }]
+
+
+def _run_malwoverview(
+    run_id: str, work_dir: Path, sources_dir: Path, params: dict, tool_meta: dict
+) -> list[dict]:
+    """
+    Threat intelligence lookup using malwoverview / VirusTotal v3.
+
+    For each uploaded file:
+      1. Computes SHA-256, MD5, SHA-1 hashes.
+      2. Queries VirusTotal v3 REST API directly (primary).
+      3. Optionally enriches via the malwoverview CLI if it is present.
+
+    Requires a VirusTotal API key — configure via Settings → Integrations
+    or set the VT_API_KEY environment variable.
+
+    References: https://github.com/alexandreborges/malwoverview
+    """
+    import hashlib
+
+    # ── Load config (Redis UI settings → env var fallback) ────────────────────
+    _redis_cfg: dict = {}
+    try:
+        _redis_cfg = get_redis().hgetall(_MALWOVERVIEW_CONFIG_KEY) or {}
+    except Exception:
+        pass
+
+    vt_api_key = (_redis_cfg.get("vt_api_key") or os.getenv("VT_API_KEY", "")).strip()
+
+    if not vt_api_key:
+        raise RuntimeError(
+            "malwoverview not configured — go to Settings → Integrations → malwoverview "
+            "and enter your VirusTotal API key, or set VT_API_KEY as an environment variable."
+        )
+
+    # Check if the malwoverview CLI is available for extra output
+    mwo_bin = shutil.which("malwoverview") or shutil.which("malwoverview.py")
+
+    results: list[dict] = []
+
+    for file_path in sorted(sources_dir.rglob("*")):
+        if not file_path.is_file():
+            continue
+
+        tool_meta["stdout"] += f"\n=== malwoverview: {file_path.name} ===\n"
+
+        try:
+            # ── 1. Hash the file ───────────────────────────────────────────────
+            sha256_h = hashlib.sha256()
+            md5_h    = hashlib.md5()
+            sha1_h   = hashlib.sha1()
+            with open(file_path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(65536), b""):
+                    sha256_h.update(chunk)
+                    md5_h.update(chunk)
+                    sha1_h.update(chunk)
+
+            file_sha256 = sha256_h.hexdigest()
+            file_md5    = md5_h.hexdigest()
+            file_sha1   = sha1_h.hexdigest()
+
+            tool_meta["stdout"] += (
+                f"  SHA256: {file_sha256}\n"
+                f"  MD5:    {file_md5}\n"
+                f"  SHA1:   {file_sha1}\n"
+            )
+
+            # ── 2. VirusTotal v3 lookup (direct API) ──────────────────────────
+            hits = _vt_file_report(file_sha256, vt_api_key, file_path.name, tool_meta)
+            results.extend(hits)
+
+            # ── 3. malwoverview CLI (optional enrichment) ─────────────────────
+            if mwo_bin:
+                # Write a minimal config file so malwoverview can authenticate
+                config_dir  = work_dir / ".malwoverview"
+                config_dir.mkdir(exist_ok=True)
+                config_file = config_dir / ".malwoverview"
+                config_file.write_text(f"[VIRUSTOTAL]\nvtapi = {vt_api_key}\n")
+
+                env = {**_SAFE_ENV, "HOME": str(work_dir)}
+                try:
+                    proc = subprocess.run(
+                        [mwo_bin, "-x", file_sha256, "-V", "3"],
+                        capture_output=True, text=True, timeout=60,
+                        env=env,
+                    )
+                    mwo_out = _strip_ansi(proc.stdout or "")
+                    mwo_err = _strip_ansi(proc.stderr or "")
+                    if mwo_out:
+                        tool_meta["stdout"] += "\n[malwoverview CLI output]\n" + mwo_out
+                    if mwo_err:
+                        tool_meta["stderr"] += mwo_err
+                except Exception as mwo_exc:
+                    tool_meta["stderr"] += f"  malwoverview CLI skipped: {mwo_exc}\n"
+
+        except urllib.error.URLError as exc:
+            tool_meta["stderr"] += f"  Network error querying VirusTotal: {exc}\n"
+        except Exception as exc:
+            tool_meta["stderr"] += f"  Error processing {file_path.name}: {exc}\n"
+
+    tool_meta["log"] += f"\nmalwoverview: {len(results)} file(s) queried\n"
     return results

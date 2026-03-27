@@ -5,7 +5,7 @@ import {
   CheckCircle, Clock, Database, Loader2, Shield,
   Cpu, RefreshCw, Plus, Download, Play, Terminal,
   AlertCircle, ChevronDown, FileCode, ExternalLink,
-  Flag, Filter,
+  Flag, Filter, Sparkles,
 } from 'lucide-react'
 import { api } from '../api/client'
 import Timeline from './Timeline'
@@ -647,6 +647,91 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
 // ─────────────────────────────────────────────────────────────────────────────
 const LEVEL_ORDER_KEYS = ['critical', 'high', 'medium', 'low', 'informational']
 
+// ── LLM analysis display ──────────────────────────────────────────────────────
+const SEVERITY_BADGE = {
+  critical:      'bg-red-100 text-red-700 border-red-200',
+  high:          'bg-orange-100 text-orange-700 border-orange-200',
+  medium:        'bg-yellow-100 text-yellow-700 border-yellow-200',
+  low:           'bg-blue-100 text-blue-700 border-blue-200',
+  informational: 'bg-gray-100 text-gray-600 border-gray-200',
+  unknown:       'bg-gray-100 text-gray-500 border-gray-200',
+}
+
+function LLMAnalysisPanel({ analysis }) {
+  if (!analysis) return null
+  const sev = (analysis.severity || 'unknown').toLowerCase()
+  return (
+    <div className="border-t border-purple-100 bg-purple-50/40 px-4 py-3 space-y-3">
+      <div className="flex items-center gap-2">
+        <Sparkles size={13} className="text-purple-500 flex-shrink-0" />
+        <span className="text-xs font-semibold text-purple-700">AI Analysis</span>
+        {analysis.model_used && (
+          <span className="text-[10px] text-purple-400 font-mono">{analysis.model_used}</span>
+        )}
+        <span className={`ml-auto text-[10px] font-medium border rounded-full px-2 py-0.5 ${SEVERITY_BADGE[sev] || SEVERITY_BADGE.unknown}`}>
+          {sev}
+        </span>
+      </div>
+
+      {analysis.summary && (
+        <p className="text-xs text-gray-700 leading-relaxed">{analysis.summary}</p>
+      )}
+
+      {analysis.timeline?.length > 0 && (
+        <div>
+          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Timeline</p>
+          <ul className="space-y-0.5">
+            {analysis.timeline.map((item, i) => (
+              <li key={i} className="text-xs text-gray-600 flex gap-1.5">
+                <span className="text-purple-400 flex-shrink-0">▸</span>{item}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {analysis.indicators?.length > 0 && (
+        <div>
+          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Indicators</p>
+          <div className="flex flex-wrap gap-1">
+            {analysis.indicators.map((ioc, i) => (
+              <span key={i} className="text-[10px] font-mono bg-white border border-gray-200 rounded px-1.5 py-0.5 text-gray-700">
+                {ioc}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {analysis.mitre_techniques?.length > 0 && (
+        <div>
+          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">MITRE ATT&CK</p>
+          <div className="flex flex-wrap gap-1">
+            {analysis.mitre_techniques.map((t, i) => (
+              <span key={i} className="text-[10px] bg-red-50 border border-red-200 text-red-700 rounded px-1.5 py-0.5">
+                {t}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {analysis.recommendations?.length > 0 && (
+        <div>
+          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Recommendations</p>
+          <ul className="space-y-0.5">
+            {analysis.recommendations.map((rec, i) => (
+              <li key={i} className="text-xs text-gray-600 flex gap-1.5">
+                <span className="text-green-500 flex-shrink-0">→</span>{rec}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ModuleRunCard({
   run, caseId, navigate,
   // Hit-level filters (all optional — undefined = no filtering)
@@ -655,6 +740,36 @@ function ModuleRunCard({
 }) {
   const zeroDetected = run.status === 'COMPLETED' && run.total_hits === 0
   const [showOutput, setShowOutput] = useState(zeroDetected)
+  const [analyzing, setAnalyzing]   = useState(false)
+  const [analysis,  setAnalysis]    = useState(run.llm_analysis || null)
+  const [analyzeErr, setAnalyzeErr] = useState('')
+  const [retrying,   setRetrying]   = useState(false)
+  const [retryErr,   setRetryErr]   = useState('')
+
+  async function retryRun() {
+    setRetrying(true)
+    setRetryErr('')
+    try {
+      await api.modules.retryRun(run.run_id)
+    } catch (err) {
+      setRetryErr(err.message)
+    } finally {
+      setRetrying(false)
+    }
+  }
+
+  async function runAnalysis() {
+    setAnalyzing(true)
+    setAnalyzeErr('')
+    try {
+      const res = await api.modules.analyze(run.run_id)
+      setAnalysis(res.analysis)
+    } catch (err) {
+      setAnalyzeErr(err.message)
+    } finally {
+      setAnalyzing(false)
+    }
+  }
 
   const moduleName  = MODULE_NAMES[run.module_id] || run.module_id
   const preview     = run.results_preview || []
@@ -775,6 +890,21 @@ function ModuleRunCard({
         />
       </button>
 
+      {(run.status === 'FAILED' || run.status === 'PENDING') && (
+        <div className="px-3 pb-2 flex items-center gap-2">
+          <button
+            onClick={retryRun}
+            disabled={retrying}
+            className="btn-ghost text-xs px-1.5 py-0.5 text-brand-accent hover:text-brand-accenthover flex items-center gap-1"
+            title={run.status === 'PENDING' ? 'Re-dispatch stuck run' : 'Retry this module run'}
+          >
+            <RefreshCw size={11} className={retrying ? 'animate-spin' : ''} />
+            {retrying ? '' : (run.status === 'PENDING' ? 'Re-queue' : 'Retry')}
+          </button>
+          {retryErr && <span className="text-[10px] text-red-500">{retryErr}</span>}
+        </div>
+      )}
+
       {/* ── Expanded body ─────────────────────────────────────── */}
       {open && (
         <div>
@@ -845,6 +975,33 @@ function ModuleRunCard({
                 </pre>
               )}
             </div>
+          )}
+
+          {/* AI Analysis */}
+          {run.status === 'COMPLETED' && (
+            <>
+              {analysis ? (
+                <LLMAnalysisPanel analysis={analysis} />
+              ) : (
+                <div className="border-t border-gray-100 px-4 py-2 bg-gray-50/50 flex items-center gap-2">
+                  <button
+                    onClick={runAnalysis}
+                    disabled={analyzing}
+                    className="flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-medium text-purple-600
+                               bg-purple-50 border border-purple-200 rounded-md hover:bg-purple-100
+                               disabled:opacity-50 transition-colors"
+                  >
+                    {analyzing
+                      ? <><Loader2 size={10} className="animate-spin" /> Analyzing…</>
+                      : <><Sparkles size={10} /> Analyze with AI</>
+                    }
+                  </button>
+                  {analyzeErr && (
+                    <p className="text-[10px] text-red-500">{analyzeErr}</p>
+                  )}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}

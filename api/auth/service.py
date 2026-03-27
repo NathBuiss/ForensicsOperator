@@ -63,7 +63,12 @@ def authenticate(username: str, password: str) -> Optional[dict]:
     return user
 
 
+VALID_ROLES = ("admin", "analyst")
+
+
 def create_user(username: str, password: str, role: str = "analyst") -> dict:
+    if role not in VALID_ROLES:
+        raise ValueError(f"Invalid role '{role}'. Must be one of: {', '.join(VALID_ROLES)}")
     r = _redis()
     key = _USER_KEY.format(username=username)
     if r.exists(key):
@@ -98,6 +103,21 @@ def list_users() -> list[dict]:
         if user:
             users.append(_public(user))
     return users
+
+
+def update_user(username: str, role: Optional[str] = None, password: Optional[str] = None) -> dict:
+    """Update a user's role and/or password. Returns the updated public user dict."""
+    r = _redis()
+    key = _USER_KEY.format(username=username)
+    if not r.exists(key):
+        raise ValueError(f"User '{username}' not found")
+    if role is not None:
+        if role not in VALID_ROLES:
+            raise ValueError(f"Invalid role '{role}'. Must be one of: {', '.join(VALID_ROLES)}")
+        r.hset(key, "role", role)
+    if password is not None:
+        r.hset(key, "hashed_password", hash_password(password))
+    return _public(r.hgetall(key))
 
 
 def update_password(username: str, new_password: str) -> bool:

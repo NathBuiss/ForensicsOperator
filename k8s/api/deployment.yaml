@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: api
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
 spec:
   replicas: 2
   selector:
@@ -45,13 +45,18 @@ spec:
                 secretKeyRef:
                   name: api-auth-secret
                   key: JWT_SECRET
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: api-auth-secret
+                  key: ADMIN_PASSWORD
           resources:
             requests:
-              memory: "512Mi"
-              cpu: "100m"
+              memory: "__FO_API_MEMORY_REQUEST__"
+              cpu: "__FO_API_CPU_REQUEST__"
             limits:
-              memory: "2Gi"
-              cpu: "1000m"
+              memory: "__FO_API_MEMORY_LIMIT__"
+              cpu: "__FO_API_CPU_LIMIT__"
           livenessProbe:
             httpGet:
               path: /api/v1/health
@@ -67,17 +72,21 @@ spec:
           volumeMounts:
             - name: plugins-volume
               mountPath: /app/plugins
-              readOnly: true
+            - name: tmp-storage
+              mountPath: /tmp
       volumes:
         - name: plugins-volume
           persistentVolumeClaim:
             claimName: plugins-pvc
+        - name: tmp-storage
+          emptyDir:
+            sizeLimit: 20Gi
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: api-service
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
 spec:
   selector:
     app: api

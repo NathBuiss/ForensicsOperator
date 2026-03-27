@@ -1,0 +1,11 @@
+id: yara
+name: YARA Scanner
+description: >-
+  Scan files with a built-in ruleset of common malware, packer, and
+  threat-hunting YARA signatures. Supports custom rules via the params field.
+  Detects known malware families, packers (UPX, Themida), shells, and exploits.
+input_extensions: []
+input_filenames: []
+available: true
+category: Malware Detection
+tags: [yara, malware, detection, all-files]

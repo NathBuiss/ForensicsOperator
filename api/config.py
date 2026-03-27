@@ -25,5 +25,11 @@ class Settings:
     JWT_ALGORITHM: str     = "HS256"
     JWT_EXPIRE_HOURS: int  = int(os.getenv("JWT_EXPIRE_HOURS", "8"))
 
+    # ── Bootstrap admin ────────────────────────────────────────────────────
+    # Created automatically on first start if no users exist in Redis.
+    # Change immediately after first login.
+    ADMIN_USERNAME: str    = os.getenv("ADMIN_USERNAME", "admin")
+    ADMIN_PASSWORD: str    = os.getenv("ADMIN_PASSWORD", "TracexAdmin1!")
+
 
 settings = Settings()
