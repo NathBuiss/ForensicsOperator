@@ -24,10 +24,12 @@ import json
 import logging
 import os
 import re
+import importlib.util
 import shutil
 import struct
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import time
 import urllib.error
@@ -944,22 +946,23 @@ def _run_strings(run_id: str, work_dir: Path, sources_dir: Path, params: dict, t
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _run_hindsight(run_id: str, work_dir: Path, sources_dir: Path, params: dict, tool_meta: dict) -> list[dict]:
+    # 1. Try PATH first
     hindsight_bin = shutil.which("hindsight") or shutil.which("hindsight.py")
-    use_module = False
 
+    # 2. pip may install scripts outside PATH — check the canonical scripts dir
     if not hindsight_bin:
-        # pyhindsight installs the module but the console script may not land in
-        # the Celery worker's PATH — fall back to `python -m hindsight`.
-        try:
-            probe = subprocess.run(
-                [sys.executable, "-m", "hindsight", "--help"],
-                capture_output=True, timeout=15,
-            )
-            # hindsight --help exits 0; accept any exit code that isn't an import error
-            if b"No module named" not in (probe.stdout + probe.stderr):
-                use_module = True
-        except Exception:
-            pass
+        scripts_dir = sysconfig.get_path("scripts")
+        if scripts_dir:
+            for candidate in (os.path.join(scripts_dir, "hindsight"),
+                              os.path.join(scripts_dir, "hindsight.py")):
+                if os.path.isfile(candidate):
+                    hindsight_bin = candidate
+                    break
+
+    # 3. pyhindsight has __main__.py — use `python -m hindsight` when importable
+    use_module = False
+    if not hindsight_bin and importlib.util.find_spec("hindsight") is not None:
+        use_module = True
 
     if not hindsight_bin and not use_module:
         raise RuntimeError(

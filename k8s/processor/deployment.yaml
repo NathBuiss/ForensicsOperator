@@ -24,8 +24,8 @@ spec:
             - sh
             - -c
             - |
-              cp -rn /app/plugins_builtin/. /app/plugins/ 2>/dev/null || true
-              echo "Built-in plugins seeded (no-overwrite): $(ls /app/plugins)"
+              cp -r /app/plugins_builtin/. /app/plugins/ 2>/dev/null || true
+              echo "Built-in plugins seeded: $(ls /app/plugins)"
           volumeMounts:
             - name: plugins-volume
               mountPath: /app/plugins

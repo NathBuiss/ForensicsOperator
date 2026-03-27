@@ -99,6 +99,7 @@ export default function Timeline({ caseId, artifactTypes }) {
   const [naturalDate, setNaturalDate]       = useState('')
   const [showCustomRange, setShowCustomRange] = useState(false)
   const [naturalDateErr, setNaturalDateErr] = useState('')
+  const [activePreset, setActivePreset]     = useState(null)
 
   const loaderRef = useRef(null)
   const searchRef = useRef(null)
@@ -277,13 +278,14 @@ export default function Timeline({ caseId, artifactTypes }) {
     if (!naturalDate.trim()) return
     setNaturalDateErr('')
     const iso = parseNaturalDate(naturalDate)
-    if (iso) { setFromTs(iso); setNaturalDate(''); setNaturalDateErr('') }
+    if (iso) { setFromTs(iso); setNaturalDate(''); setNaturalDateErr(''); setActivePreset(null) }
     else setNaturalDateErr(`Try: "monday", "3 days ago", "last week", "2 months ago"`)
   }
 
   // Apply a quick date preset (null = clear)
   function applyPreset(preset) {
     setNaturalDateErr('')
+    setActivePreset(preset)
     if (!preset) { setFromTs(''); setToTs(''); setShowCustomRange(false); return }
     const now = new Date()
     setToTs('')  // clear To so "now" is implied
@@ -379,8 +381,7 @@ export default function Timeline({ caseId, artifactTypes }) {
                   key={p.id}
                   onClick={() => applyPreset(p.id)}
                   className={`text-[10px] py-0.5 rounded border transition-colors ${
-                    fromTs && !showCustomRange &&
-                    Math.abs(new Date() - new Date(fromTs)) < { '1h':3600, '6h':21600, '24h':86400, '7d':604800, '30d':2592000 }[p.id] * 1100
+                    activePreset === p.id
                       ? 'bg-brand-accent text-white border-brand-accent'
                       : 'bg-white text-gray-600 border-gray-200 hover:border-brand-accent hover:text-brand-accent'
                   }`}
@@ -389,7 +390,7 @@ export default function Timeline({ caseId, artifactTypes }) {
                 </button>
               ))}
               <button
-                onClick={() => { setShowCustomRange(v => !v) }}
+                onClick={() => { setShowCustomRange(v => !v); setActivePreset(null) }}
                 className={`text-[10px] py-0.5 rounded border transition-colors col-span-3 mt-0.5 ${
                   showCustomRange
                     ? 'bg-brand-accent text-white border-brand-accent'
@@ -408,7 +409,7 @@ export default function Timeline({ caseId, artifactTypes }) {
                   <input
                     type="datetime-local"
                     value={fromTs ? fromTs.slice(0, 16) : ''}
-                    onChange={e => setFromTs(e.target.value ? new Date(e.target.value).toISOString() : '')}
+                    onChange={e => { setFromTs(e.target.value ? new Date(e.target.value).toISOString() : ''); setActivePreset(null) }}
                     className="input w-full text-[10px] py-0.5 px-1.5"
                   />
                 </div>

@@ -20,3 +20,5 @@ volatility3>=2.5.0
 # The malwoverview module works without this (direct VT API fallback), but installing
 # adds the CLI for enriched output.
 malwoverview
+pysigma>=0.11.0
+pysigma-backend-elasticsearch>=1.0.0

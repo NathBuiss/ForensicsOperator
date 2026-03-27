@@ -7,7 +7,7 @@ import { api } from '../api/client'
 
 // ── Rule Modal ────────────────────────────────────────────────────────────────
 
-function YaraRuleModal({ rule = null, onClose, onSaved }) {
+function YaraRuleModal({ rule = null, onClose, onSaved, openAI = false }) {
   const isEdit   = !!(rule?.id)
   const fileRef  = useRef(null)
 
@@ -21,7 +21,7 @@ function YaraRuleModal({ rule = null, onClose, onSaved }) {
   const [error, setError]       = useState('')
 
   // AI generation state
-  const [aiOpen, setAiOpen]         = useState(false)
+  const [aiOpen, setAiOpen]         = useState(openAI)
   const [aiPrompt, setAiPrompt]     = useState('')
   const [aiContext, setAiContext]    = useState('')
   const [aiGenerating, setAiGen]    = useState(false)
@@ -330,6 +330,7 @@ export default function YaraLibrary() {
   const [search, setSearch]       = useState('')
   const [showModal, setShowModal] = useState(false)
   const [editRule, setEditRule]   = useState(null)   // null = create, object = edit/prefill
+  const [modalOpenAI, setModalOpenAI] = useState(false)
   const importRef = useRef(null)
 
   useEffect(() => { load() }, [])
@@ -348,11 +349,19 @@ export default function YaraLibrary() {
 
   function openCreate() {
     setEditRule(null)
+    setModalOpenAI(false)
+    setShowModal(true)
+  }
+
+  function openCreateWithAI() {
+    setEditRule(null)
+    setModalOpenAI(true)
     setShowModal(true)
   }
 
   function openEdit(rule) {
     setEditRule(rule)
+    setModalOpenAI(false)
     setShowModal(true)
   }
 
@@ -423,6 +432,9 @@ export default function YaraLibrary() {
             </a>
           )}
 
+          <button onClick={openCreateWithAI} className="btn-ghost text-xs flex items-center gap-1.5">
+            <Sparkles size={12} className="text-brand-accent" /> Generate with AI
+          </button>
           <button onClick={openCreate} className="btn-primary text-xs flex items-center gap-1.5">
             <Plus size={12} /> New rule
           </button>
@@ -474,7 +486,8 @@ export default function YaraLibrary() {
       {showModal && (
         <YaraRuleModal
           rule={editRule}
-          onClose={() => { setShowModal(false); setEditRule(null) }}
+          openAI={modalOpenAI}
+          onClose={() => { setShowModal(false); setEditRule(null); setModalOpenAI(false) }}
           onSaved={saved => {
             if (editRule?.id) {
               setRules(prev => prev.map(r => r.id === saved.id ? saved : r))
