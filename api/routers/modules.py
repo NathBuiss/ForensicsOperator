@@ -272,6 +272,41 @@ def get_module_run(run_id: str):
     return run
 
 
+@router.post("/module-runs/{run_id}/retry")
+def retry_module_run(run_id: str):
+    """Re-dispatch a FAILED or stuck PENDING module run."""
+    run = run_svc.get_module_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Module run not found")
+    if run.get("status") not in ("FAILED", "PENDING"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Only FAILED or PENDING runs can be retried (status: {run.get('status')})",
+        )
+
+    case_id      = run["case_id"]
+    module_id    = run["module_id"]
+    source_files = run.get("source_files") or []
+
+    run_svc.reset_module_run_for_retry(run_id)
+
+    try:
+        from celery import Celery
+        celery_app = Celery(broker=settings.REDIS_URL)
+        celery_app.send_task(
+            "module.run",
+            args=[run_id, case_id, module_id, source_files, {}],
+            task_id=run_id,
+            queue="modules",
+        )
+    except Exception as exc:
+        logger.error("Celery dispatch failed for module run retry %s: %s", run_id, exc)
+        run_svc.update_module_run(run_id, status="FAILED", error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Task dispatch failed: {exc}")
+
+    return {"run_id": run_id, "status": "PENDING", "message": "Module run re-queued"}
+
+
 # ── Standalone malware analysis (no case required) ────────────────────────────
 
 class StandaloneRunRequest(BaseModel):

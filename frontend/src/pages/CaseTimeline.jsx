@@ -743,6 +743,20 @@ function ModuleRunCard({
   const [analyzing, setAnalyzing]   = useState(false)
   const [analysis,  setAnalysis]    = useState(run.llm_analysis || null)
   const [analyzeErr, setAnalyzeErr] = useState('')
+  const [retrying,   setRetrying]   = useState(false)
+  const [retryErr,   setRetryErr]   = useState('')
+
+  async function retryRun() {
+    setRetrying(true)
+    setRetryErr('')
+    try {
+      await api.modules.retryRun(run.run_id)
+    } catch (err) {
+      setRetryErr(err.message)
+    } finally {
+      setRetrying(false)
+    }
+  }
 
   async function runAnalysis() {
     setAnalyzing(true)
@@ -875,6 +889,21 @@ function ModuleRunCard({
           className={`text-gray-400 flex-shrink-0 mt-0.5 transition-transform ${open ? 'rotate-180' : ''}`}
         />
       </button>
+
+      {(run.status === 'FAILED' || run.status === 'PENDING') && (
+        <div className="px-3 pb-2 flex items-center gap-2">
+          <button
+            onClick={retryRun}
+            disabled={retrying}
+            className="btn-ghost text-xs px-1.5 py-0.5 text-brand-accent hover:text-brand-accenthover flex items-center gap-1"
+            title={run.status === 'PENDING' ? 'Re-dispatch stuck run' : 'Retry this module run'}
+          >
+            <RefreshCw size={11} className={retrying ? 'animate-spin' : ''} />
+            {retrying ? '' : (run.status === 'PENDING' ? 'Re-queue' : 'Retry')}
+          </button>
+          {retryErr && <span className="text-[10px] text-red-500">{retryErr}</span>}
+        </div>
+      )}
 
       {/* ── Expanded body ─────────────────────────────────────── */}
       {open && (

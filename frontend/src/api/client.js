@@ -143,6 +143,7 @@ export const api = {
     getRun:       (runId)        => request('GET',  `/module-runs/${runId}`),
     validateYara: (rules)        => request('POST', '/modules/yara/validate', { rules }),
     analyze:      (runId)        => request('POST', `/module-runs/${runId}/analyze`),
+    retryRun:     (runId)        => request('POST', `/module-runs/${runId}/retry`),
   },
 
   llm: {

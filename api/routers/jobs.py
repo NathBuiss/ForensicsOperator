@@ -40,10 +40,10 @@ def retry_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if job.get("status") != "FAILED":
+    if job.get("status") not in ("FAILED", "PENDING"):
         raise HTTPException(
             status_code=409,
-            detail=f"Only FAILED jobs can be retried (current status: {job.get('status')})",
+            detail=f"Only FAILED or PENDING jobs can be retried (current status: {job.get('status')})",
         )
 
     case_id = job["case_id"]

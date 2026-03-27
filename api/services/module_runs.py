@@ -92,6 +92,26 @@ def update_module_run(run_id: str, **fields) -> None:
     r.expire(key, MODULE_RUN_TTL)
 
 
+def reset_module_run_for_retry(run_id: str) -> None:
+    """Reset a FAILED or stuck PENDING module run so it can be re-dispatched."""
+    r = get_redis()
+    key = f"fo:module_run:{run_id}"
+    r.hset(key, mapping={
+        "status":           "PENDING",
+        "error":            "",
+        "total_hits":       "0",
+        "hits_by_level":    "{}",
+        "results_preview":  "[]",
+        "output_minio_key": "",
+        "tool_stdout":      "",
+        "tool_stderr":      "",
+        "tool_log":         "",
+        "started_at":       "",
+        "completed_at":     "",
+    })
+    r.expire(key, MODULE_RUN_TTL)
+
+
 def list_malware_runs() -> list[dict]:
     """Return all standalone malware analysis runs, newest first."""
     r = get_redis()

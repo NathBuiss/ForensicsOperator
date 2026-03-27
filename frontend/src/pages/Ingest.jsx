@@ -85,15 +85,15 @@ function JobCard({ jobId, onStatusChange }) {
             {job.status}
             {job.status === 'RUNNING' && <span className="ml-1 animate-pulse">●</span>}
           </span>
-          {job.status === 'FAILED' && (
+          {(job.status === 'FAILED' || (job.status === 'PENDING' && elapsed > STUCK_THRESHOLD_MS)) && (
             <button
               onClick={retryJob}
               disabled={retrying}
               className="btn-ghost text-xs px-1.5 py-0.5 text-brand-accent hover:text-brand-accenthover"
-              title="Retry this job"
+              title={job.status === 'PENDING' ? 'Re-dispatch stuck job' : 'Retry this job'}
             >
               <RefreshCw size={12} className={retrying ? 'animate-spin' : ''} />
-              {retrying ? '' : 'Retry'}
+              {retrying ? '' : (job.status === 'PENDING' ? 'Re-queue' : 'Retry')}
             </button>
           )}
         </div>
