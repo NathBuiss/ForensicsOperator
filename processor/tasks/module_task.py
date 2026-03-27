@@ -946,34 +946,44 @@ def _run_strings(run_id: str, work_dir: Path, sources_dir: Path, params: dict, t
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _run_hindsight(run_id: str, work_dir: Path, sources_dir: Path, params: dict, tool_meta: dict) -> list[dict]:
-    # Prefer `python -m hindsight` — avoids PATH / permission issues with the
-    # pip-installed console script (e.g. /usr/local/bin/hindsight.py not executable).
-    use_module = importlib.util.find_spec("hindsight") is not None
-    hindsight_bin = None
+    # pyhindsight installs a console script (hindsight.py) but has no __main__.py,
+    # so `python -m hindsight` does NOT work.  Find the script file and invoke it
+    # as `sys.executable script_path` so the correct interpreter is used regardless
+    # of the shebang or PATH.
+    hindsight_script = None
 
-    if not use_module:
-        # Fall back to an executable binary in PATH or the canonical scripts dir
-        hindsight_bin = shutil.which("hindsight") or shutil.which("hindsight.py")
-        if not hindsight_bin:
-            scripts_dir = sysconfig.get_path("scripts")
-            if scripts_dir:
-                for candidate in (os.path.join(scripts_dir, "hindsight"),
-                                  os.path.join(scripts_dir, "hindsight.py")):
-                    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                        hindsight_bin = candidate
-                        break
+    # 1. Canonical pip scripts directory (most reliable — avoids PATH/shebang issues)
+    scripts_dir = sysconfig.get_path("scripts")
+    if scripts_dir:
+        for name in ("hindsight.py", "hindsight"):
+            candidate = os.path.join(scripts_dir, name)
+            if os.path.isfile(candidate):
+                hindsight_script = candidate
+                break
 
-    if not use_module and not hindsight_bin:
-        raise RuntimeError(
-            "hindsight binary not found. Ensure pyhindsight is installed in the processor image."
+    # 2. PATH fallback
+    if not hindsight_script:
+        for name in ("hindsight.py", "hindsight"):
+            found = shutil.which(name)
+            if found:
+                hindsight_script = found
+                break
+
+    if not hindsight_script:
+        installed = importlib.util.find_spec("hindsight") is not None
+        msg = (
+            f"pyhindsight is installed but hindsight.py was not found in {scripts_dir}. "
+            "Try: pip3 install --force-reinstall pyhindsight"
+            if installed else
+            "hindsight not found. Ensure pyhindsight is installed in the processor image."
         )
+        raise RuntimeError(msg)
 
     output_dir = work_dir / "hindsight_output"
     output_dir.mkdir()
     output_prefix = str(output_dir / "results")
 
-    base_cmd = [sys.executable, "-m", "hindsight"] if use_module else [hindsight_bin]
-    cmd = base_cmd + ["-i", str(sources_dir), "-o", output_prefix, "-f", "json"]
+    cmd = [sys.executable, hindsight_script, "-i", str(sources_dir), "-o", output_prefix, "-f", "json"]
     logger.info("[%s] Running: %s", run_id, " ".join(cmd))
 
     try:
