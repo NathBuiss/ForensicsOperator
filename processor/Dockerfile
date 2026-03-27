@@ -42,13 +42,19 @@ RUN wget -q -O /tmp/regripper.zip \
     && rm /tmp/regripper.zip
 
 # ── Python deps (includes pyhindsight for the Hindsight module) ───────────────
+# Upgrade build tools first so pyproject.toml-based packages build on Ubuntu 22.04's old pip.
+RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
 COPY processor/requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# ccl-chromium-reader is required by pyhindsight but is not published to PyPI.
-# Install via git+https (requires git in the image) and verify the import succeeds.
-RUN pip3 install --no-cache-dir \
-    "git+https://github.com/cclgroupltd/ccl-chromium-reader.git" \
+# ccl-chromium-reader is required by pyhindsight but is not on PyPI and has no pip metadata.
+# Clone it and copy the module directly into site-packages, then verify the import.
+RUN git clone --depth 1 https://github.com/cclgroupltd/ccl-chromium-reader.git /tmp/ccl_cr \
+    && SITE=$(python3 -c "import site; print(site.getsitepackages()[0])") \
+    && (pip3 install --no-cache-dir /tmp/ccl_cr 2>/dev/null \
+        || find /tmp/ccl_cr -maxdepth 1 \( -name "ccl_chromium_reader" -o -name "ccl_chromium_reader.py" \) \
+           -exec cp -r {} "$SITE/" \;) \
+    && rm -rf /tmp/ccl_cr \
     && python3 -c "import ccl_chromium_reader; print('ccl_chromium_reader installed OK')"
 
 # ── Processor source code ─────────────────────────────────────────────────────
