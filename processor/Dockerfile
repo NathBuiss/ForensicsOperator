@@ -12,7 +12,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-dev \
     libmagic1 libmagic-dev \
-    wget curl \
+    wget curl git \
     binutils \
     perl \
     unzip \
@@ -46,9 +46,9 @@ COPY processor/requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
 # ccl-chromium-reader is required by pyhindsight but is not published to PyPI.
-# Install directly from the GitHub source tarball and verify the import succeeds.
+# Install via git+https (requires git in the image) and verify the import succeeds.
 RUN pip3 install --no-cache-dir \
-    "https://github.com/cclgroupltd/ccl-chromium-reader/archive/refs/heads/main.tar.gz" \
+    "git+https://github.com/cclgroupltd/ccl-chromium-reader.git" \
     && python3 -c "import ccl_chromium_reader; print('ccl_chromium_reader installed OK')"
 
 # ── Processor source code ─────────────────────────────────────────────────────
