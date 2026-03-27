@@ -422,6 +422,108 @@ function CodeEditor({ value, onChange, readOnly = false }) {
   )
 }
 
+// ── ValidationModal ───────────────────────────────────────────────────────────
+
+function ValidationModal({ type, validation, onClose }) {
+  if (!validation) return null
+  const isSkipped = !!validation.skipped
+  const isValid   = validation.valid === true
+  const details   = validation.details   // for alertrule Sigma parse
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal-box max-w-lg">
+        <div className="modal-header">
+          <div className="flex items-center gap-2">
+            {isSkipped
+              ? <AlertCircle size={15} className="text-amber-500" />
+              : isValid
+                ? <CheckCircle size={15} className="text-green-600" />
+                : <AlertCircle size={15} className="text-red-500" />}
+            <span className="text-sm font-semibold">Validation Result</span>
+          </div>
+          <button className="icon-btn" onClick={onClose}><X size={14} /></button>
+        </div>
+        <div className="p-5 space-y-4">
+          {isSkipped ? (
+            <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 space-y-1.5">
+              <p className="text-xs font-semibold text-amber-700">Validation skipped</p>
+              <p className="text-xs text-amber-600">{validation.warning}</p>
+            </div>
+          ) : isValid ? (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <CheckCircle size={14} className="text-green-600" />
+                <span className="text-sm font-semibold text-green-700">Valid</span>
+              </div>
+              {details && (
+                <div className="rounded-lg bg-gray-50 border border-gray-200 p-3 space-y-2 text-xs">
+                  {details.name && (
+                    <div><span className="text-gray-500 font-medium">Name: </span><span className="text-gray-800">{details.name}</span></div>
+                  )}
+                  {details.description && (
+                    <div><span className="text-gray-500 font-medium">Description: </span><span className="text-gray-700">{details.description}</span></div>
+                  )}
+                  {details.category && (
+                    <div><span className="text-gray-500 font-medium">Category: </span><span className="text-gray-700">{details.category}</span></div>
+                  )}
+                  {details.artifact_type && (
+                    <div><span className="text-gray-500 font-medium">Artifact type: </span><span className="text-gray-700">{details.artifact_type}</span></div>
+                  )}
+                  {details.query && (
+                    <div>
+                      <p className="text-gray-500 font-medium mb-1">ES Query:</p>
+                      <code className="block bg-white border border-gray-200 rounded px-2 py-1.5 text-indigo-700 text-[11px] font-mono break-all whitespace-pre-wrap">{details.query}</code>
+                    </div>
+                  )}
+                  {details.sigma_level && (
+                    <div><span className="text-gray-500 font-medium">Level: </span>
+                      <span className={`badge text-[9px] ml-1 ${
+                        details.sigma_level === 'critical' ? 'bg-red-100 text-red-700 border-red-200' :
+                        details.sigma_level === 'high'     ? 'bg-orange-100 text-orange-700 border-orange-200' :
+                        details.sigma_level === 'medium'   ? 'bg-yellow-100 text-yellow-700 border-yellow-200' :
+                        'bg-gray-100 text-gray-600 border-gray-200'
+                      }`}>{details.sigma_level}</span>
+                    </div>
+                  )}
+                  {(details.sigma_tags || []).length > 0 && (
+                    <div>
+                      <p className="text-gray-500 font-medium mb-1">Tags:</p>
+                      <div className="flex flex-wrap gap-1">
+                        {details.sigma_tags.map((t, i) => (
+                          <span key={i} className="badge bg-blue-50 text-blue-600 border-blue-200 text-[9px]">{t}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {details.customInfo && (
+                    <div>
+                      <p className="text-gray-500 font-medium mb-1">Query (custom rule):</p>
+                      <code className="block bg-white border border-gray-200 rounded px-2 py-1.5 text-indigo-700 text-[11px] font-mono break-all">{details.customInfo}</code>
+                    </div>
+                  )}
+                </div>
+              )}
+              {!details && validation.info && (
+                <p className="text-xs text-gray-600 bg-gray-50 border border-gray-200 rounded px-3 py-2">{validation.info}</p>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <AlertCircle size={14} className="text-red-500" />
+                <span className="text-sm font-semibold text-red-700">Invalid</span>
+              </div>
+              <pre className="text-[11px] text-red-700 font-mono whitespace-pre-wrap break-all bg-red-50 border border-red-200 rounded-lg px-3 py-2.5 leading-relaxed">
+                {validation.error}
+              </pre>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function Studio() {
@@ -448,8 +550,13 @@ export default function Studio() {
   const [activeTabKey,  setActiveTabKey] = useState(null)
 
   // Modal visibility
-  const [showNew,    setShowNew]    = useState(false)
-  const [showDelete, setShowDelete] = useState(false)
+  const [showNew,          setShowNew]          = useState(false)
+  const [showDelete,       setShowDelete]       = useState(false)
+  const [showValidateModal, setShowValidateModal] = useState(false)
+
+  // Sidebar search filter (resets on tab change)
+  const [filterText, setFilterText] = useState('')
+  useEffect(() => { setFilterText('') }, [sidebarTab])
 
   // Derived
   const activeTab = openTabs.find(t => fileId(t.type, t.name) === activeTabKey) || null

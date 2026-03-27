@@ -1689,7 +1689,13 @@ export default function CaseTimeline() {
                 <X size={16} />
               </button>
             </div>
-            <AlertRules caseId={caseId} />
+            <AlertRules
+              caseId={caseId}
+              onSearchQuery={q => {
+                setShowAlertRules(false)
+                navigate(`/cases/${caseId}/search`, { state: { pivotQuery: q } })
+              }}
+            />
           </div>
         </div>
       )}

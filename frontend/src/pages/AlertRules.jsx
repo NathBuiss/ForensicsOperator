@@ -1,22 +1,173 @@
 import { useState, useEffect } from 'react'
 import { AlertTriangle, Plus, Trash2, Play, CheckCircle, Loader2,
-         ChevronDown, ChevronUp, Sparkles, Brain, RefreshCw, Clock } from 'lucide-react'
+         ChevronDown, ChevronUp, Sparkles, Brain, RefreshCw, Clock,
+         ExternalLink } from 'lucide-react'
 import { api } from '../api/client'
 
-function LibraryRulesList({ rules, caseId }) {
-  const [open, setOpen] = useState(false)
-  const [runningId, setRunningId] = useState(null)
-  const [results, setResults] = useState({}) // ruleId → {fired, match_count} | {error}
+// ── Shared AI analysis block ───────────────────────────────────────────────────
+
+function AnalysisResult({ analysis, onReanalyze, analyzing }) {
+  if (analyzing) {
+    return (
+      <div className="flex items-center gap-1.5 text-[10px] text-purple-500 mt-2">
+        <Loader2 size={10} className="animate-spin" /> Analyzing…
+      </div>
+    )
+  }
+  if (!analysis) return null
+  return (
+    <div className="mt-2 p-2 rounded bg-purple-50 border border-purple-200 space-y-1.5">
+      <div className="flex items-center gap-1">
+        <Brain size={10} className="text-purple-500" />
+        <span className="text-[10px] font-semibold text-purple-700">AI Analysis</span>
+        <span className="ml-auto text-[9px] text-gray-400">{analysis.model_used}</span>
+        <button onClick={onReanalyze} title="Re-analyze" className="ml-1 text-gray-400 hover:text-purple-500 transition-colors">
+          <RefreshCw size={9} />
+        </button>
+      </div>
+      {analysis.summary && <p className="text-[10px] text-gray-700">{analysis.summary}</p>}
+      {analysis.severity && (
+        <span className={`badge text-[9px] ${
+          analysis.severity === 'critical' ? 'bg-red-100 text-red-600 border-red-200' :
+          analysis.severity === 'high'     ? 'bg-orange-100 text-orange-600 border-orange-200' :
+          'bg-yellow-100 text-yellow-600 border-yellow-200'
+        }`}>{analysis.severity}</span>
+      )}
+      {(analysis.recommendations || []).length > 0 && (
+        <div>
+          <p className="text-[9px] text-gray-500 font-semibold uppercase tracking-wider mb-0.5">Actions</p>
+          {analysis.recommendations.slice(0, 3).map((r, k) => (
+            <p key={k} className="text-[10px] text-gray-600">• {r}</p>
+          ))}
+        </div>
+      )}
+      {(analysis.mitre_techniques || []).length > 0 && (
+        <div className="flex flex-wrap gap-1 pt-0.5">
+          {analysis.mitre_techniques.slice(0, 5).map((t, k) => (
+            <span key={k} className="badge bg-indigo-50 text-indigo-600 border-indigo-200 text-[9px]">{t}</span>
+          ))}
+        </div>
+      )}
+      {analysis.analyzed_at && (
+        <p className="text-[9px] text-gray-400 flex items-center gap-0.5 pt-0.5">
+          <Clock size={8} /> {new Date(analysis.analyzed_at).toLocaleString()}
+        </p>
+      )}
+    </div>
+  )
+}
+
+// ── Inline single-run result (used by both library and case-specific rules) ───
+
+function SingleRunResult({ result, rule, onSearchQuery, analysis, analyzing, onAnalyze }) {
+  if (!result || result.error) return null
+  return (
+    <div className={`border-t px-4 py-3 text-xs space-y-2 ${result.fired ? 'bg-yellow-50 border-yellow-200' : 'bg-green-50 border-green-200'}`}>
+      <div className="flex items-center gap-2">
+        {result.fired
+          ? <><AlertTriangle size={12} className="text-yellow-600" /><span className="font-semibold text-yellow-700">{result.match_count.toLocaleString()} match{result.match_count !== 1 ? 'es' : ''} found</span></>
+          : <><CheckCircle size={12} className="text-green-600" /><span className="font-semibold text-green-700">No matches — all clear</span></>
+        }
+      </div>
+
+      {result.fired && (
+        <>
+          {/* View all in search */}
+          {onSearchQuery && (
+            <button
+              onClick={() => onSearchQuery(rule.query)}
+              className="w-full flex items-center justify-between bg-brand-accent/10 hover:bg-brand-accent/20 border border-brand-accent/30 rounded-lg px-3 py-1.5 transition-colors"
+            >
+              <span className="text-[11px] font-medium text-brand-accent">
+                View all {result.match_count.toLocaleString()} events in Search
+              </span>
+              <ExternalLink size={11} className="text-brand-accent flex-shrink-0" />
+            </button>
+          )}
+
+          {/* Sample events */}
+          {result.sample_events?.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-[9px] font-semibold uppercase tracking-wider text-gray-400">Sample events</p>
+              {result.sample_events.map((ev, j) => (
+                <button
+                  key={j}
+                  onClick={() => onSearchQuery && onSearchQuery(ev.fo_id ? `fo_id:${ev.fo_id}` : rule.query)}
+                  className={`w-full text-left text-[10px] text-gray-700 font-mono bg-white border border-yellow-200 rounded px-2 py-1 truncate
+                    ${onSearchQuery ? 'hover:bg-blue-50 hover:border-blue-200 cursor-pointer' : 'cursor-default'}`}
+                  title={onSearchQuery ? 'Click to view in search' : ''}
+                >
+                  <span className="text-gray-400 mr-2">{ev.timestamp?.slice(0, 19).replace('T', ' ')}</span>
+                  {ev.message}
+                </button>
+              ))}
+              {result.match_count > result.sample_events.length && (
+                <p className="text-[10px] text-gray-400 italic">…and {result.match_count - result.sample_events.length} more</p>
+              )}
+            </div>
+          )}
+
+          {/* AI analysis */}
+          {analysis ? (
+            <AnalysisResult analysis={analysis} onReanalyze={onAnalyze} analyzing={analyzing} />
+          ) : analyzing ? (
+            <AnalysisResult analysis={null} onReanalyze={null} analyzing={true} />
+          ) : (
+            <button
+              onClick={onAnalyze}
+              className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-purple-500 transition-colors"
+            >
+              <Brain size={10} /> AI Analysis
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+// ── Library rules list (collapsible) ─────────────────────────────────────────
+
+function LibraryRulesList({ rules, caseId, onSearchQuery }) {
+  const [open, setOpen]             = useState(false)
+  const [runningId, setRunningId]   = useState(null)
+  const [results, setResults]       = useState({}) // ruleId → {fired, match_count, sample_events} | {error}
+  const [analyses, setAnalyses]     = useState({})
+  const [analyzingIds, setAnalyzingIds] = useState(new Set())
 
   async function runRule(rule) {
     setRunningId(rule.id)
     try {
       const r = await api.alertRules.runSingleRule(caseId, rule.id)
-      setResults(p => ({ ...p, [rule.id]: { fired: r.fired, match_count: r.match?.match_count ?? 0 } }))
-    } catch (e) {
+      setResults(p => ({
+        ...p,
+        [rule.id]: {
+          fired:         r.fired,
+          match_count:   r.match?.match_count ?? 0,
+          sample_events: r.match?.sample_events || [],
+        },
+      }))
+    } catch {
       setResults(p => ({ ...p, [rule.id]: { error: true } }))
     } finally {
       setRunningId(null)
+    }
+  }
+
+  async function analyzeRule(rule) {
+    const res = results[rule.id]
+    if (!res || !res.fired) return
+    setAnalyzingIds(prev => new Set([...prev, rule.id]))
+    try {
+      const r = await api.alertRules.analyzeResult({
+        rule_name: rule.name, rule_query: rule.query,
+        match_count: res.match_count, sample_events: res.sample_events || [],
+      })
+      setAnalyses(p => ({ ...p, [rule.id]: r.analysis }))
+    } catch {
+      // LLM not configured — silently skip
+    } finally {
+      setAnalyzingIds(prev => { const s = new Set(prev); s.delete(rule.id); return s })
     }
   }
 
@@ -35,38 +186,55 @@ function LibraryRulesList({ rules, caseId }) {
           {open ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
         </span>
       </button>
+
       {open && (
-        <div className="max-h-80 overflow-y-auto divide-y divide-gray-100">
+        <div className="max-h-[500px] overflow-y-auto divide-y divide-gray-100">
           {rules.map(rule => {
-            const result = results[rule.id]
+            const result    = results[rule.id]
             const isRunning = runningId === rule.id
+            const analysis  = analyses[rule.id]
+            const analyzing = analyzingIds.has(rule.id)
             return (
-              <div key={rule.id} className="flex items-center gap-2 px-3 py-2 text-xs">
-                <AlertTriangle size={9} className="text-amber-500 flex-shrink-0" />
-                <span className="text-gray-700 truncate flex-1">{rule.name}</span>
-                {rule.artifact_type && (
-                  <span className="text-[9px] text-gray-400 flex-shrink-0">{rule.artifact_type}</span>
-                )}
+              <div key={rule.id}>
+                <div className="flex items-center gap-2 px-3 py-2 text-xs">
+                  <AlertTriangle size={9} className="text-amber-500 flex-shrink-0" />
+                  <span className="text-gray-700 truncate flex-1">{rule.name}</span>
+                  {rule.artifact_type && (
+                    <span className="text-[9px] text-gray-400 flex-shrink-0">{rule.artifact_type}</span>
+                  )}
+                  {result && !result.error && (
+                    result.fired
+                      ? <span className="badge bg-yellow-100 text-yellow-700 border border-yellow-200 text-[9px] flex-shrink-0">
+                          {result.match_count} hit{result.match_count !== 1 ? 's' : ''}
+                        </span>
+                      : <span className="badge bg-green-50 text-green-600 border border-green-200 text-[9px] flex-shrink-0">
+                          clean
+                        </span>
+                  )}
+                  {result?.error && <span className="text-[9px] text-red-400 flex-shrink-0">err</span>}
+                  <button
+                    onClick={() => runRule(rule)}
+                    disabled={isRunning || !!runningId}
+                    title={`Run "${rule.name}" against this case`}
+                    className="flex-shrink-0 p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-brand-accent disabled:opacity-40 transition-colors"
+                  >
+                    {isRunning ? <Loader2 size={10} className="animate-spin" /> : <Play size={10} />}
+                  </button>
+                </div>
+
+                {/* Inline run result */}
                 {result && !result.error && (
-                  result.fired
-                    ? <span className="badge bg-yellow-100 text-yellow-700 border border-yellow-200 text-[9px] flex-shrink-0">
-                        {result.match_count} hit{result.match_count !== 1 ? 's' : ''}
-                      </span>
-                    : <span className="badge bg-green-50 text-green-600 border border-green-200 text-[9px] flex-shrink-0">
-                        clean
-                      </span>
+                  <div className="px-3 pb-3">
+                    <SingleRunResult
+                      result={result}
+                      rule={rule}
+                      onSearchQuery={onSearchQuery}
+                      analysis={analysis}
+                      analyzing={analyzing}
+                      onAnalyze={() => analyzeRule(rule)}
+                    />
+                  </div>
                 )}
-                {result?.error && (
-                  <span className="text-[9px] text-red-400 flex-shrink-0">err</span>
-                )}
-                <button
-                  onClick={() => runRule(rule)}
-                  disabled={isRunning || !!runningId}
-                  title={`Run "${rule.name}" against this case`}
-                  className="flex-shrink-0 p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-brand-accent disabled:opacity-40 transition-colors"
-                >
-                  {isRunning ? <Loader2 size={10} className="animate-spin" /> : <Play size={10} />}
-                </button>
               </div>
             )
           })}
@@ -76,26 +244,29 @@ function LibraryRulesList({ rules, caseId }) {
   )
 }
 
-export default function AlertRules({ caseId }) {
-  const [rules, setRules]             = useState([])
+// ── Main component ────────────────────────────────────────────────────────────
+
+export default function AlertRules({ caseId, onSearchQuery }) {
+  const [rules, setRules]               = useState([])
   const [libraryRules, setLibraryRules] = useState([])
-  const [loading, setLoading]         = useState(true)
-  const [checking, setChecking]       = useState(false)
-  const [run, setRun]                 = useState(null)   // full run: {ran_at, rules_checked, matches, analyses}
-  const [showForm, setShowForm]       = useState(false)
-  const [form, setForm]               = useState({ name:'', description:'', artifact_type:'', query:'', threshold:1 })
+  const [loading, setLoading]           = useState(true)
+  const [checking, setChecking]         = useState(false)
+  const [run, setRun]                   = useState(null)
+  const [showForm, setShowForm]         = useState(false)
+  const [form, setForm]                 = useState({ name:'', description:'', artifact_type:'', query:'', threshold:1 })
   const [expandedMatch, setExpandedMatch] = useState(null)
-  // analyses keyed by rule_id; separate from run.analyses so UI updates in-place
+  // "Check All" analyses
   const [analyses, setAnalyses]           = useState({})
-  // Set of rule IDs currently being (re-)analyzed
   const [analyzingIds, setAnalyzingIds]   = useState(new Set())
   // Case-specific rule single-run state
-  const [runningCaseRuleId, setRunningCaseRuleId] = useState(null)
-  const [caseRuleResults, setCaseRuleResults]     = useState({})   // ruleId → {fired, match_count}|{error}
+  const [runningCaseRuleId, setRunningCaseRuleId]   = useState(null)
+  const [caseRuleResults, setCaseRuleResults]       = useState({})
+  const [caseRuleAnalyses, setCaseRuleAnalyses]     = useState({})
+  const [analyzingCaseRuleIds, setAnalyzingCaseRuleIds] = useState(new Set())
   // AI rule generation
-  const [aiDesc, setAiDesc]           = useState('')
-  const [generating, setGenerating]   = useState(false)
-  const [showAiForm, setShowAiForm]   = useState(false)
+  const [aiDesc, setAiDesc]             = useState('')
+  const [generating, setGenerating]     = useState(false)
+  const [showAiForm, setShowAiForm]     = useState(false)
 
   // ── Load on mount ─────────────────────────────────────────────────────────
 
@@ -105,12 +276,10 @@ export default function AlertRules({ caseId }) {
       .catch(() => {})
       .finally(() => setLoading(false))
 
-    // Load global library rules (these are what Check All runs against)
     api.alertRules.listLibrary()
       .then(r => setLibraryRules(r.rules || []))
       .catch(() => {})
 
-    // Restore last run + analyses from Redis (survives page refresh)
     api.alertRules.lastRun(caseId)
       .then(saved => {
         if (saved?.ran_at) {
@@ -149,43 +318,54 @@ export default function AlertRules({ caseId }) {
           sample_events: r.match?.sample_events || [],
         },
       }))
-    } catch (e) {
+    } catch {
       setCaseRuleResults(p => ({ ...p, [rule.id]: { error: true } }))
     } finally {
       setRunningCaseRuleId(null)
     }
   }
 
-  // ── Check + auto-analyze ──────────────────────────────────────────────────
+  async function analyzeCaseRule(rule) {
+    const res = caseRuleResults[rule.id]
+    if (!res || !res.fired) return
+    setAnalyzingCaseRuleIds(prev => new Set([...prev, rule.id]))
+    try {
+      const r = await api.alertRules.analyzeResult({
+        rule_name: rule.name, rule_query: rule.query,
+        match_count: res.match_count, sample_events: res.sample_events || [],
+      })
+      setCaseRuleAnalyses(p => ({ ...p, [rule.id]: r.analysis }))
+    } catch {
+      // LLM not configured — skip silently
+    } finally {
+      setAnalyzingCaseRuleIds(prev => { const s = new Set(prev); s.delete(rule.id); return s })
+    }
+  }
+
+  // ── Check All + auto-analyze ──────────────────────────────────────────────
 
   async function checkRules() {
     setChecking(true)
     setAnalyses({})
     try {
-      // Run all library rules against this case (same rules visible on /alert-rules page)
       const freshRun = await api.alertRules.runLibrary(caseId)
       setRun(freshRun)
-      // Auto-analyze every triggered match in parallel (fire-and-forget)
-      if (freshRun.matches?.length) {
-        analyzeAll(freshRun.matches)
-      }
+      if (freshRun.matches?.length) analyzeAll(freshRun.matches)
     } catch (e) { alert('Check failed: ' + e.message) }
     finally { setChecking(false) }
   }
 
   async function analyzeAll(matches) {
-    await Promise.allSettled(
-      matches.map(m => runAnalysis(m.rule.id))
-    )
+    await Promise.allSettled(matches.map(m => runAnalysis(m.rule.id, m.rule, m)))
   }
 
-  async function runAnalysis(ruleId) {
+  async function runAnalysis(ruleId, rule, match) {
     setAnalyzingIds(prev => new Set([...prev, ruleId]))
     try {
       const r = await api.alertRules.reanalyzeMatch(caseId, ruleId)
       setAnalyses(prev => ({ ...prev, [ruleId]: r.analysis }))
     } catch {
-      // LLM not configured or failed — silently skip
+      // LLM not configured — skip
     } finally {
       setAnalyzingIds(prev => { const s = new Set(prev); s.delete(ruleId); return s })
     }
@@ -220,73 +400,66 @@ export default function AlertRules({ caseId }) {
 
   const matches = run?.matches || []
 
-  function AnalysisBlock({ ruleId }) {
-    const analysis   = analyses[ruleId]
-    const isAnalyzing = analyzingIds.has(ruleId)
-
-    if (isAnalyzing) {
-      return (
-        <div className="flex items-center gap-1.5 text-[10px] text-purple-500 mt-1">
-          <Loader2 size={10} className="animate-spin" /> Analyzing…
-        </div>
-      )
-    }
-
-    if (!analysis) {
-      return (
-        <button
-          onClick={() => runAnalysis(ruleId)}
-          className="mt-1 flex items-center gap-1 text-[10px] text-gray-400 hover:text-purple-500 transition-colors"
-          title="Run AI forensic analysis on this match"
-        >
-          <Brain size={10} /> AI Analysis
-        </button>
-      )
-    }
-
+  // "Check All" match card (has AnalysisBlock for library rules)
+  function CheckAllMatchCard({ m, i }) {
+    const analysis    = analyses[m.rule.id]
+    const isAnalyzing = analyzingIds.has(m.rule.id)
     return (
-      <div className="mt-2 p-2 rounded bg-purple-50 border border-purple-200 space-y-1.5">
-        <div className="flex items-center gap-1">
-          <Brain size={10} className="text-purple-500" />
-          <span className="text-[10px] font-semibold text-purple-700">AI Forensic Analysis</span>
-          <span className="ml-auto text-[9px] text-gray-400">{analysis.model_used}</span>
-          <button
-            onClick={() => runAnalysis(ruleId)}
-            title="Re-analyze"
-            className="ml-1 text-gray-400 hover:text-purple-500 transition-colors"
-          >
-            <RefreshCw size={9} />
-          </button>
-        </div>
-        {analysis.summary && (
-          <p className="text-[10px] text-gray-700">{analysis.summary}</p>
-        )}
-        {analysis.severity && (
-          <span className={`badge text-[9px] ${
-            analysis.severity === 'critical' ? 'bg-red-100 text-red-600 border-red-200' :
-            analysis.severity === 'high'     ? 'bg-orange-100 text-orange-600 border-orange-200' :
-            'bg-yellow-100 text-yellow-600 border-yellow-200'
-          }`}>{analysis.severity}</span>
-        )}
-        {(analysis.recommendations || []).length > 0 && (
-          <div>
-            <p className="text-[9px] text-gray-500 font-semibold uppercase tracking-wider mb-0.5">Actions</p>
-            {analysis.recommendations.slice(0, 3).map((r, k) => (
-              <p key={k} className="text-[10px] text-gray-600">• {r}</p>
-            ))}
+      <div className="mt-2 border border-yellow-200 rounded-lg overflow-hidden">
+        <button
+          onClick={() => setExpandedMatch(expandedMatch === i ? null : i)}
+          className="w-full flex items-center justify-between px-3 py-2 text-xs bg-yellow-50 hover:bg-yellow-100 transition-colors"
+        >
+          <span className="font-medium text-yellow-700">{m.rule.name}</span>
+          <div className="flex items-center gap-2">
+            {isAnalyzing && <Loader2 size={10} className="text-purple-500 animate-spin" />}
+            {analysis && !isAnalyzing && <Brain size={10} className="text-purple-500" title="AI analysis available" />}
+            <span className="badge bg-yellow-100 text-yellow-700 border border-yellow-200">
+              {m.match_count.toLocaleString()} match{m.match_count !== 1 ? 'es' : ''}
+            </span>
+            {expandedMatch === i ? <ChevronUp size={12} className="text-gray-500" /> : <ChevronDown size={12} className="text-gray-500" />}
           </div>
-        )}
-        {(analysis.mitre_techniques || []).length > 0 && (
-          <div className="flex flex-wrap gap-1 pt-0.5">
-            {analysis.mitre_techniques.slice(0, 5).map((t, k) => (
-              <span key={k} className="badge bg-indigo-50 text-indigo-600 border-indigo-200 text-[9px]">{t}</span>
+        </button>
+        {expandedMatch === i && (
+          <div className="px-3 py-3 space-y-2 bg-white">
+            {onSearchQuery && (
+              <button
+                onClick={() => onSearchQuery(m.rule.query)}
+                className="w-full flex items-center justify-between bg-brand-accent/10 hover:bg-brand-accent/20 border border-brand-accent/30 rounded-lg px-3 py-1.5 transition-colors"
+              >
+                <span className="text-[11px] font-medium text-brand-accent">
+                  View all {m.match_count.toLocaleString()} events in Search
+                </span>
+                <ExternalLink size={11} className="text-brand-accent flex-shrink-0" />
+              </button>
+            )}
+            {m.sample_events?.map((ev, j) => (
+              <button
+                key={j}
+                onClick={() => onSearchQuery && onSearchQuery(ev.fo_id ? `fo_id:${ev.fo_id}` : m.rule.query)}
+                className={`w-full text-left bg-white hover:bg-blue-50 rounded border border-gray-200 hover:border-blue-300 px-2.5 py-2 transition-colors group ${onSearchQuery ? 'cursor-pointer' : 'cursor-default'}`}
+              >
+                <div className="flex items-center justify-between gap-2 mb-0.5">
+                  <span className="text-[10px] text-gray-500 font-mono">{ev.timestamp?.slice(0,19).replace('T',' ')}</span>
+                  {onSearchQuery && <ExternalLink size={9} className="text-gray-300 group-hover:text-blue-400 flex-shrink-0 transition-colors" />}
+                </div>
+                <p className="text-[10px] text-brand-text">{ev.message}</p>
+              </button>
             ))}
+            <AnalysisResult
+              analysis={analysis}
+              analyzing={isAnalyzing}
+              onReanalyze={() => runAnalysis(m.rule.id, m.rule, m)}
+            />
+            {!analysis && !isAnalyzing && (
+              <button
+                onClick={() => runAnalysis(m.rule.id, m.rule, m)}
+                className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-purple-500 transition-colors"
+              >
+                <Brain size={10} /> AI Analysis
+              </button>
+            )}
           </div>
-        )}
-        {analysis.analyzed_at && (
-          <p className="text-[9px] text-gray-400 flex items-center gap-0.5 pt-0.5">
-            <Clock size={8} /> {new Date(analysis.analyzed_at).toLocaleString()}
-          </p>
         )}
       </div>
     )
@@ -295,6 +468,8 @@ export default function AlertRules({ caseId }) {
   return (
     <div className="p-4">
     <div className="max-w-2xl mx-auto">
+
+      {/* Header */}
       <div className="flex items-center justify-between mb-5">
         <div>
           <h1 className="text-base font-bold text-brand-text flex items-center gap-2">
@@ -311,7 +486,9 @@ export default function AlertRules({ caseId }) {
           </button>
           <button onClick={checkRules} disabled={checking || libraryRules.length === 0} className="btn-primary text-xs"
             title={`Run all ${libraryRules.length} library rules against this case`}>
-            {checking ? <><Loader2 size={12} className="animate-spin" /> Checking…</> : <><Play size={12} /> Check All ({libraryRules.length})</>}
+            {checking
+              ? <><Loader2 size={12} className="animate-spin" /> Checking…</>
+              : <><Play size={12} /> Check All ({libraryRules.length})</>}
           </button>
         </div>
       </div>
@@ -322,16 +499,11 @@ export default function AlertRules({ caseId }) {
           <p className="text-xs font-semibold text-purple-700 flex items-center gap-1.5">
             <Sparkles size={12} /> AI Rule Generation
           </p>
-          <p className="text-[10px] text-gray-500">Describe what you want to detect in plain language. The AI will generate an Elasticsearch query and prefill the rule form.</p>
+          <p className="text-[10px] text-gray-500">Describe what you want to detect in plain language.</p>
           <div className="flex gap-2">
-            <input
-              autoFocus
-              value={aiDesc}
-              onChange={e => setAiDesc(e.target.value)}
-              placeholder="e.g. detect failed RDP logins followed by a successful one (pass-the-hash)"
-              className="input flex-1 text-xs"
-              required
-            />
+            <input autoFocus value={aiDesc} onChange={e => setAiDesc(e.target.value)}
+              placeholder="e.g. detect failed RDP logins followed by a successful one"
+              className="input flex-1 text-xs" required />
             <button type="submit" disabled={generating || !aiDesc.trim()} className="btn-primary text-xs whitespace-nowrap">
               {generating ? <Loader2 size={12} className="animate-spin" /> : <><Sparkles size={12} /> Generate</>}
             </button>
@@ -357,9 +529,12 @@ export default function AlertRules({ caseId }) {
             </div>
           </div>
           <div>
-            <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1 block">ES Query * <span className="text-gray-400 normal-case font-normal">(query_string syntax)</span></label>
+            <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1 block">
+              ES Query * <span className="text-gray-400 normal-case font-normal">(query_string syntax)</span>
+            </label>
             <input value={form.query} onChange={e => setForm(p => ({...p, query: e.target.value}))}
-              placeholder='evtx.event_id:4625 OR evtx.event_id:4771' className="input w-full text-xs font-mono" required />
+              placeholder='evtx.event_id:4625 OR evtx.event_id:4771'
+              className="input w-full text-xs font-mono" required />
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -368,7 +543,7 @@ export default function AlertRules({ caseId }) {
                 placeholder="What this rule detects" className="input w-full text-xs" />
             </div>
             <div>
-              <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1 block">Min Matches to Alert</label>
+              <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1 block">Min Matches</label>
               <input type="number" min="1" value={form.threshold}
                 onChange={e => setForm(p => ({...p, threshold: parseInt(e.target.value) || 1}))}
                 className="input w-full text-xs" />
@@ -381,7 +556,7 @@ export default function AlertRules({ caseId }) {
         </form>
       )}
 
-      {/* Check results */}
+      {/* Check All results */}
       {run?.rules_checked !== undefined && (
         <div className={`card p-4 mb-4 ${matches.length > 0 ? 'border-yellow-300 bg-yellow-50' : 'border-green-300 bg-green-50'}`}>
           <div className="flex items-center gap-2 mb-2">
@@ -400,51 +575,17 @@ export default function AlertRules({ caseId }) {
             </span>
           </div>
           {matches.map((m, i) => (
-            <div key={m.rule.id} className="mt-2 border border-yellow-200 rounded-lg overflow-hidden">
-              <button
-                onClick={() => setExpandedMatch(expandedMatch === i ? null : i)}
-                className="w-full flex items-center justify-between px-3 py-2 text-xs bg-yellow-50 hover:bg-yellow-100 transition-colors">
-                <span className="font-medium text-yellow-700">{m.rule.name}</span>
-                <div className="flex items-center gap-2">
-                  {analyzingIds.has(m.rule.id) && (
-                    <Loader2 size={10} className="text-purple-500 animate-spin" />
-                  )}
-                  {analyses[m.rule.id] && !analyzingIds.has(m.rule.id) && (
-                    <Brain size={10} className="text-purple-500" title="AI analysis available" />
-                  )}
-                  <span className="badge bg-yellow-100 text-yellow-700 border border-yellow-200">
-                    {m.match_count.toLocaleString()} match{m.match_count !== 1 ? 'es' : ''}
-                  </span>
-                  {expandedMatch === i ? <ChevronUp size={12} className="text-gray-500" /> : <ChevronDown size={12} className="text-gray-500" />}
-                </div>
-              </button>
-              {expandedMatch === i && (
-                <div className="px-3 py-2 space-y-2 bg-white">
-                  <div className="space-y-1">
-                    {m.sample_events.map((ev, j) => (
-                      <div key={j} className="text-[10px] text-gray-600 font-mono truncate">
-                        {ev.timestamp?.slice(0,19).replace('T',' ')} — {ev.message}
-                      </div>
-                    ))}
-                    {m.match_count > 3 && (
-                      <p className="text-[10px] text-gray-400 italic">…and {m.match_count - 3} more</p>
-                    )}
-                  </div>
-                  <AnalysisBlock ruleId={m.rule.id} />
-                </div>
-              )}
-            </div>
+            <CheckAllMatchCard key={m.rule.id} m={m} i={i} />
           ))}
         </div>
       )}
 
-      {/* Library rules — collapsible, read-only, these are what Check All runs */}
+      {/* Library rules — collapsible */}
       {libraryRules.length > 0 && (
-        <LibraryRulesList rules={libraryRules} caseId={caseId} />
+        <LibraryRulesList rules={libraryRules} caseId={caseId} onSearchQuery={onSearchQuery} />
       )}
 
-      {/* Case-specific rules list */}
-
+      {/* Case-specific rules */}
       {loading ? (
         <div className="space-y-2">{[1,2].map(i => <div key={i} className="skeleton h-14 w-full" />)}</div>
       ) : rules.length === 0 ? (
@@ -455,7 +596,7 @@ export default function AlertRules({ caseId }) {
         <div className="space-y-2">
           {rules.map(rule => (
             <div key={rule.id} className="card overflow-hidden">
-              {/* Rule header row */}
+              {/* Rule header */}
               <div className="p-3 flex items-start gap-3">
                 <div className="w-7 h-7 rounded-lg bg-yellow-50 border border-yellow-200 flex items-center justify-center flex-shrink-0 mt-0.5">
                   <AlertTriangle size={12} className="text-yellow-600" />
@@ -495,37 +636,15 @@ export default function AlertRules({ caseId }) {
                 </div>
               </div>
 
-              {/* Inline run result */}
-              {(() => {
-                const res = caseRuleResults[rule.id]
-                if (!res || res.error) return null
-                return (
-                  <div className={`border-t px-4 py-3 text-xs ${res.fired ? 'bg-yellow-50 border-yellow-200' : 'bg-green-50 border-green-200'}`}>
-                    <div className="flex items-center gap-2 mb-2">
-                      {res.fired
-                        ? <><AlertTriangle size={12} className="text-yellow-600" /><span className="font-semibold text-yellow-700">{res.match_count} match{res.match_count !== 1 ? 'es' : ''} found</span></>
-                        : <><CheckCircle size={12} className="text-green-600" /><span className="font-semibold text-green-700">No matches — all clear</span></>
-                      }
-                    </div>
-                    {res.fired && res.sample_events.length > 0 && (
-                      <div className="space-y-1">
-                        <p className="text-[9px] font-semibold uppercase tracking-wider text-gray-400 mb-1">Sample events</p>
-                        {res.sample_events.map((ev, j) => (
-                          <div key={j} className="text-[10px] text-gray-700 font-mono bg-white border border-yellow-200 rounded px-2 py-1 truncate">
-                            <span className="text-gray-400 mr-2">{ev.timestamp?.slice(0, 19).replace('T', ' ')}</span>
-                            {ev.message}
-                          </div>
-                        ))}
-                        {res.match_count > res.sample_events.length && (
-                          <p className="text-[10px] text-gray-400 italic">
-                            …and {res.match_count - res.sample_events.length} more
-                          </p>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )
-              })()}
+              {/* Inline run result (with view-in-search + AI analysis) */}
+              <SingleRunResult
+                result={caseRuleResults[rule.id]}
+                rule={rule}
+                onSearchQuery={onSearchQuery}
+                analysis={caseRuleAnalyses[rule.id]}
+                analyzing={analyzingCaseRuleIds.has(rule.id)}
+                onAnalyze={() => analyzeCaseRule(rule)}
+              />
             </div>
           ))}
         </div>

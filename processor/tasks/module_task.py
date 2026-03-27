@@ -1953,9 +1953,9 @@ def _load_yara_library_rules(run_id: str, selected_ids: list[str] | None = None)
             try:
                 yara.compile(source=content_str)
                 parts.append(content_str)
-            except yara.SyntaxError as exc:
+            except Exception as exc:
                 skipped += 1
-                logger.warning("[%s] YARA: skipping library rule %s (syntax error): %s", run_id, rid, exc)
+                logger.warning("[%s] YARA: skipping library rule %s (compilation error): %s", run_id, rid, exc)
 
         if skipped:
             logger.warning("[%s] YARA: skipped %d invalid library rule(s)", run_id, skipped)
@@ -1997,7 +1997,7 @@ def _run_yara(
     # Compile built-in rules + library rules + any custom rules
     try:
         rules = _compile_yara_rules(all_extra if all_extra else None)
-    except yara.SyntaxError as exc:
+    except Exception as exc:
         raise RuntimeError(f"YARA rule compilation failed: {exc}") from exc
 
     n_custom  = custom_rules.strip().count("rule ") if custom_rules.strip() else 0
