@@ -1894,6 +1894,27 @@ def _compile_yara_rules(custom_rules_source: str | None = None):
     return yara.compile(source=source)
 
 
+def _load_yara_library_rules(run_id: str) -> str:
+    """Fetch all YARA rules stored in the library (Redis) and return them as a single string."""
+    try:
+        r = get_redis()
+        rule_ids = r.smembers("fo:yara_rules")
+        if not rule_ids:
+            return ""
+        parts: list[str] = []
+        for rid in rule_ids:
+            key = f"fo:yara_rule:{rid.decode() if isinstance(rid, bytes) else rid}"
+            content = r.hget(key, "content")
+            if content:
+                parts.append(content.decode() if isinstance(content, bytes) else content)
+        if parts:
+            logger.info("[%s] YARA: loaded %d library rule(s) from library", run_id, len(parts))
+        return "\n\n".join(parts)
+    except Exception as exc:
+        logger.warning("[%s] YARA: could not load library rules: %s", run_id, exc)
+        return ""
+
+
 def _run_yara(
     run_id: str,
     work_dir: Path,
@@ -1901,8 +1922,13 @@ def _run_yara(
     params: dict,
     tool_meta: dict,
 ) -> list[dict]:
-    """Scan source files with YARA rules (built-in + optional custom rules)."""
-    custom_rules = params.get("custom_rules", "") or ""
+    """Scan source files with YARA rules (built-in + library + optional custom rules)."""
+    custom_rules     = params.get("custom_rules", "") or ""
+    use_library      = params.get("use_library_rules", True)
+
+    # Merge library rules (fetched from Redis) with any inline custom rules from the run params
+    library_rules = _load_yara_library_rules(run_id) if use_library else ""
+    all_extra = "\n\n".join(s for s in [custom_rules.strip(), library_rules.strip()] if s)
 
     try:
         import yara
@@ -1915,14 +1941,15 @@ def _run_yara(
             )
         return _run_yara_cli(run_id, work_dir, sources_dir, yara_bin, params, tool_meta)
 
-    # Compile built-in rules + any custom rules
+    # Compile built-in rules + library rules + any custom rules
     try:
-        rules = _compile_yara_rules(custom_rules if custom_rules.strip() else None)
+        rules = _compile_yara_rules(all_extra if all_extra else None)
     except yara.SyntaxError as exc:
         raise RuntimeError(f"YARA rule compilation failed: {exc}") from exc
 
-    n_custom = custom_rules.strip().count("rule ") if custom_rules.strip() else 0
-    tool_meta["log"] = f"Built-in rules + {n_custom} custom rule(s)\n"
+    n_custom  = custom_rules.strip().count("rule ") if custom_rules.strip() else 0
+    n_library = library_rules.strip().count("rule ") if library_rules.strip() else 0
+    tool_meta["log"] = f"Built-in rules + {n_library} library rule(s) + {n_custom} custom rule(s)\n"
 
     _SEVERITY_MAP = {
         "critical": ("critical", 5),

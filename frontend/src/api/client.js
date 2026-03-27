@@ -190,7 +190,8 @@ export const api = {
   },
 
   metrics: {
-    dashboard: () => request('GET', '/metrics/dashboard'),
+    dashboard: ()              => request('GET', '/metrics/dashboard'),
+    history:   (limit = 480)   => request('GET', `/metrics/history?limit=${limit}`),
   },
 
   cti: {
@@ -222,6 +223,18 @@ export const api = {
     get:   ()     => request('GET',    '/admin/malwoverview-config'),
     set:   (data) => request('PUT',    '/admin/malwoverview-config', data),
     clear: ()     => request('DELETE', '/admin/malwoverview-config'),
+  },
+
+  yaraRules: {
+    list:      ()         => request('GET',    '/yara-rules'),
+    get:       (id)       => request('GET',    `/yara-rules/${id}`),
+    create:    (data)     => request('POST',   '/yara-rules', data),
+    update:    (id, data) => request('PUT',    `/yara-rules/${id}`, data),
+    delete:    (id)       => request('DELETE', `/yara-rules/${id}`),
+    exportUrl: ()         => {
+      const token = getToken()
+      return `/api/v1/yara-rules/export${token ? `?_token=${encodeURIComponent(token)}` : ''}`
+    },
   },
 
   collector: {

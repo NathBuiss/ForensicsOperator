@@ -701,7 +701,7 @@ export default function AlertLibrary() {
       <div className="mb-6">
         <div className="flex items-center gap-2.5 mb-1">
           <Bell size={20} className="text-brand-accent" />
-          <h1 className="text-xl font-bold text-brand-text">Alert Rule Library</h1>
+          <h1 className="text-xl font-bold text-brand-text">Detection Rules</h1>
         </div>
         <p className="text-sm text-gray-500">
           Sigma-based detection rules. Use <Play size={11} className="inline" /> to run a rule on any case,

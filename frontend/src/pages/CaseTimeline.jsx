@@ -353,6 +353,7 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
         const extList  = selectedModule.input_extensions || []
         const nameList = selectedModule.input_filenames  || []
         if (extList.length === 0 && nameList.length === 0) return true
+        if (extList.some(e => e === '*' || e === '.*')) return true
         const extMatch  = extList.some(ext => fnameLower.endsWith(ext.toLowerCase()))
         const basename  = fnameLower.split('/').pop().split('\\').pop()
         const nameMatch = nameList.some(fn => basename === fn.toLowerCase())

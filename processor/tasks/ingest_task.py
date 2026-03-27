@@ -100,10 +100,12 @@ def process_artifact(
         # ── 3. Find matching plugin ───────────────────────────────────────────
         plugin_class = _plugin_loader.get_plugin(local_file, mime_type)
         if plugin_class is None:
-            raise RuntimeError(
-                f"No plugin found for '{original_filename}' (mime: {mime_type}). "
-                "Upload a compatible plugin or check the filename/extension."
-            )
+            update_job_status(r, job_id,
+                              status="SKIPPED",
+                              error=f"No plugin found for '{original_filename}' (mime: {mime_type}). "
+                                    "Use a module to analyse this file type.",
+                              completed_at=datetime.now(timezone.utc).isoformat())
+            return
 
         update_job_status(r, job_id, plugin_used=plugin_class.PLUGIN_NAME)
 

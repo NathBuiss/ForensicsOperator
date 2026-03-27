@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { RefreshCw, Upload, AlertTriangle } from 'lucide-react'
 import { api } from '../api/client'
+import { useUpload } from '../contexts/UploadContext'
 
 const ACCEPTED_TYPES = ['.evtx', '.plaso', '.pf', '.lnk', '.dat', '.hive', '.jsonl', '.csv', '.zip',
                          '.pcap', '.pcapng', '.cap', '.sqlite', '.db', '.sqlite3', '.sqlitedb',
@@ -47,7 +48,7 @@ function JobCard({ jobId, onStatusChange }) {
   }, [jobId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (job?.status === 'COMPLETED' || job?.status === 'FAILED') {
+    if (job?.status === 'COMPLETED' || job?.status === 'FAILED' || job?.status === 'SKIPPED') {
       clearInterval(intervalRef.current)
     }
   }, [job?.status])
@@ -74,6 +75,7 @@ function JobCard({ jobId, onStatusChange }) {
     RUNNING:   'text-brand-accent',
     COMPLETED: 'text-green-600',
     FAILED:    'text-red-600',
+    SKIPPED:   'text-gray-400',
   }
 
   return (
@@ -144,6 +146,10 @@ function JobCard({ jobId, onStatusChange }) {
       {job.status === 'FAILED' && (
         <p className="text-xs text-red-600 mt-0.5 break-all">{job.error}</p>
       )}
+
+      {job.status === 'SKIPPED' && (
+        <p className="text-xs text-gray-400 mt-0.5 break-all">{job.error}</p>
+      )}
     </div>
   )
 }
@@ -157,6 +163,7 @@ export default function Ingest({ caseId, onComplete }) {
   const [error, setError]               = useState('')
   const inputRef  = useRef()
   const folderRef = useRef()
+  const { startUpload, updateUpload, finishUpload } = useUpload()
 
   useEffect(() => {
     api.ingest.listJobs(caseId)
@@ -167,7 +174,7 @@ export default function Ingest({ caseId, onComplete }) {
         all.forEach(j => { statusMap[j.job_id] = j.status })
         setJobStatuses(statusMap)
         // Sort: FAILED first, then RUNNING/PENDING, then COMPLETED
-        const order = { FAILED: 0, RUNNING: 1, PENDING: 2, UPLOADING: 3, COMPLETED: 4 }
+        const order = { FAILED: 0, RUNNING: 1, PENDING: 2, UPLOADING: 3, COMPLETED: 4, SKIPPED: 5 }
         const sorted = [...all].sort((a, b) =>
           (order[a.status] ?? 99) - (order[b.status] ?? 99)
         )
@@ -192,17 +199,27 @@ export default function Ingest({ caseId, onComplete }) {
     const formData = new FormData()
     for (const f of files) formData.append('files', f)
 
+    // Register with global upload context so the sidebar indicator fires
+    const uploadId = `${caseId}-${Date.now()}`
+    const label = files.length === 1 ? files[0].name : `${files.length} files`
+    startUpload(uploadId, label)
+
     // Use XHR so we get upload progress events (fetch doesn't expose them)
     const token = localStorage.getItem('fo_token') || ''
     const xhr = new XMLHttpRequest()
 
     xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) setUploadPct(Math.round((e.loaded / e.total) * 100))
+      if (e.lengthComputable) {
+        const pct = Math.round((e.loaded / e.total) * 100)
+        setUploadPct(pct)
+        updateUpload(uploadId, pct)
+      }
     }
 
     xhr.onload = () => {
       setUploading(false)
       setUploadPct(0)
+      finishUpload(uploadId)
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
           const r = JSON.parse(xhr.responseText)
@@ -228,8 +245,8 @@ export default function Ingest({ caseId, onComplete }) {
       }
     }
 
-    xhr.onerror = () => { setUploading(false); setUploadPct(0); setError('Network error during upload') }
-    xhr.ontimeout = () => { setUploading(false); setUploadPct(0); setError('Upload timed out') }
+    xhr.onerror = () => { setUploading(false); setUploadPct(0); finishUpload(uploadId); setError('Network error during upload') }
+    xhr.ontimeout = () => { setUploading(false); setUploadPct(0); finishUpload(uploadId); setError('Upload timed out') }
 
     const base = window.location.origin
     xhr.open('POST', `${base}/api/v1/cases/${caseId}/ingest`)
@@ -321,8 +338,9 @@ export default function Ingest({ caseId, onComplete }) {
 
       {/* Jobs list */}
       {jobs.length > 0 && (() => {
-        const failedCount  = Object.values(jobStatuses).filter(s => s === 'FAILED').length
-        const activeCount  = Object.values(jobStatuses).filter(s => s === 'RUNNING' || s === 'PENDING' || s === 'UPLOADING').length
+        const failedCount   = Object.values(jobStatuses).filter(s => s === 'FAILED').length
+        const skippedCount  = Object.values(jobStatuses).filter(s => s === 'SKIPPED').length
+        const activeCount   = Object.values(jobStatuses).filter(s => s === 'RUNNING' || s === 'PENDING' || s === 'UPLOADING').length
         return (
           <div>
             <div className="flex items-center gap-3 mb-2">
@@ -333,6 +351,11 @@ export default function Ingest({ caseId, onComplete }) {
               {failedCount > 0 && (
                 <span className="flex items-center gap-1 text-[10px] font-semibold text-red-600 bg-red-50 border border-red-200 rounded-full px-2 py-0.5">
                   <AlertTriangle size={10} /> {failedCount} failed
+                </span>
+              )}
+              {skippedCount > 0 && (
+                <span className="text-[10px] text-gray-400 bg-gray-100 border border-gray-200 rounded-full px-2 py-0.5">
+                  {skippedCount} skipped
                 </span>
               )}
               {activeCount > 0 && (

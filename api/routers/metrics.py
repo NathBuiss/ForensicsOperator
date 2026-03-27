@@ -342,6 +342,46 @@ _DEFAULT_CELERY = {"active_tasks": 0, "reserved_tasks": 0, "registered_workers":
 _DEFAULT_CASES  = {"total_cases": 0, "total_jobs": 0, "active_jobs": 0, "failed_jobs": 0}
 
 
+def _get_api_metrics() -> dict:
+    """Read the rolling request window collected by the telemetry middleware in main.py."""
+    result = {
+        "total_requests": 0,
+        "total_errors":   0,
+        "rps":            0.0,
+        "p50_ms":         None,
+        "p95_ms":         None,
+        "p99_ms":         None,
+        "error_rate_pct": 0.0,
+    }
+    try:
+        # Import the module-level deque from main
+        import main as _main
+        window  = list(_main._REQUEST_WINDOW)
+        totals  = _main._REQUEST_TOTALS
+        result["total_requests"] = totals.get("count", 0)
+        result["total_errors"]   = totals.get("errors", 0)
+        if window:
+            durations = [d for d, _ in window]
+            durations.sort()
+            n = len(durations)
+            result["p50_ms"] = round(durations[int(n * 0.50)], 1)
+            result["p95_ms"] = round(durations[min(int(n * 0.95), n - 1)], 1)
+            result["p99_ms"] = round(durations[min(int(n * 0.99), n - 1)], 1)
+            err_count = sum(1 for _, s in window if s >= 500)
+            result["error_rate_pct"] = round(err_count / n * 100, 1)
+            # RPS: count requests in the last 60 seconds (assume window covers last ~60 s at typical traffic)
+            result["rps"] = round(len(window) / 60, 2)
+    except Exception:
+        pass
+    return result
+
+
+_DEFAULT_API = {
+    "total_requests": 0, "total_errors": 0, "rps": 0.0,
+    "p50_ms": None, "p95_ms": None, "p99_ms": None, "error_rate_pct": 0.0,
+}
+
+
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
 @router.get("/dashboard")
@@ -358,13 +398,14 @@ def metrics_dashboard():
     # we collect results first, then shut the pool down in the background so slow
     # threads (e.g. Celery inspector waiting for broker broadcast) can't stall the
     # HTTP response.
-    pool = ThreadPoolExecutor(max_workers=6)
+    pool = ThreadPoolExecutor(max_workers=7)
     f_system = pool.submit(_get_system_metrics)
     f_es     = pool.submit(_get_elasticsearch_metrics)
     f_redis  = pool.submit(_get_redis_metrics)
     f_minio  = pool.submit(_get_minio_metrics)
     f_celery = pool.submit(_get_celery_metrics)
     f_cases  = pool.submit(_get_cases_metrics)
+    f_api    = pool.submit(_get_api_metrics)
 
     def _get(fut, default):
         try:
@@ -380,7 +421,86 @@ def metrics_dashboard():
         "minio":         _get(f_minio,  _DEFAULT_MINIO),
         "celery":        _get(f_celery, _DEFAULT_CELERY),
         "cases":         _get(f_cases,  _DEFAULT_CASES),
+        "api":           _get(f_api,    _DEFAULT_API),
     }
     # Let any still-running threads finish in the background — don't block.
     pool.shutdown(wait=False)
     return result
+
+
+# ── Time-series history ────────────────────────────────────────────────────────
+
+_HISTORY_KEY  = "fo:metrics:snapshots"
+_HISTORY_MAX  = 2880   # 24 h at 30 s intervals
+
+
+def _slim_snapshot() -> dict:
+    """
+    Collect a compact snapshot for the history buffer.
+    Runs in a background asyncio task every 30 s — fast, non-blocking sections only.
+    """
+    ts  = datetime.now(timezone.utc).isoformat()
+    sys = _run_with_timeout(_get_system_metrics,       _DEFAULT_SYSTEM)
+    cel = _run_with_timeout(_get_celery_metrics,       _DEFAULT_CELERY)
+    cas = _run_with_timeout(_get_cases_metrics,        _DEFAULT_CASES)
+
+    # API metrics come from in-process memory — instant
+    api = _get_api_metrics()
+
+    snap: dict = {"ts": ts}
+
+    # System
+    snap["cpu"]  = sys.get("cpu_percent", 0)
+    snap["mem"]  = sys.get("memory_percent", 0)
+    snap["disk"] = sys.get("disk_percent", 0)
+
+    # Celery queues
+    ql = cel.get("queue_lengths") or {}
+    snap["q_ingest"]  = ql.get("ingest", 0)
+    snap["q_modules"] = ql.get("modules", 0)
+    snap["active"]    = cel.get("active_tasks", 0)
+
+    # Jobs
+    snap["job_active"] = cas.get("active_jobs", 0)
+    snap["job_failed"] = cas.get("failed_jobs", 0)
+
+    # API latency
+    snap["p50"]  = api.get("p50_ms")
+    snap["p95"]  = api.get("p95_ms")
+    snap["rps"]  = api.get("rps", 0)
+
+    return snap
+
+
+def store_metrics_snapshot() -> None:
+    """Write one slim snapshot to the Redis circular buffer. Called by the background task."""
+    try:
+        import redis as _redis
+        r    = _redis.Redis.from_url(settings.REDIS_URL, socket_timeout=3, socket_connect_timeout=3)
+        snap = _slim_snapshot()
+        r.rpush(_HISTORY_KEY, json.dumps(snap))
+        r.ltrim(_HISTORY_KEY, -_HISTORY_MAX, -1)   # keep only the last _HISTORY_MAX entries
+    except Exception:
+        pass   # Never crash the background loop
+
+
+@router.get("/history")
+def metrics_history(limit: int = 480):
+    """
+    Return up to *limit* historical metric snapshots (default = 8 h at 30 s).
+    Ordered oldest → newest.
+    """
+    limit = max(1, min(limit, _HISTORY_MAX))
+    try:
+        import redis as _redis
+        r   = _redis.Redis.from_url(settings.REDIS_URL, socket_timeout=3, socket_connect_timeout=3)
+        raw = r.lrange(_HISTORY_KEY, -limit, -1)
+        snapshots = []
+        for item in raw:
+            try:
+                snapshots.append(json.loads(item))
+            except Exception:
+                pass
+        return {"snapshots": snapshots, "count": len(snapshots)}
+    except Exception:
+        return {"snapshots": [], "count": 0}

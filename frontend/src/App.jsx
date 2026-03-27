@@ -1,30 +1,27 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 
-import Layout       from './components/layout/Layout'
-import Dashboard    from './pages/Dashboard'
-import CaseTimeline from './pages/CaseTimeline'
-import Search       from './pages/Search'
-import AlertLibrary from './pages/AlertLibrary'
-import Ingesters    from './pages/Ingesters'
-import Modules      from './pages/Modules'
-import Collector    from './pages/Collector'
-import Cases        from './pages/Cases'
-import Studio       from './pages/Studio'
-import Docs         from './pages/Docs'
-import Settings     from './pages/Settings'
-import Login        from './pages/Login'
-import Performance  from './pages/Performance'
+import Layout         from './components/layout/Layout'
+import Dashboard      from './pages/Dashboard'
+import CaseTimeline   from './pages/CaseTimeline'
+import Search         from './pages/Search'
+import AlertLibrary   from './pages/AlertLibrary'
+import YaraLibrary    from './pages/YaraLibrary'
+import Ingesters      from './pages/Ingesters'
+import Modules        from './pages/Modules'
+import Collector      from './pages/Collector'
+import Cases          from './pages/Cases'
+import Studio         from './pages/Studio'
+import Docs           from './pages/Docs'
+import Settings       from './pages/Settings'
+import Login          from './pages/Login'
+import Performance    from './pages/Performance'
 import UserManagement from './pages/UserManagement'
-import ThreatIntel       from './pages/ThreatIntel'
-import MalwareAnalysis  from './pages/MalwareAnalysis'
+import ThreatIntel    from './pages/ThreatIntel'
+import MalwareAnalysis from './pages/MalwareAnalysis'
+import { UploadProvider } from './contexts/UploadContext'
 
 import { getToken, setToken, clearToken, isAuthenticated } from './api/client'
-
-// ── Auth gate ─────────────────────────────────────────────────────────────────
-// Redirects to /login if there is no token in localStorage.
-// The token was already validated server-side on every request; here we only
-// check that one exists so we can show the login page instead of a broken UI.
 
 function ProtectedRoute({ children }) {
   const location = useLocation()
@@ -34,10 +31,7 @@ function ProtectedRoute({ children }) {
   return children
 }
 
-// ── Root app ──────────────────────────────────────────────────────────────────
-
 export default function App() {
-  // user is set after login so Layout can display username / logout button
   const [user, setUser] = useState(() => {
     try {
       const raw = localStorage.getItem('fo_user')
@@ -55,43 +49,45 @@ export default function App() {
     clearToken()
     setUser(null)
     localStorage.removeItem('fo_user')
-    // ProtectedRoute will redirect to /login on next render
   }
 
   return (
-    <BrowserRouter>
-      <Routes>
-        {/* ── Public ── */}
-        <Route path="/login" element={<Login onLogin={handleLogin} />} />
+    <UploadProvider>
+      <BrowserRouter>
+        <Routes>
+          {/* ── Public ── */}
+          <Route path="/login" element={<Login onLogin={handleLogin} />} />
 
-        {/* ── Protected ── */}
-        <Route
-          path="/"
-          element={
-            <ProtectedRoute>
-              <Layout user={user} onLogout={handleLogout} />
-            </ProtectedRoute>
-          }
-        >
-          <Route index                               element={<Dashboard />} />
-          <Route path="cases"                        element={<Cases />} />
-          <Route path="cases/:caseId"               element={<CaseTimeline />} />
-          <Route path="cases/:caseId/search"        element={<Search />} />
-          <Route path="alert-rules"                  element={<AlertLibrary />} />
-          <Route path="ingesters"                    element={<Ingesters />} />
-          <Route path="modules"                      element={<Modules />} />
-          <Route path="collector"                    element={<Collector />} />
-          <Route path="studio"                       element={<Studio />} />
-          <Route path="docs"                         element={<Docs />} />
-          <Route path="performance"                  element={<Performance />} />
-          <Route path="users"                        element={<UserManagement />} />
-          <Route path="cti"                          element={<ThreatIntel />} />
-          <Route path="malware"                      element={<MalwareAnalysis />} />
-          <Route path="settings"                     element={<Settings />} />
-          <Route path="plugins" element={<Navigate to="/ingesters" replace />} />
-          <Route path="*"       element={<Navigate to="/" replace />} />
-        </Route>
-      </Routes>
-    </BrowserRouter>
+          {/* ── Protected ── */}
+          <Route
+            path="/"
+            element={
+              <ProtectedRoute>
+                <Layout user={user} onLogout={handleLogout} />
+              </ProtectedRoute>
+            }
+          >
+            <Route index                            element={<Dashboard />} />
+            <Route path="cases"                     element={<Cases />} />
+            <Route path="cases/:caseId"             element={<CaseTimeline />} />
+            <Route path="cases/:caseId/search"      element={<Search />} />
+            <Route path="alert-rules"               element={<AlertLibrary />} />
+            <Route path="yara-rules"                element={<YaraLibrary />} />
+            <Route path="ingesters"                 element={<Ingesters />} />
+            <Route path="modules"                   element={<Modules />} />
+            <Route path="collector"                 element={<Collector />} />
+            <Route path="studio"                    element={<Studio />} />
+            <Route path="docs"                      element={<Docs />} />
+            <Route path="performance"               element={<Performance />} />
+            <Route path="users"                     element={<UserManagement />} />
+            <Route path="cti"                       element={<ThreatIntel />} />
+            <Route path="malware"                   element={<MalwareAnalysis />} />
+            <Route path="settings"                  element={<Settings />} />
+            <Route path="plugins" element={<Navigate to="/ingesters" replace />} />
+            <Route path="*"       element={<Navigate to="/" replace />} />
+          </Route>
+        </Routes>
+      </BrowserRouter>
+    </UploadProvider>
   )
 }
