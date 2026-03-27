@@ -6,30 +6,30 @@ import { api } from '../api/client'
 function LibraryRulesList({ rules }) {
   const [open, setOpen] = useState(false)
   return (
-    <div className="mb-4 border border-gray-800/40 rounded-xl overflow-hidden">
+    <div className="mb-4 border border-gray-200 rounded-xl overflow-hidden">
       <button
         onClick={() => setOpen(v => !v)}
-        className="w-full flex items-center justify-between px-3 py-2.5 bg-gray-900/40 hover:bg-gray-900/60 transition-colors text-xs"
+        className="w-full flex items-center justify-between px-3 py-2.5 bg-gray-50 hover:bg-gray-100 transition-colors text-xs"
       >
-        <span className="flex items-center gap-1.5 font-semibold text-gray-400">
+        <span className="flex items-center gap-1.5 font-semibold text-gray-600">
           <Play size={9} className="text-brand-accent" />
           Library Rules — run by "Check All"
         </span>
         <span className="flex items-center gap-2 text-gray-500">
-          <span className="badge bg-gray-700/60 text-gray-400 border border-gray-600/40 text-[9px]">{rules.length} rules</span>
+          <span className="badge bg-gray-100 text-gray-500 border border-gray-200 text-[9px]">{rules.length} rules</span>
           {open ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
         </span>
       </button>
       {open && (
-        <div className="max-h-64 overflow-y-auto divide-y divide-gray-800/30">
+        <div className="max-h-64 overflow-y-auto divide-y divide-gray-100">
           {rules.map(rule => (
             <div key={rule.id} className="flex items-center gap-2 px-3 py-1.5 text-xs">
               <AlertTriangle size={9} className="text-amber-500 flex-shrink-0" />
-              <span className="text-gray-300 truncate flex-1">{rule.name}</span>
+              <span className="text-gray-700 truncate flex-1">{rule.name}</span>
               {rule.artifact_type && (
                 <span className="text-[9px] text-gray-500 flex-shrink-0">{rule.artifact_type}</span>
               )}
-              <span className="text-gray-600 text-[9px] flex-shrink-0">≥{rule.threshold}</span>
+              <span className="text-gray-400 text-[9px] flex-shrink-0">≥{rule.threshold}</span>
             </div>
           ))}
         </div>
@@ -166,7 +166,7 @@ export default function AlertRules({ caseId }) {
 
     if (isAnalyzing) {
       return (
-        <div className="flex items-center gap-1.5 text-[10px] text-purple-400 mt-1">
+        <div className="flex items-center gap-1.5 text-[10px] text-purple-500 mt-1">
           <Loader2 size={10} className="animate-spin" /> Analyzing…
         </div>
       )
@@ -176,7 +176,7 @@ export default function AlertRules({ caseId }) {
       return (
         <button
           onClick={() => runAnalysis(ruleId)}
-          className="mt-1 flex items-center gap-1 text-[10px] text-gray-600 hover:text-purple-400 transition-colors"
+          className="mt-1 flex items-center gap-1 text-[10px] text-gray-400 hover:text-purple-500 transition-colors"
           title="Run AI forensic analysis on this match"
         >
           <Brain size={10} /> AI Analysis
@@ -185,46 +185,46 @@ export default function AlertRules({ caseId }) {
     }
 
     return (
-      <div className="mt-2 p-2 rounded bg-purple-950/20 border border-purple-900/40 space-y-1.5">
+      <div className="mt-2 p-2 rounded bg-purple-50 border border-purple-200 space-y-1.5">
         <div className="flex items-center gap-1">
-          <Brain size={10} className="text-purple-400" />
-          <span className="text-[10px] font-semibold text-purple-300">AI Forensic Analysis</span>
-          <span className="ml-auto text-[9px] text-gray-600">{analysis.model_used}</span>
+          <Brain size={10} className="text-purple-500" />
+          <span className="text-[10px] font-semibold text-purple-700">AI Forensic Analysis</span>
+          <span className="ml-auto text-[9px] text-gray-400">{analysis.model_used}</span>
           <button
             onClick={() => runAnalysis(ruleId)}
             title="Re-analyze"
-            className="ml-1 text-gray-600 hover:text-purple-400 transition-colors"
+            className="ml-1 text-gray-400 hover:text-purple-500 transition-colors"
           >
             <RefreshCw size={9} />
           </button>
         </div>
         {analysis.summary && (
-          <p className="text-[10px] text-gray-300">{analysis.summary}</p>
+          <p className="text-[10px] text-gray-700">{analysis.summary}</p>
         )}
         {analysis.severity && (
           <span className={`badge text-[9px] ${
-            analysis.severity === 'critical' ? 'bg-red-900/40 text-red-300 border-red-800/40' :
-            analysis.severity === 'high'     ? 'bg-orange-900/40 text-orange-300 border-orange-800/40' :
-            'bg-yellow-900/40 text-yellow-300 border-yellow-800/40'
+            analysis.severity === 'critical' ? 'bg-red-100 text-red-600 border-red-200' :
+            analysis.severity === 'high'     ? 'bg-orange-100 text-orange-600 border-orange-200' :
+            'bg-yellow-100 text-yellow-600 border-yellow-200'
           }`}>{analysis.severity}</span>
         )}
         {(analysis.recommendations || []).length > 0 && (
           <div>
             <p className="text-[9px] text-gray-500 font-semibold uppercase tracking-wider mb-0.5">Actions</p>
             {analysis.recommendations.slice(0, 3).map((r, k) => (
-              <p key={k} className="text-[10px] text-gray-400">• {r}</p>
+              <p key={k} className="text-[10px] text-gray-600">• {r}</p>
             ))}
           </div>
         )}
         {(analysis.mitre_techniques || []).length > 0 && (
           <div className="flex flex-wrap gap-1 pt-0.5">
             {analysis.mitre_techniques.slice(0, 5).map((t, k) => (
-              <span key={k} className="badge bg-indigo-900/30 text-indigo-300 border-indigo-800/40 text-[9px]">{t}</span>
+              <span key={k} className="badge bg-indigo-50 text-indigo-600 border-indigo-200 text-[9px]">{t}</span>
             ))}
           </div>
         )}
         {analysis.analyzed_at && (
-          <p className="text-[9px] text-gray-600 flex items-center gap-0.5 pt-0.5">
+          <p className="text-[9px] text-gray-400 flex items-center gap-0.5 pt-0.5">
             <Clock size={8} /> {new Date(analysis.analyzed_at).toLocaleString()}
           </p>
         )}
@@ -233,17 +233,17 @@ export default function AlertRules({ caseId }) {
   }
 
   return (
-    <div className="p-6 max-w-4xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
+    <div className="p-4">
+      <div className="flex items-center justify-between mb-5">
         <div>
-          <h1 className="text-xl font-bold text-brand-text flex items-center gap-2">
-            <AlertTriangle size={18} className="text-yellow-500" /> Alert Rules
+          <h1 className="text-base font-bold text-brand-text flex items-center gap-2">
+            <AlertTriangle size={16} className="text-yellow-500" /> Alert Rules
           </h1>
-          <p className="text-xs text-gray-500 mt-1">Define suspicious patterns and check them on demand</p>
+          <p className="text-xs text-gray-500 mt-0.5">Define suspicious patterns and check them on demand</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap justify-end">
           <button onClick={() => setShowAiForm(v => !v)} className="btn-ghost text-xs">
-            <Sparkles size={13} className="text-purple-400" /> AI Generate
+            <Sparkles size={13} className="text-purple-500" /> AI Generate
           </button>
           <button onClick={() => setShowForm(v => !v)} className="btn-ghost text-xs">
             <Plus size={13} /> New Rule
@@ -257,8 +257,8 @@ export default function AlertRules({ caseId }) {
 
       {/* AI generate form */}
       {showAiForm && (
-        <form onSubmit={generateRule} className="card p-4 mb-4 space-y-3 border border-purple-900/40 bg-purple-950/10">
-          <p className="text-xs font-semibold text-purple-300 flex items-center gap-1.5">
+        <form onSubmit={generateRule} className="card p-4 mb-4 space-y-3 border border-purple-200 bg-purple-50">
+          <p className="text-xs font-semibold text-purple-700 flex items-center gap-1.5">
             <Sparkles size={12} /> AI Rule Generation
           </p>
           <p className="text-[10px] text-gray-500">Describe what you want to detect in plain language. The AI will generate an Elasticsearch query and prefill the rule form.</p>
@@ -282,7 +282,7 @@ export default function AlertRules({ caseId }) {
       {/* Manual create form */}
       {showForm && (
         <form onSubmit={createRule} className="card p-4 mb-4 space-y-3">
-          <p className="text-xs font-semibold text-gray-300">New Alert Rule</p>
+          <p className="text-xs font-semibold text-gray-700">New Alert Rule</p>
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1 block">Name *</label>
@@ -296,7 +296,7 @@ export default function AlertRules({ caseId }) {
             </div>
           </div>
           <div>
-            <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1 block">ES Query * <span className="text-gray-600 normal-case font-normal">(query_string syntax)</span></label>
+            <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1 block">ES Query * <span className="text-gray-400 normal-case font-normal">(query_string syntax)</span></label>
             <input value={form.query} onChange={e => setForm(p => ({...p, query: e.target.value}))}
               placeholder='evtx.event_id:4625 OR evtx.event_id:4771' className="input w-full text-xs font-mono" required />
           </div>
@@ -322,12 +322,12 @@ export default function AlertRules({ caseId }) {
 
       {/* Check results */}
       {run?.rules_checked !== undefined && (
-        <div className={`card p-4 mb-4 ${matches.length > 0 ? 'border-yellow-800/50 bg-yellow-950/10' : 'border-green-800/50 bg-green-950/10'}`}>
+        <div className={`card p-4 mb-4 ${matches.length > 0 ? 'border-yellow-300 bg-yellow-50' : 'border-green-300 bg-green-50'}`}>
           <div className="flex items-center gap-2 mb-2">
             {matches.length > 0
-              ? <AlertTriangle size={14} className="text-yellow-400" />
-              : <CheckCircle size={14} className="text-green-400" />}
-            <span className="text-sm font-semibold text-gray-200">
+              ? <AlertTriangle size={14} className="text-yellow-600" />
+              : <CheckCircle size={14} className="text-green-600" />}
+            <span className="text-sm font-semibold text-gray-800">
               {matches.length > 0
                 ? `${matches.length} rule${matches.length !== 1 ? 's' : ''} triggered`
                 : 'All clear — no rules triggered'}
@@ -339,34 +339,34 @@ export default function AlertRules({ caseId }) {
             </span>
           </div>
           {matches.map((m, i) => (
-            <div key={m.rule.id} className="mt-2 border border-yellow-900/40 rounded-lg overflow-hidden">
+            <div key={m.rule.id} className="mt-2 border border-yellow-200 rounded-lg overflow-hidden">
               <button
                 onClick={() => setExpandedMatch(expandedMatch === i ? null : i)}
-                className="w-full flex items-center justify-between px-3 py-2 text-xs bg-yellow-950/20 hover:bg-yellow-950/30 transition-colors">
-                <span className="font-medium text-yellow-300">{m.rule.name}</span>
+                className="w-full flex items-center justify-between px-3 py-2 text-xs bg-yellow-50 hover:bg-yellow-100 transition-colors">
+                <span className="font-medium text-yellow-700">{m.rule.name}</span>
                 <div className="flex items-center gap-2">
                   {analyzingIds.has(m.rule.id) && (
-                    <Loader2 size={10} className="text-purple-400 animate-spin" />
+                    <Loader2 size={10} className="text-purple-500 animate-spin" />
                   )}
                   {analyses[m.rule.id] && !analyzingIds.has(m.rule.id) && (
-                    <Brain size={10} className="text-purple-400" title="AI analysis available" />
+                    <Brain size={10} className="text-purple-500" title="AI analysis available" />
                   )}
-                  <span className="badge bg-yellow-900/40 text-yellow-400 border border-yellow-800/40">
+                  <span className="badge bg-yellow-100 text-yellow-700 border border-yellow-200">
                     {m.match_count.toLocaleString()} match{m.match_count !== 1 ? 'es' : ''}
                   </span>
                   {expandedMatch === i ? <ChevronUp size={12} className="text-gray-500" /> : <ChevronDown size={12} className="text-gray-500" />}
                 </div>
               </button>
               {expandedMatch === i && (
-                <div className="px-3 py-2 space-y-2">
+                <div className="px-3 py-2 space-y-2 bg-white">
                   <div className="space-y-1">
                     {m.sample_events.map((ev, j) => (
-                      <div key={j} className="text-[10px] text-gray-400 font-mono truncate">
+                      <div key={j} className="text-[10px] text-gray-600 font-mono truncate">
                         {ev.timestamp?.slice(0,19).replace('T',' ')} — {ev.message}
                       </div>
                     ))}
                     {m.match_count > 3 && (
-                      <p className="text-[10px] text-gray-600 italic">…and {m.match_count - 3} more</p>
+                      <p className="text-[10px] text-gray-400 italic">…and {m.match_count - 3} more</p>
                     )}
                   </div>
                   <AnalysisBlock ruleId={m.rule.id} />
@@ -393,21 +393,21 @@ export default function AlertRules({ caseId }) {
         <div className="space-y-2">
           {rules.map(rule => (
             <div key={rule.id} className="card p-3 flex items-start gap-3">
-              <div className="w-7 h-7 rounded-lg bg-yellow-900/30 border border-yellow-800/40 flex items-center justify-center flex-shrink-0 mt-0.5">
-                <AlertTriangle size={12} className="text-yellow-400" />
+              <div className="w-7 h-7 rounded-lg bg-yellow-50 border border-yellow-200 flex items-center justify-center flex-shrink-0 mt-0.5">
+                <AlertTriangle size={12} className="text-yellow-600" />
               </div>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-0.5">
-                  <span className="text-sm font-semibold text-gray-100">{rule.name}</span>
+                  <span className="text-sm font-semibold text-gray-800">{rule.name}</span>
                   {rule.artifact_type && (
-                    <span className="badge bg-gray-700/60 text-gray-400 border border-gray-600/40 text-[10px]">{rule.artifact_type}</span>
+                    <span className="badge bg-gray-100 text-gray-500 border border-gray-200 text-[10px]">{rule.artifact_type}</span>
                   )}
-                  <span className="badge bg-gray-700/60 text-gray-500 border border-gray-600/40 text-[10px]">≥{rule.threshold}</span>
+                  <span className="badge bg-gray-100 text-gray-400 border border-gray-200 text-[10px]">≥{rule.threshold}</span>
                 </div>
                 {rule.description && <p className="text-xs text-gray-500 mb-1">{rule.description}</p>}
-                <code className="text-[10px] text-indigo-400 bg-indigo-950/30 px-1.5 py-0.5 rounded">{rule.query}</code>
+                <code className="text-[10px] text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">{rule.query}</code>
               </div>
-              <button onClick={() => deleteRule(rule.id)} className="btn-ghost p-1.5 text-gray-600 hover:text-red-400">
+              <button onClick={() => deleteRule(rule.id)} className="btn-ghost p-1.5 text-gray-400 hover:text-red-500">
                 <Trash2 size={13} />
               </button>
             </div>

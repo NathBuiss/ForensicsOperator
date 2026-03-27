@@ -1626,7 +1626,7 @@ export default function CaseTimeline() {
       {showAlertRules && (
         <div className="panel-backdrop" onClick={() => setShowAlertRules(false)}>
           <div
-            className="absolute right-0 top-0 h-full w-[600px] bg-white border-l border-gray-200 flex flex-col overflow-y-auto"
+            className="absolute right-0 top-0 h-full w-[760px] bg-white border-l border-gray-200 flex flex-col overflow-y-auto"
             style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.10)' }}
             onClick={e => e.stopPropagation()}
           >

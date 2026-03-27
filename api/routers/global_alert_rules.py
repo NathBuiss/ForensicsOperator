@@ -724,7 +724,7 @@ class GenerateRuleRequest(BaseModel):
     context: str = ""
 
 
-@router.post("/alert-rules/generate")
+@router.post("/alert-rules/generate-sigma")
 def generate_sigma_rule(body: GenerateRuleRequest):
     """Use the configured LLM to generate a Sigma YAML rule from a description."""
     try:
