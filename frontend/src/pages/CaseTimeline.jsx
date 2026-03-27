@@ -1081,6 +1081,8 @@ function ModuleRunsPanel({ caseId, onClose }) {
   const [runs, setRuns]       = useState([])
   const [loading, setLoading] = useState(true)
 
+  const [showFilters, setShowFilters]   = useState(false)
+
   // ── Level filter (hit-level) ───────────────────────────────────────────────
   const [activeLevels, setActiveLevels] = useState(new Set())
 
@@ -1185,14 +1187,22 @@ function ModuleRunsPanel({ caseId, onClose }) {
             <button onClick={fetchRuns} className="btn-ghost p-1.5 rounded-lg" title="Refresh">
               <RefreshCw size={14} />
             </button>
+            <button
+              onClick={() => setShowFilters(v => !v)}
+              title="Toggle filters"
+              className={`btn-ghost p-1.5 rounded-lg flex items-center gap-1 text-xs transition-colors ${showFilters ? 'bg-brand-accent/10 text-brand-accent' : ''}`}
+            >
+              <Filter size={13} />
+              {hasActiveFilters && <span className="w-1.5 h-1.5 rounded-full bg-brand-accent flex-shrink-0" />}
+            </button>
             <button onClick={onClose} className="btn-ghost p-1.5 rounded-lg">
               <X size={16} />
             </button>
           </div>
         </div>
 
-        {/* ── Filter panel ──────────────────────────────────────────────────── */}
-        <div className="border-b border-gray-100 bg-gray-50/60 divide-y divide-gray-100">
+        {/* ── Filter panel (collapsible) ─────────────────────────────────── */}
+        {showFilters && <div className="border-b border-gray-100 bg-gray-50/60 divide-y divide-gray-100">
 
           {/* Level filter row */}
           <div className="px-4 py-2 flex items-center gap-1.5 flex-wrap">
@@ -1449,7 +1459,7 @@ function ModuleRunsPanel({ caseId, onClose }) {
               </button>
             </div>
           )}
-        </div>
+        </div>}
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3">

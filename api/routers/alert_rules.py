@@ -74,6 +74,36 @@ def create_rule(case_id: str, body: AlertRuleIn):
     return new
 
 
+@router.post("/cases/{case_id}/alert-rules/{rule_id}/run")
+def run_single_rule(case_id: str, rule_id: str):
+    """Run a single case-specific rule against this case."""
+    r = _r()
+    data = r.get(f"fo:alert_rules:{case_id}")
+    rules = json.loads(data) if data else []
+    rule = next((rl for rl in rules if rl["id"] == rule_id), None)
+    if rule is None:
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    idx  = f"fo-case-{case_id}-{rule['artifact_type']}" if rule.get("artifact_type") else f"fo-case-{case_id}-*"
+    body = {
+        "query": {"query_string": {"query": rule["query"], "default_operator": "AND"}},
+        "size": 5,
+        "_source": ["timestamp", "message", "host", "fo_id", "artifact_type"],
+        "sort": [{"timestamp": {"order": "desc"}}],
+    }
+    try:
+        resp  = es_req("POST", f"/{idx}/_search", body)
+        count = resp["hits"]["total"]["value"]
+        match = {
+            "rule": rule, "match_count": count,
+            "sample_events": [h["_source"] for h in resp["hits"]["hits"]],
+        } if count >= int(rule.get("threshold", 1)) else None
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return {"match": match, "rules_checked": 1, "fired": match is not None}
+
+
 @router.delete("/cases/{case_id}/alert-rules/{rule_id}", status_code=204)
 def delete_rule(case_id: str, rule_id: str):
     r = _r()

@@ -89,6 +89,9 @@ export default function AlertRules({ caseId }) {
   const [analyses, setAnalyses]           = useState({})
   // Set of rule IDs currently being (re-)analyzed
   const [analyzingIds, setAnalyzingIds]   = useState(new Set())
+  // Case-specific rule single-run state
+  const [runningCaseRuleId, setRunningCaseRuleId] = useState(null)
+  const [caseRuleResults, setCaseRuleResults]     = useState({})   // ruleId → {fired, match_count}|{error}
   // AI rule generation
   const [aiDesc, setAiDesc]           = useState('')
   const [generating, setGenerating]   = useState(false)
@@ -132,6 +135,18 @@ export default function AlertRules({ caseId }) {
   async function deleteRule(id) {
     await api.alertRules.delete(caseId, id)
     setRules(p => p.filter(r => r.id !== id))
+  }
+
+  async function runCaseRule(rule) {
+    setRunningCaseRuleId(rule.id)
+    try {
+      const r = await api.alertRules.runSingleCaseRule(caseId, rule.id)
+      setCaseRuleResults(p => ({ ...p, [rule.id]: { fired: r.fired, match_count: r.match?.match_count ?? 0 } }))
+    } catch (e) {
+      setCaseRuleResults(p => ({ ...p, [rule.id]: { error: true } }))
+    } finally {
+      setRunningCaseRuleId(null)
+    }
   }
 
   // ── Check + auto-analyze ──────────────────────────────────────────────────
@@ -445,9 +460,28 @@ export default function AlertRules({ caseId }) {
                 {rule.description && <p className="text-xs text-gray-500 mb-1">{rule.description}</p>}
                 <code className="text-[10px] text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">{rule.query}</code>
               </div>
-              <button onClick={() => deleteRule(rule.id)} className="btn-ghost p-1.5 text-gray-400 hover:text-red-500">
-                <Trash2 size={13} />
-              </button>
+              <div className="flex items-center gap-1 flex-shrink-0">
+                {(() => {
+                  const res = caseRuleResults[rule.id]
+                  if (!res) return null
+                  return res.error
+                    ? <span className="text-[9px] text-red-400">err</span>
+                    : res.fired
+                      ? <span className="badge bg-yellow-100 text-yellow-700 border border-yellow-200 text-[9px]">{res.match_count} hit{res.match_count !== 1 ? 's' : ''}</span>
+                      : <span className="badge bg-green-50 text-green-600 border border-green-200 text-[9px]">clean</span>
+                })()}
+                <button
+                  onClick={() => runCaseRule(rule)}
+                  disabled={!!runningCaseRuleId}
+                  title={`Run "${rule.name}" against this case`}
+                  className="btn-ghost p-1.5 text-gray-400 hover:text-brand-accent disabled:opacity-40"
+                >
+                  {runningCaseRuleId === rule.id ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
+                </button>
+                <button onClick={() => deleteRule(rule.id)} className="btn-ghost p-1.5 text-gray-400 hover:text-red-500">
+                  <Trash2 size={13} />
+                </button>
+              </div>
             </div>
           ))}
         </div>

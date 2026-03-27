@@ -329,9 +329,29 @@ export default function YaraLibrary() {
   const [loading, setLoading]     = useState(true)
   const [search, setSearch]       = useState('')
   const [showModal, setShowModal] = useState(false)
-  const [editRule, setEditRule]   = useState(null)   // null = create, object = edit/prefill
+  const [editRule, setEditRule]   = useState(null)
   const [modalOpenAI, setModalOpenAI] = useState(false)
   const importRef = useRef(null)
+
+  // Standalone validator state
+  const [showValidator, setShowValidator]   = useState(false)
+  const [validatorText, setValidatorText]   = useState('')
+  const [validating, setValidating]         = useState(false)
+  const [validatorResult, setValidatorResult] = useState(null)   // {ok, msg}
+
+  async function runValidate() {
+    if (!validatorText.trim()) return
+    setValidating(true)
+    setValidatorResult(null)
+    try {
+      const r = await api.modules.validateYara(validatorText)
+      setValidatorResult({ ok: r.valid, msg: r.message || (r.valid ? 'Syntax OK — rule is valid' : 'Syntax error') })
+    } catch (err) {
+      setValidatorResult({ ok: false, msg: err.message })
+    } finally {
+      setValidating(false)
+    }
+  }
 
   useEffect(() => { load() }, [])
 
@@ -435,11 +455,49 @@ export default function YaraLibrary() {
           <button onClick={openCreateWithAI} className="btn-ghost text-xs flex items-center gap-1.5">
             <Sparkles size={12} className="text-brand-accent" /> Generate with AI
           </button>
+          <button
+            onClick={() => { setShowValidator(v => !v); setValidatorResult(null) }}
+            className={`btn-ghost text-xs flex items-center gap-1.5 ${showValidator ? 'text-brand-accent' : ''}`}
+          >
+            <Check size={12} /> Validate
+          </button>
           <button onClick={openCreate} className="btn-primary text-xs flex items-center gap-1.5">
             <Plus size={12} /> New rule
           </button>
         </div>
       </div>
+
+      {/* ── Standalone YARA validator ─────────────────────────────────────── */}
+      {showValidator && (
+        <div className="card p-4 mb-4 border border-brand-accent/20 bg-brand-soft/30">
+          <p className="text-xs font-semibold text-gray-700 mb-2 flex items-center gap-1.5">
+            <Check size={12} className="text-brand-accent" /> YARA Rule Validator
+          </p>
+          <textarea
+            value={validatorText}
+            onChange={e => { setValidatorText(e.target.value); setValidatorResult(null) }}
+            placeholder={`rule Example {\n    strings:\n        $s1 = "test"\n    condition:\n        any of them\n}`}
+            spellCheck={false}
+            className="w-full font-mono text-xs bg-gray-950 text-green-400 rounded-lg p-3 h-40 resize-none outline-none focus:ring-1 focus:ring-brand-accent/40 border border-gray-200 mb-2"
+          />
+          <div className="flex items-center gap-3">
+            <button
+              onClick={runValidate}
+              disabled={validating || !validatorText.trim()}
+              className="btn-primary text-xs flex items-center gap-1.5 disabled:opacity-50"
+            >
+              {validating ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />}
+              {validating ? 'Validating…' : 'Validate'}
+            </button>
+            {validatorResult && (
+              <p className={`text-xs flex items-center gap-1.5 ${validatorResult.ok ? 'text-green-600' : 'text-red-600'}`}>
+                {validatorResult.ok ? <Check size={12} /> : <AlertTriangle size={12} />}
+                {validatorResult.msg}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Count */}
       {!loading && rules.length > 0 && (
