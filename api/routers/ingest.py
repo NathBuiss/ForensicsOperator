@@ -1,68 +1,122 @@
-"""File upload and ingest job dispatch."""
+"""File upload and ingest job dispatch.
+
+Strategy:
+  1. Stream each uploaded file to a local temp file in 4 MB async chunks.
+     Using UploadFile.read() (which internally uses run_in_threadpool) ensures
+     the event loop is never blocked, so other requests remain responsive even
+     during 500 MB+ uploads.
+  2. Return job IDs immediately after spooling, with status UPLOADING.
+  3. Upload from the temp file to MinIO in a BackgroundTask — so the HTTP
+     response is sent before the (potentially slow) MinIO transfer completes.
+     This prevents proxy timeout errors (Traefik / Vite dev proxy) on large files.
+
+Status lifecycle: UPLOADING → PENDING → RUNNING → COMPLETED | FAILED
+"""
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import tempfile
 import uuid
-import logging
 import zipfile
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
 from typing import List
 
 from services import storage, jobs as job_svc
 from services.cases import get_case
-from config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["ingest"])
 
 
+# ── Celery dispatch ────────────────────────────────────────────────────────────
+
 def _dispatch_celery_task(job_id: str, case_id: str, minio_key: str, filename: str) -> None:
-    """Dispatch a Celery ingest task via send_task (no direct processor import needed)."""
-    from celery import Celery
-    app = Celery(broker=settings.REDIS_URL)
-    app.send_task(
-        "ingest.process_artifact",
-        args=[job_id, case_id, minio_key, filename],
-        task_id=job_id,
-        queue="ingest",
-    )
+    """Dispatch a Celery ingest task via direct Redis push."""
+    from services.celery_dispatch import dispatch_ingest
+    dispatch_ingest(job_id, case_id, minio_key, filename)
 
 
-def _ingest_one(
+# ── Background upload helper ──────────────────────────────────────────────────
+
+def _bg_upload_and_dispatch(
+    job_id: str,
+    case_id: str,
+    minio_key: str,
+    filename: str,
+    tmp_path: str,
+    source_zip: str = "",
+) -> None:
+    """
+    BackgroundTask: stream file from local staging to MinIO, then dispatch Celery task.
+
+    Runs after the HTTP response has been sent, so the browser never waits for
+    the potentially slow MinIO upload.  Status transitions:
+      UPLOADING → (MinIO upload complete) → PENDING → (Celery processes) → COMPLETED / FAILED
+    """
+    try:
+        size = os.path.getsize(tmp_path)
+        with open(tmp_path, "rb") as f:
+            storage.upload_fileobj(minio_key, f, size)
+
+        job_svc.update_job(job_id, minio_object_key=minio_key, status="PENDING")
+
+        try:
+            _dispatch_celery_task(job_id, case_id, minio_key, filename)
+        except Exception as exc:
+            logger.error("Celery dispatch failed for '%s': %s", filename, exc)
+            job_svc.update_job(job_id, status="FAILED", error=f"Task dispatch failed: {exc}")
+
+    except Exception as exc:
+        logger.error("Background MinIO upload failed for '%s': %s", filename, exc)
+        try:
+            job_svc.update_job(job_id, status="FAILED", error=f"Upload failed: {exc}")
+        except Exception:
+            pass
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+# ── Single-file ingest (async) ─────────────────────────────────────────────────
+
+def _ingest_one_async(
     case_id: str,
     filename: str,
-    fileobj,
+    tmp_path: str,
     size: int,
     dispatched: list,
-    source_zip: str | None = None,
+    errors: list,
+    background_tasks: BackgroundTasks,
+    source_zip: str = "",
 ) -> None:
-    """Upload a single file to MinIO and dispatch an ingest job (streaming, no RAM copy)."""
+    """Create job record, register background upload, append to dispatched."""
     if size == 0:
         logger.warning("Skipping empty file: %s", filename)
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
         return
 
-    job_id   = uuid.uuid4().hex
+    job_id    = uuid.uuid4().hex
     minio_key = f"cases/{case_id}/{job_id}/{filename}"
 
-    try:
-        storage.upload_fileobj(minio_key, fileobj, size)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Storage upload failed for '{filename}': {exc}")
+    job_svc.create_job(job_id, case_id, filename, "", source_zip=source_zip)
+    job_svc.update_job(job_id, status="UPLOADING", size_bytes=size)
 
-    job_svc.create_job(job_id, case_id, filename, minio_key, source_zip=source_zip or "")
-
-    try:
-        _dispatch_celery_task(job_id, case_id, minio_key, filename)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Task dispatch failed for '{filename}': {exc}")
+    background_tasks.add_task(
+        _bg_upload_and_dispatch, job_id, case_id, minio_key, filename, tmp_path, source_zip
+    )
 
     entry: dict = {
         "job_id":     job_id,
         "filename":   filename,
-        "status":     "PENDING",
+        "status":     "UPLOADING",
         "size_bytes": size,
     }
     if source_zip:
@@ -70,112 +124,155 @@ def _ingest_one(
     dispatched.append(entry)
 
 
-def _handle_zip(case_id: str, zip_name: str, zip_fileobj, dispatched: list) -> None:
-    """
-    Extract a zip archive and ingest each contained file as a separate job.
+# ── ZIP extraction ─────────────────────────────────────────────────────────────
 
-    Uses a tmpdir so the zip is never fully loaded into memory — each file is
-    extracted, streamed to MinIO, then immediately deleted from disk.
+def _handle_zip_async(
+    case_id: str,
+    zip_name: str,
+    zip_tmp_path: str,
+    dispatched: list,
+    errors: list,
+    background_tasks: BackgroundTasks,
+) -> None:
     """
-    with tempfile.TemporaryDirectory(prefix="fo_zip_") as tmpdir:
-        # ── Write the uploaded zip to disk ──────────────────────────────────
-        zip_path = os.path.join(tmpdir, zip_name)
-        with open(zip_path, "wb") as out:
-            shutil.copyfileobj(zip_fileobj, out)
+    Extract a zip archive to a temp dir, create one async ingest job per file.
 
+    The zip temp file is cleaned up once all members have been staged.
+    """
+    try:
+        zf = zipfile.ZipFile(zip_tmp_path, "r")
+    except zipfile.BadZipFile:
+        errors.append({"filename": zip_name, "error": "Not a valid zip archive"})
         try:
-            zf = zipfile.ZipFile(zip_path, "r")
-        except zipfile.BadZipFile:
-            raise HTTPException(
-                status_code=400,
-                detail=f"'{zip_name}' is not a valid zip archive",
+            os.unlink(zip_tmp_path)
+        except OSError:
+            pass
+        return
+
+    pre_count = len(dispatched)
+    with zf:
+        for entry in zf.namelist():
+            entry_name = os.path.basename(entry)
+            if not entry_name or entry.endswith("/") or entry_name.startswith("."):
+                continue
+            if entry_name.lower().endswith(".zip"):
+                logger.info("Skipping nested zip '%s' inside '%s'", entry_name, zip_name)
+                continue
+
+            # Extract to a per-file temp file
+            try:
+                tmp_fd, extracted_path = tempfile.mkstemp(prefix="fo_zip_", suffix=f"_{entry_name}")
+                os.close(tmp_fd)
+                with zf.open(entry) as src, open(extracted_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+            except Exception as exc:
+                logger.warning("Could not extract '%s' from '%s': %s", entry, zip_name, exc)
+                errors.append({
+                    "filename": entry_name,
+                    "source_zip": zip_name,
+                    "error": f"Extraction failed: {exc}",
+                })
+                continue
+
+            file_size = os.path.getsize(extracted_path)
+            _ingest_one_async(
+                case_id, entry_name, extracted_path, file_size,
+                dispatched, errors, background_tasks, source_zip=zip_name,
             )
 
-        pre_count = len(dispatched)
-        with zf:
-            for entry in zf.namelist():
-                # Skip directories, hidden files, and nested zip files
-                entry_name = os.path.basename(entry)
-                if not entry_name or entry.endswith("/") or entry_name.startswith("."):
-                    continue
-                if entry_name.lower().endswith(".zip"):
-                    logger.info("Skipping nested zip '%s' inside '%s'", entry_name, zip_name)
-                    continue
+    # Clean up the zip itself
+    try:
+        os.unlink(zip_tmp_path)
+    except OSError:
+        pass
 
-                extracted_path = os.path.join(tmpdir, f"{uuid.uuid4().hex}_{entry_name}")
-                try:
-                    with zf.open(entry) as src, open(extracted_path, "wb") as dst:
-                        shutil.copyfileobj(src, dst)
-                except Exception as exc:
-                    logger.warning("Could not extract '%s' from '%s': %s", entry, zip_name, exc)
-                    continue
-
-                file_size = os.path.getsize(extracted_path)
-                if file_size == 0:
-                    continue
-
-                # Stream extracted file to MinIO then clean up immediately
-                try:
-                    with open(extracted_path, "rb") as f:
-                        _ingest_one(case_id, entry_name, f, file_size, dispatched, source_zip=zip_name)
-                except HTTPException:
-                    logger.error("Ingest failed for '%s' from zip '%s'", entry_name, zip_name)
-                    continue
-                finally:
-                    try:
-                        os.unlink(extracted_path)
-                    except OSError:
-                        pass
-
-        if len(dispatched) == pre_count:
-            raise HTTPException(
-                status_code=400,
-                detail=f"'{zip_name}' contained no processable files",
-            )
+    if len(dispatched) == pre_count and not errors:
+        errors.append({
+            "filename": zip_name,
+            "error": "Zip archive contained no processable files",
+        })
 
 
-# ── Endpoint ──────────────────────────────────────────────────────────────────
+# ── Endpoint ───────────────────────────────────────────────────────────────────
 
 @router.post("/cases/{case_id}/ingest")
-async def ingest_files(case_id: str, files: List[UploadFile] = File(...)):
+async def ingest_files(
+    case_id: str,
+    files: List[UploadFile] = File(...),
+    background_tasks: BackgroundTasks = None,
+):
     """
     Upload one or more forensics files (or zip archives) to a case and enqueue processing.
 
-    Accepts: .evtx, .plaso, .pf, $MFT, NTUSER.DAT, SYSTEM, SOFTWARE, SAM,
-             .lnk, .jsonl, .csv  and  .zip (contents extracted, each file processed separately)
+    Files are spooled to local disk immediately (fast), the HTTP response is sent at
+    once with UPLOADING job IDs, and the actual MinIO transfer happens in the background.
+    This prevents Traefik / proxy timeouts on large files (500 MB+).
 
-    Large files are streamed directly to MinIO — they are never fully loaded into
-    the API process memory, so uploads of several GB are safe.
+    Status lifecycle: UPLOADING → PENDING → RUNNING → COMPLETED | FAILED
     """
     case = get_case(case_id)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
     dispatched: list = []
+    errors: list = []
 
     for upload in files:
         filename = upload.filename or "unknown"
 
-        # Determine file size by seeking the underlying SpooledTemporaryFile.
-        # For files >1 MB FastAPI has already spooled them to disk, so this is
-        # O(1) and does not allocate the file contents in memory.
+        # ── Stream upload to a local temp file ────────────────────────────────
+        # Uses UploadFile.read() in 4 MB chunks so the event loop is never
+        # blocked for more than a few milliseconds, even for 500 MB+ files.
+        # Each read() call is internally dispatched to a thread pool by
+        # Starlette, keeping other requests responsive during large uploads.
         try:
-            file_obj = upload.file
-            file_obj.seek(0, 2)
-            size = file_obj.tell()
-            file_obj.seek(0)
+            tmp_fd, tmp_path = tempfile.mkstemp(prefix="fo_ingest_", suffix=f"_{filename}")
+            os.close(tmp_fd)
+
+            size = 0
+            chunk_size = 4 * 1024 * 1024  # 4 MB chunks
+            with open(tmp_path, "wb") as out:
+                while True:
+                    chunk = await upload.read(chunk_size)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    size += len(chunk)
+
         except Exception as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Cannot determine size of '{filename}': {exc}",
-            )
+            logger.error("Cannot spool '%s' to disk: %s", filename, exc)
+            # Clean up partial temp file if it was created
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+            errors.append({"filename": filename, "error": f"Failed to receive file: {exc}"})
+            continue
 
-        if filename.lower().endswith(".zip"):
-            _handle_zip(case_id, filename, file_obj, dispatched)
-        else:
-            _ingest_one(case_id, filename, file_obj, size, dispatched)
+        try:
+            if filename.lower().endswith(".zip"):
+                _handle_zip_async(case_id, filename, tmp_path, dispatched, errors, background_tasks)
+            else:
+                _ingest_one_async(case_id, filename, tmp_path, size, dispatched, errors, background_tasks)
+        except Exception as exc:
+            logger.error("Failed to register ingest job for '%s': %s", filename, exc)
+            errors.append({"filename": filename, "error": f"Server error: {exc}"})
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
-    if not dispatched:
+    if not dispatched and not errors:
         raise HTTPException(status_code=400, detail="No valid files uploaded")
 
-    return {"case_id": case_id, "jobs": dispatched}
+    if not dispatched and errors:
+        raise HTTPException(
+            status_code=400,
+            detail="All files failed to ingest",
+            headers={"X-Ingest-Errors": str(len(errors))},
+        )
+
+    response: dict = {"case_id": case_id, "jobs": dispatched}
+    if errors:
+        response["errors"] = errors
+    return response

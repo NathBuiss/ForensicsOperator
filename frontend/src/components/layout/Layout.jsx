@@ -3,7 +3,8 @@ import { useState, useEffect } from 'react'
 import {
   LayoutDashboard, Puzzle, FolderOpen,
   Plus, X, ChevronRight, Bell, Sun, Moon, Cpu, PackageOpen, Layers,
-  Code2, BookOpen, LogOut, UserCircle,
+  Code2, BookOpen, LogOut, UserCircle, Settings2, Stars,
+  Activity, Shield, Users, FlaskConical,
 } from 'lucide-react'
 import { api } from '../../api/client'
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts'
@@ -15,32 +16,35 @@ const STATUS_DOT = {
   closed:   'status-dot-closed',
 }
 
+const THEMES = ['light', 'dark', 'midnight']
+
 function useTheme() {
-  const [dark, setDark] = useState(() => {
-    if (typeof window === 'undefined') return false
+  const [theme, setTheme] = useState(() => {
+    if (typeof window === 'undefined') return 'light'
     const saved = localStorage.getItem('fo-theme')
-    if (saved) return saved === 'dark'
-    return window.matchMedia('(prefers-color-scheme: dark)').matches
+    if (saved && THEMES.includes(saved)) return saved
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
   })
 
   useEffect(() => {
     const root = document.documentElement
-    if (dark) {
-      root.classList.add('dark')
-    } else {
-      root.classList.remove('dark')
-    }
-    localStorage.setItem('fo-theme', dark ? 'dark' : 'light')
-  }, [dark])
+    THEMES.forEach(t => root.classList.remove(t))
+    if (theme !== 'light') root.classList.add(theme)
+    localStorage.setItem('fo-theme', theme)
+  }, [theme])
 
-  return [dark, setDark]
+  function cycleTheme() {
+    setTheme(t => THEMES[(THEMES.indexOf(t) + 1) % THEMES.length])
+  }
+
+  return [theme, cycleTheme]
 }
 
 export default function Layout({ user, onLogout }) {
   const [cases, setCases]             = useState([])
   const [showNewCase, setShowNewCase] = useState(false)
   const [newCaseName, setNewCaseName] = useState('')
-  const [dark, setDark]               = useTheme()
+  const [theme, cycleTheme]            = useTheme()
   const [showShortcuts, setShowShortcuts] = useState(false)
   const navigate = useNavigate()
 
@@ -51,6 +55,7 @@ export default function Layout({ user, onLogout }) {
     { key: 'g a', handler: () => navigate('/alert-rules') },
     { key: 'g i', handler: () => navigate('/ingesters') },
     { key: 'g s', handler: () => navigate('/studio') },
+    { key: 'g x', handler: () => navigate('/malware') },
     { key: 'shift+/', handler: () => setShowShortcuts(v => !v), skipInputs: false },
     { key: 'escape', handler: () => setShowShortcuts(false) },
   ])
@@ -88,13 +93,15 @@ export default function Layout({ user, onLogout }) {
             </span>
           </NavLink>
 
-          {/* Theme toggle */}
+          {/* Theme toggle — cycles: light → dark → midnight */}
           <button
-            onClick={() => setDark(d => !d)}
+            onClick={cycleTheme}
             className="w-6 h-6 flex items-center justify-center rounded text-brand-sidebarmuted hover:text-white hover:bg-white/10 transition-colors flex-shrink-0 ml-1"
-            title={dark ? 'Switch to light mode' : 'Switch to dark mode'}
+            title={`Theme: ${theme} (click to cycle)`}
           >
-            {dark ? <Sun size={13} /> : <Moon size={13} />}
+            {theme === 'light'    && <Moon size={13} />}
+            {theme === 'dark'     && <Stars size={13} />}
+            {theme === 'midnight' && <Sun size={13} />}
           </button>
         </div>
 
@@ -140,6 +147,18 @@ export default function Layout({ user, onLogout }) {
             Modules
           </NavLink>
 
+          <NavLink to="/cti" className={({ isActive }) =>
+            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
+            <Shield size={15} />
+            Threat Intel
+          </NavLink>
+
+          <NavLink to="/malware" className={({ isActive }) =>
+            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
+            <FlaskConical size={15} />
+            Malware Analysis
+          </NavLink>
+
           {/* ── Developer ────────────────────────────── */}
           <p className="px-2 mb-1.5 mt-4 text-[10px] font-semibold text-white/30 uppercase tracking-widest">
             Developer
@@ -161,6 +180,29 @@ export default function Layout({ user, onLogout }) {
             isActive ? 'nav-item-active' : 'nav-item-inactive'}>
             <BookOpen size={15} />
             Docs
+          </NavLink>
+
+          {/* ── Admin ─────────────────────────────────── */}
+          <p className="px-2 mb-1.5 mt-4 text-[10px] font-semibold text-white/30 uppercase tracking-widest">
+            Admin
+          </p>
+
+          <NavLink to="/performance" className={({ isActive }) =>
+            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
+            <Activity size={15} />
+            Performance
+          </NavLink>
+
+          <NavLink to="/users" className={({ isActive }) =>
+            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
+            <Users size={15} />
+            Users
+          </NavLink>
+
+          <NavLink to="/settings" className={({ isActive }) =>
+            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
+            <Settings2 size={15} />
+            Settings
           </NavLink>
 
           {/* Cases section */}

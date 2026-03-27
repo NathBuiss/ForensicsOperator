@@ -4,9 +4,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
 
 # ── System deps ───────────────────────────────────────────────────────────────
-# binutils  → 'strings' command for the Strings module
-# perl      → RegRipper (Perl-based)
-# unzip     → Hayabusa + RegRipper zip extraction
+# binutils               → 'strings' command for Strings module
+# perl                   → RegRipper (Perl-based)
+# unzip                  → Hayabusa + RegRipper zip extraction
+# libimage-exiftool-perl → ExifTool metadata extractor
+# libjpeg-dev / zlib1g-dev → optional image libraries for ExifTool
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-dev \
     libmagic1 libmagic-dev \
@@ -14,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     binutils \
     perl \
     unzip \
+    libimage-exiftool-perl \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Hayabusa DFIR binary + rules (Sigma-based EVTX threat hunting) ───────────
@@ -55,4 +58,8 @@ COPY plugins/ /app/plugins_builtin/
 # Mount point for the shared plugins volume (populated at runtime by init container)
 RUN mkdir -p /app/plugins
 
-CMD ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+# CELERY_CONCURRENCY — number of parallel worker processes per pod replica.
+# Default 4 is a good baseline for mixed I/O + CPU workloads.
+# For CPU-heavy modules (Hayabusa, Volatility3) set to number of vCPUs assigned.
+# For I/O-heavy ingest-only workers set to 8–16.
+CMD ["sh", "-c", "celery -A celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-4} -Q ingest,modules,default"]

@@ -1,0 +1,11 @@
+id: strings
+name: Strings
+description: >-
+  Extract printable strings (≥ 8 chars) from any binary file.
+  Useful for quick triage of unknowns — reveals embedded URLs, registry keys,
+  file paths, commands, and encoded payloads without executing the file.
+input_extensions: []
+input_filenames: []
+available: true
+category: Binary Analysis
+tags: [strings, binary, triage, malware, all-files]

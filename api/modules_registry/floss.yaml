@@ -1,0 +1,17 @@
+id: floss
+name: FLOSS
+description: >-
+  FireEye Labs Obfuscated String Solver. Extracts static, stack, and
+  obfuscated strings from PE malware samples — finds strings that regular
+  tools miss by emulating deobfuscation routines. Ideal for malware triage.
+input_extensions:
+  - .exe
+  - .dll
+  - .sys
+  - .bin
+  - .scr
+input_filenames: []
+available: false
+unavailable_reason: "Binary packaging in progress — coming soon."
+category: Binary Analysis
+tags: [strings, obfuscation, malware, pe, floss]

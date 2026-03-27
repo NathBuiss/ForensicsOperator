@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import {
   Search, Filter, X, Flag, Loader2, Download,
-  BarChart2, Plus, Minus, Keyboard, SlidersHorizontal,
+  BarChart2, Plus, Minus, Keyboard, SlidersHorizontal, Brain,
 } from 'lucide-react'
 import { api } from '../api/client'
 import EventDetail from '../components/shared/EventDetail'
@@ -92,6 +92,13 @@ export default function Timeline({ caseId, artifactTypes }) {
   const [visibleCols, setVisibleCols]     = useState(loadSavedColumns)
   const [showColPicker, setShowColPicker] = useState(false)
   const colPickerRef                      = useRef(null)
+
+  const [checkedFoIds, setCheckedFoIds]     = useState(new Set())
+  const [explaining, setExplaining]         = useState(false)
+  const [explainResult, setExplainResult]   = useState(null)
+  const [naturalDate, setNaturalDate]       = useState('')
+  const [showCustomRange, setShowCustomRange] = useState(false)
+  const [naturalDateErr, setNaturalDateErr] = useState('')
 
   const loaderRef = useRef(null)
   const searchRef = useRef(null)
@@ -231,6 +238,90 @@ export default function Timeline({ caseId, artifactTypes }) {
     localStorage.setItem(LS_KEY, JSON.stringify(DEFAULT_COLUMNS))
   }
 
+  // Parse natural language date phrases → ISO string (or null)
+  function parseNaturalDate(text) {
+    const t = text.trim().toLowerCase()
+    const now = new Date()
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+
+    if (t === 'today')     return today.toISOString()
+    if (t === 'yesterday') { const d = new Date(today); d.setDate(d.getDate() - 1); return d.toISOString() }
+    if (t === 'last week') { const d = new Date(today); d.setDate(d.getDate() - 7); return d.toISOString() }
+    if (t === 'last month') { const d = new Date(today); d.setMonth(d.getMonth() - 1); return d.toISOString() }
+
+    const daysMatch   = t.match(/^(\d+)\s*days?\s*ago$/)
+    if (daysMatch)   { const d = new Date(today); d.setDate(d.getDate() - parseInt(daysMatch[1])); return d.toISOString() }
+    const weeksMatch  = t.match(/^(\d+)\s*weeks?\s*ago$/)
+    if (weeksMatch)  { const d = new Date(today); d.setDate(d.getDate() - parseInt(weeksMatch[1]) * 7); return d.toISOString() }
+    const monthsMatch = t.match(/^(\d+)\s*months?\s*ago$/)
+    if (monthsMatch) { const d = new Date(today); d.setMonth(d.getMonth() - parseInt(monthsMatch[1])); return d.toISOString() }
+    const hoursMatch  = t.match(/^(\d+)\s*hours?\s*ago$/)
+    if (hoursMatch)  { const d = new Date(now); d.setHours(d.getHours() - parseInt(hoursMatch[1])); return d.toISOString() }
+
+    // Named weekdays: "monday", "last monday", "from monday"
+    const DAYS = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday']
+    const dayName = t.replace(/^(from\s+|last\s+)/, '').trim()
+    const dayIdx = DAYS.indexOf(dayName)
+    if (dayIdx >= 0) {
+      const d = new Date(today)
+      const diff = (today.getDay() - dayIdx + 7) % 7
+      d.setDate(d.getDate() - (diff === 0 ? 7 : diff))
+      return d.toISOString()
+    }
+
+    return null
+  }
+
+  function applyNaturalDate(e) {
+    e.preventDefault()
+    if (!naturalDate.trim()) return
+    setNaturalDateErr('')
+    const iso = parseNaturalDate(naturalDate)
+    if (iso) { setFromTs(iso); setNaturalDate(''); setNaturalDateErr('') }
+    else setNaturalDateErr(`Try: "monday", "3 days ago", "last week", "2 months ago"`)
+  }
+
+  // Apply a quick date preset (null = clear)
+  function applyPreset(preset) {
+    setNaturalDateErr('')
+    if (!preset) { setFromTs(''); setToTs(''); setShowCustomRange(false); return }
+    const now = new Date()
+    setToTs('')  // clear To so "now" is implied
+    setShowCustomRange(false)
+    switch (preset) {
+      case '1h':  { const d = new Date(now); d.setHours(d.getHours() - 1);   setFromTs(d.toISOString()); break }
+      case '6h':  { const d = new Date(now); d.setHours(d.getHours() - 6);   setFromTs(d.toISOString()); break }
+      case '24h': { const d = new Date(now); d.setDate(d.getDate() - 1);      setFromTs(d.toISOString()); break }
+      case '7d':  { const d = new Date(now); d.setDate(d.getDate() - 7);      setFromTs(d.toISOString()); break }
+      case '30d': { const d = new Date(now); d.setDate(d.getDate() - 30);     setFromTs(d.toISOString()); break }
+      default: break
+    }
+  }
+
+  // Explain selected events with LLM
+  async function explainSelected() {
+    const selectedEvs = events.filter(e => checkedFoIds.has(e.fo_id))
+    if (!selectedEvs.length) return
+    setExplaining(true)
+    setExplainResult(null)
+    try {
+      const r = await api.llm.explainEvents({ events: selectedEvs })
+      setExplainResult(r)
+    } catch (err) {
+      setExplainResult({ error: err.message })
+    } finally {
+      setExplaining(false)
+    }
+  }
+
+  function toggleCheck(foId) {
+    setCheckedFoIds(prev => {
+      const next = new Set(prev)
+      if (next.has(foId)) next.delete(foId); else next.add(foId)
+      return next
+    })
+  }
+
   const maxCount  = histogram.reduce((m, b) => Math.max(m, b.doc_count), 1)
   const hasFilters = selectedType || fromTs || toTs || flaggedOnly
   const vis        = col => visibleCols.includes(col)
@@ -271,26 +362,97 @@ export default function Timeline({ caseId, artifactTypes }) {
             )}
           </div>
 
-          {/* From */}
+          {/* Date range */}
           <div>
-            <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5 block">From</label>
-            <input
-              type="datetime-local"
-              value={fromTs ? fromTs.slice(0, 16) : ''}
-              onChange={e => setFromTs(e.target.value ? new Date(e.target.value).toISOString() : '')}
-              className="input w-full text-xs py-1"
-            />
-          </div>
+            <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5 block">Time Range</label>
 
-          {/* To */}
-          <div>
-            <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5 block">To</label>
-            <input
-              type="datetime-local"
-              value={toTs ? toTs.slice(0, 16) : ''}
-              onChange={e => setToTs(e.target.value ? new Date(e.target.value).toISOString() : '')}
-              className="input w-full text-xs py-1"
-            />
+            {/* Quick presets */}
+            <div className="grid grid-cols-3 gap-1 mb-1.5">
+              {[
+                { id: '1h',  label: '1h'  },
+                { id: '6h',  label: '6h'  },
+                { id: '24h', label: '24h' },
+                { id: '7d',  label: '7d'  },
+                { id: '30d', label: '30d' },
+              ].map(p => (
+                <button
+                  key={p.id}
+                  onClick={() => applyPreset(p.id)}
+                  className={`text-[10px] py-0.5 rounded border transition-colors ${
+                    fromTs && !showCustomRange &&
+                    Math.abs(new Date() - new Date(fromTs)) < { '1h':3600, '6h':21600, '24h':86400, '7d':604800, '30d':2592000 }[p.id] * 1100
+                      ? 'bg-brand-accent text-white border-brand-accent'
+                      : 'bg-white text-gray-600 border-gray-200 hover:border-brand-accent hover:text-brand-accent'
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
+              <button
+                onClick={() => { setShowCustomRange(v => !v) }}
+                className={`text-[10px] py-0.5 rounded border transition-colors col-span-3 mt-0.5 ${
+                  showCustomRange
+                    ? 'bg-brand-accent text-white border-brand-accent'
+                    : 'bg-white text-gray-600 border-gray-200 hover:border-brand-accent hover:text-brand-accent'
+                }`}
+              >
+                Custom range
+              </button>
+            </div>
+
+            {/* Custom date range inputs */}
+            {showCustomRange && (
+              <div className="space-y-2 mt-1 p-2 bg-gray-50 rounded border border-gray-200">
+                <div>
+                  <p className="text-[9px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">From</p>
+                  <input
+                    type="datetime-local"
+                    value={fromTs ? fromTs.slice(0, 16) : ''}
+                    onChange={e => setFromTs(e.target.value ? new Date(e.target.value).toISOString() : '')}
+                    className="input w-full text-[10px] py-0.5 px-1.5"
+                  />
+                </div>
+                <div>
+                  <p className="text-[9px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">To</p>
+                  <input
+                    type="datetime-local"
+                    value={toTs ? toTs.slice(0, 16) : ''}
+                    onChange={e => setToTs(e.target.value ? new Date(e.target.value).toISOString() : '')}
+                    className="input w-full text-[10px] py-0.5 px-1.5"
+                  />
+                </div>
+                <div>
+                  <p className="text-[9px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">Natural language (From)</p>
+                  <form onSubmit={applyNaturalDate} className="flex gap-1">
+                    <input
+                      type="text"
+                      value={naturalDate}
+                      onChange={e => { setNaturalDate(e.target.value); setNaturalDateErr('') }}
+                      placeholder="monday, 3 days ago…"
+                      className="input flex-1 text-[10px] py-0.5 px-1.5"
+                    />
+                    <button type="submit" className="btn-ghost text-[10px] px-1.5 py-0.5">→</button>
+                  </form>
+                  {naturalDateErr && (
+                    <p className="text-[9px] text-amber-600 mt-0.5">{naturalDateErr}</p>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Active range display */}
+            {(fromTs || toTs) && (
+              <div className="mt-1.5 flex items-center gap-1 text-[9px] text-gray-500 bg-gray-50 rounded px-1.5 py-1">
+                <span className="flex-1 truncate">
+                  {fromTs ? new Date(fromTs).toLocaleDateString() : '…'}
+                  {' → '}
+                  {toTs ? new Date(toTs).toLocaleDateString() : 'now'}
+                </span>
+                <button onClick={() => applyPreset(null)} className="text-gray-400 hover:text-red-500 flex-shrink-0">
+                  <X size={9} />
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Flagged only */}
@@ -479,6 +641,32 @@ export default function Timeline({ caseId, artifactTypes }) {
           </div>
         )}
 
+        {/* AI explain floating action bar */}
+        {checkedFoIds.size > 0 && (
+          <div className="px-4 py-2 border-b border-purple-200 bg-purple-50 flex items-center gap-3">
+            <Brain size={13} className="text-purple-500 flex-shrink-0" />
+            <span className="text-xs text-purple-700 font-medium">
+              {checkedFoIds.size} event{checkedFoIds.size !== 1 ? 's' : ''} selected
+            </span>
+            <button
+              onClick={explainSelected}
+              disabled={explaining}
+              className="ml-auto btn-ghost text-xs text-purple-600 hover:text-purple-800 border border-purple-200 rounded-lg px-2.5 py-1 flex items-center gap-1.5"
+            >
+              {explaining
+                ? <><Loader2 size={11} className="animate-spin" /> Analyzing…</>
+                : <><Brain size={11} /> Explain with AI</>}
+            </button>
+            <button
+              onClick={() => { setCheckedFoIds(new Set()); setExplainResult(null) }}
+              className="text-gray-400 hover:text-gray-600"
+              title="Deselect all"
+            >
+              <X size={13} />
+            </button>
+          </div>
+        )}
+
         {/* Events table */}
         <div className="flex-1 overflow-y-auto">
           {events.length === 0 && !loading && (
@@ -496,7 +684,20 @@ export default function Timeline({ caseId, artifactTypes }) {
           <table className="w-full text-xs">
             <thead className="sticky top-0 bg-gray-50 border-b border-gray-200 z-10">
               <tr>
-                {/* Flag — always visible, leftmost */}
+                {/* Checkbox for AI explain — always visible */}
+                <th className="px-2 py-2.5 w-6">
+                  <input
+                    type="checkbox"
+                    className="rounded border-gray-300 accent-brand-accent"
+                    checked={events.length > 0 && events.every(e => checkedFoIds.has(e.fo_id))}
+                    onChange={e => {
+                      if (e.target.checked) setCheckedFoIds(new Set(events.map(ev => ev.fo_id)))
+                      else setCheckedFoIds(new Set())
+                    }}
+                    title="Select all visible events"
+                  />
+                </th>
+                {/* Flag — always visible */}
                 <th className="px-2 py-2.5 w-6" />
 
                 {vis('timestamp') && (
@@ -575,6 +776,8 @@ export default function Timeline({ caseId, artifactTypes }) {
                       e.fo_id === foId ? { ...e, is_flagged: flagged } : e
                     ))
                   }
+                  checked={checkedFoIds.has(ev.fo_id)}
+                  onCheck={() => toggleCheck(ev.fo_id)}
                 />
               ))}
             </tbody>
@@ -601,6 +804,48 @@ export default function Timeline({ caseId, artifactTypes }) {
           onFilterIn={(field, value)  => addFilter(field, value, false)}
           onFilterOut={(field, value) => addFilter(field, value, true)}
         />
+      )}
+
+      {/* AI explain result panel */}
+      {explainResult && (
+        <div
+          className="fixed inset-0 z-40 flex items-end justify-center pointer-events-none"
+          style={{ paddingBottom: '1rem' }}
+        >
+          <div
+            className="pointer-events-auto bg-white border border-purple-200 rounded-xl shadow-2xl p-5 w-full max-w-lg mx-4"
+            style={{ maxHeight: '60vh', overflowY: 'auto' }}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <Brain size={15} className="text-purple-500" />
+                <span className="font-semibold text-sm text-gray-800">AI Event Explanation</span>
+                {explainResult.events_count != null && (
+                  <span className="badge bg-purple-100 text-purple-700 text-[10px]">
+                    {explainResult.events_count} event{explainResult.events_count !== 1 ? 's' : ''}
+                  </span>
+                )}
+                {explainResult.model_used && (
+                  <span className="text-[10px] text-gray-400 ml-auto">{explainResult.model_used}</span>
+                )}
+              </div>
+              <button
+                onClick={() => { setExplainResult(null); setCheckedFoIds(new Set()) }}
+                className="text-gray-400 hover:text-gray-600 ml-2"
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            {explainResult.error ? (
+              <p className="text-sm text-red-600">{explainResult.error}</p>
+            ) : (
+              <p className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">
+                {explainResult.explanation}
+              </p>
+            )}
+          </div>
+        </div>
       )}
 
       {/* Keyboard shortcuts overlay */}
@@ -678,7 +923,7 @@ function FilterButtons({ field, value, onIn, onOut }) {
 }
 
 /* ── Event row ── */
-function EventRow({ event, index, onSelect, selected, keyboardSelected, onFilterIn, onFilterOut, rowRef, caseId, onFlagged, visibleCols }) {
+function EventRow({ event, index, onSelect, selected, keyboardSelected, onFilterIn, onFilterOut, rowRef, caseId, onFlagged, visibleCols, checked, onCheck }) {
   const vis  = col => visibleCols.includes(col)
   const art  = getArtifact(event)
   let ts = '—'
@@ -722,7 +967,17 @@ function EventRow({ event, index, onSelect, selected, keyboardSelected, onFilter
           : 'border-gray-100 hover:bg-gray-50'
       }`}
     >
-      {/* Flag — always first, always visible */}
+      {/* Checkbox for AI explain */}
+      <td className="px-2 py-2 w-6 text-center">
+        <input
+          type="checkbox"
+          checked={!!checked}
+          onChange={e => { e.stopPropagation(); onCheck() }}
+          onClick={e => e.stopPropagation()}
+          className="rounded border-gray-300 accent-brand-accent cursor-pointer"
+        />
+      </td>
+      {/* Flag — always visible */}
       <td className="px-2 py-2 w-6 text-center">
         <button
           onClick={handleFlag}

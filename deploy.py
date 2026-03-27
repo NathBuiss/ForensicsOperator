@@ -29,7 +29,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 K8S  = ROOT / "k8s"
-NS   = "forensics-operator"
+NS   = "forensics-operator"   # overwritten by load_config()
 
 APPLY_ORDER = [
     K8S / "namespace.yaml",
@@ -95,7 +95,11 @@ def load_config():
         if isinstance(d, dict):
             return {k: clean(v) for k, v in d.items() if not k.startswith("_")}
         return d
-    return clean(raw)
+    cfg = clean(raw)
+    # Expose namespace globally so all helpers can reference it
+    global NS
+    NS = cfg.get("namespace", "forensics-operator")
+    return cfg
 
 
 def image_name(svc, cfg):
@@ -107,7 +111,9 @@ def image_name(svc, cfg):
 def build_substitutions(cfg, pull_policy):
     es_heap = cfg["resources"]["elasticsearch_heap_mb"]
     auth    = cfg.get("auth", {})
+    res     = cfg["resources"]
     return {
+        "__FO_NAMESPACE__":        NS,
         "__FO_API_IMAGE__":        image_name("api",       cfg),
         "__FO_PROCESSOR_IMAGE__":  image_name("processor", cfg),
         "__FO_FRONTEND_IMAGE__":   image_name("frontend",  cfg),
@@ -115,6 +121,8 @@ def build_substitutions(cfg, pull_policy):
         "__FO_MINIO_ACCESS_KEY__": cfg["secrets"]["minio_access_key"],
         "__FO_MINIO_SECRET_KEY__": cfg["secrets"]["minio_secret_key"],
         "__FO_JWT_SECRET__":       cfg["secrets"].get("jwt_secret", "CHANGE_ME_IN_PRODUCTION"),
+        "__FO_ADMIN_USERNAME__":   cfg["secrets"].get("admin_username", "admin"),
+        "__FO_ADMIN_PASSWORD__":   cfg["secrets"].get("admin_password", "TracexAdmin1!"),
         "__FO_AUTH_ENABLED__":     str(auth.get("auth_enabled", True)).lower(),
         "__FO_JWT_EXPIRE_HOURS__": str(auth.get("jwt_expire_hours", 8)),
         "__FO_ES_HEAP__":          f"{es_heap}m",
@@ -122,6 +130,26 @@ def build_substitutions(cfg, pull_policy):
         "__FO_MINIO_STORAGE__":    f"{cfg['resources']['minio_storage_gi']}Gi",
         "__FO_REDIS_STORAGE__":    f"{cfg['resources']['redis_storage_gi']}Gi",
         "__FO_HOSTNAME__":         cfg["access"]["hostname"],
+        # API resources
+        "__FO_API_MEMORY_REQUEST__":  res.get("api_memory_request", "512Mi"),
+        "__FO_API_MEMORY_LIMIT__":    res.get("api_memory_limit", "2Gi"),
+        "__FO_API_CPU_REQUEST__":     res.get("api_cpu_request", "100m"),
+        "__FO_API_CPU_LIMIT__":       res.get("api_cpu_limit", "1000m"),
+        # Processor resources
+        "__FO_PROCESSOR_MEMORY_REQUEST__":  res.get("processor_memory_request", "1Gi"),
+        "__FO_PROCESSOR_MEMORY_LIMIT__":    res.get("processor_memory_limit", "8Gi"),
+        "__FO_PROCESSOR_CPU_REQUEST__":     res.get("processor_cpu_request", "500m"),
+        "__FO_PROCESSOR_CPU_LIMIT__":       res.get("processor_cpu_limit", "4000m"),
+        # MinIO resources
+        "__FO_MINIO_MEMORY_REQUEST__":  res.get("minio_memory_request", "1Gi"),
+        "__FO_MINIO_MEMORY_LIMIT__":    res.get("minio_memory_limit", "4Gi"),
+        "__FO_MINIO_CPU_REQUEST__":     res.get("minio_cpu_request", "250m"),
+        "__FO_MINIO_CPU_LIMIT__":       res.get("minio_cpu_limit", "1000m"),
+        # Frontend resources
+        "__FO_FRONTEND_MEMORY_REQUEST__":  res.get("frontend_memory_request", "128Mi"),
+        "__FO_FRONTEND_MEMORY_LIMIT__":    res.get("frontend_memory_limit", "512Mi"),
+        "__FO_FRONTEND_CPU_REQUEST__":     res.get("frontend_cpu_request", "50m"),
+        "__FO_FRONTEND_CPU_LIMIT__":       res.get("frontend_cpu_limit", "200m"),
     }
 
 
@@ -235,7 +263,6 @@ def create_k3d_cluster(cfg):
             "k3d", "cluster", "create", name,
             "--port", f"{port}:{port}@loadbalancer",
             "--port", "443:443@loadbalancer",
-            "--k3s-arg", "--disable=traefik@server:0",
             "--agents", "0",
         ])
         ok(f"Cluster '{name}' created")
@@ -378,37 +405,14 @@ def _load_k3s(cfg):
         pass
 
 
-# ── Traefik Ingress ───────────────────────────────────────────────────────────
-
-def ensure_traefik_ingress():
-    """
-    k3s ships with Traefik pre-installed in kube-system.
-    For other clusters (minikube, kind, k3d) we check that the traefik
-    IngressClass exists — if not, we print a helpful hint and continue
-    (the user may have installed Traefik themselves or use a different class).
-    """
-    step("Checking Traefik Ingress Controller")
-    r = run(["kubectl", "get", "ingressclass", "traefik"], capture=True, check=False)
-    if r.returncode == 0:
-        ok("Traefik IngressClass found")
-        return
-    warn(
-        "traefik IngressClass not found.\n\n"
-        "  k3s includes Traefik automatically.\n"
-        "  For other clusters, install Traefik:\n"
-        "    helm repo add traefik https://traefik.github.io/charts\n"
-        "    helm install traefik traefik/traefik -n kube-system\n\n"
-        "  Continuing anyway — apply will still work if Traefik is present."
-    )
-
-
 # ── TLS certificate ───────────────────────────────────────────────────────────
 
 def _ensure_namespace():
-    """Apply namespace.yaml so the namespace exists before we create Secrets."""
+    """Create the target namespace if it doesn't already exist."""
+    manifest = f"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {NS}\n"
     subprocess.run(
-        ["kubectl", "apply", "-f", str(K8S / "namespace.yaml")],
-        capture_output=True, text=True,
+        ["kubectl", "apply", "-f", "-"],
+        input=manifest, capture_output=True, text=True,
     )
 
 
@@ -488,13 +492,52 @@ subjectAltName     = DNS:{hostname}
     ok(f"TLS secret '{secret_name}' created (self-signed, valid 10 years)")
 
 
+# ── Stale resource cleanup ────────────────────────────────────────────────────
+
+# Resources that have been removed from the manifests but may still exist in an
+# existing cluster.  `kubectl apply` never deletes objects it no longer manages,
+# so we remove them explicitly here — once they're gone the step is a no-op.
+_STALE_RESOURCES = [
+    # upload-buffering (Buffer middleware) — removed because Traefik's Buffer
+    # middleware reads the *entire* request body before forwarding, triggering
+    # an i/o timeout on large uploads.  The API already streams uploads natively
+    # so this middleware is both redundant and harmful.
+    ("middleware", "upload-buffering"),
+]
+
+
+def cleanup_stale_resources():
+    step("Removing legacy cluster resources")
+    any_removed = False
+    for kind, name in _STALE_RESOURCES:
+        r = run(
+            ["kubectl", "delete", kind, name, "-n", NS, "--ignore-not-found"],
+            capture=True, check=False,
+        )
+        out = (r.stdout or "").strip()
+        if "deleted" in out:
+            ok(f"Removed legacy {kind}/{name} from {NS}")
+            any_removed = True
+    if not any_removed:
+        ok("No legacy resources found — nothing to remove")
+
+
 # ── Manifest application ──────────────────────────────────────────────────────
 
-def apply_all_manifests(cfg, pull_policy):
+def _targets_kube_system(path):
+    """Return True if a manifest file contains 'namespace: kube-system'."""
+    try:
+        return "namespace: kube-system" in path.read_text()
+    except OSError:
+        return False
+
+
+def apply_all_manifests(cfg, pull_policy, setup_traefik=False):
     step("Applying Kubernetes manifests")
     subs = build_substitutions(cfg, pull_policy)
 
     def apply_one(path):
+        import re
         content = path.read_text()
         for k, v in subs.items():
             content = content.replace(k, str(v))
@@ -503,17 +546,46 @@ def apply_all_manifests(cfg, pull_policy):
             input=content, capture_output=True, text=True,
         )
         if r.returncode != 0:
-            print(r.stderr)
+            stderr = r.stderr or ""
+            # StatefulSet immutable-field error: delete the StatefulSet (PVCs are
+            # retained by Kubernetes) and re-apply so the new spec can be created.
+            if "StatefulSet" in stderr and "Forbidden" in stderr and "spec" in stderr:
+                name_match = re.search(r"^\s*name:\s+(\S+)", content, re.MULTILINE)
+                ns_match   = re.search(r"^\s*namespace:\s+(\S+)", content, re.MULTILINE)
+                if name_match and ns_match:
+                    sts_name = name_match.group(1)
+                    sts_ns   = ns_match.group(1)
+                    warn(f"StatefulSet '{sts_name}' has immutable field changes — "
+                         f"deleting and recreating (PVCs/data are preserved)")
+                    run(["kubectl", "delete", "statefulset", sts_name,
+                         "-n", sts_ns, "--ignore-not-found"], capture=True)
+                    r2 = subprocess.run(
+                        ["kubectl", "apply", "-f", "-"],
+                        input=content, capture_output=True, text=True,
+                    )
+                    if r2.returncode != 0:
+                        print(r2.stderr)
+                        die(f"kubectl apply failed for {path.name} after delete-and-recreate")
+                    for line in r2.stdout.strip().splitlines():
+                        info(line)
+                    return
+            print(stderr)
             die(f"kubectl apply failed for {path.name}")
         for line in r.stdout.strip().splitlines():
             info(line)
 
     for item in APPLY_ORDER:
         if item.is_file() and item.suffix == ".yaml":
+            if _targets_kube_system(item) and not setup_traefik:
+                warn(f"Skipping {item.name} — targets kube-system (use --setup-traefik to apply)")
+                continue
             info(str(item.relative_to(ROOT)))
             apply_one(item)
         elif item.is_dir():
             for f in sorted(item.glob("*.yaml")):
+                if _targets_kube_system(f) and not setup_traefik:
+                    warn(f"Skipping {f.name} — targets kube-system (use --setup-traefik to apply)")
+                    continue
                 info(str(f.relative_to(ROOT)))
                 apply_one(f)
 
@@ -554,6 +626,74 @@ def rollout_restart_apps():
             warn(f"Rollout timeout for {svc} — pods may still be starting")
 
 
+def clear_stale_celery_tasks():
+    """
+    Recover any tasks stuck in the 'celery' default queue.
+
+    Old dispatch code passed exchange=Exchange(...) to a minimal Celery app,
+    causing Kombu to fall back to the 'celery' queue instead of 'ingest' or
+    'modules'.  Workers never consume 'celery', so those tasks would be stuck
+    forever.  This step moves them to 'default', which workers DO listen on.
+    """
+    step("Recovering tasks stuck in 'celery' queue → moving to 'default'")
+
+    # Check how many tasks are stuck
+    r_len = run(
+        ["kubectl", "exec", "-n", NS, "deploy/redis", "--",
+         "redis-cli", "LLEN", "celery"],
+        capture=True, check=False,
+    )
+    if r_len.returncode != 0:
+        warn("Could not reach Redis — skipping stuck-task recovery")
+        return
+
+    count = int(r_len.stdout.strip() or "0")
+    if count == 0:
+        ok("No stuck tasks in 'celery' queue")
+        return
+
+    warn(f"Found {count} stuck task(s) in 'celery' queue — moving to 'default'")
+    # Lua script: atomically move all items from 'celery' to 'default'
+    lua = "local n=redis.call('llen','celery'); for i=1,n do redis.call('rpoplpush','celery','default') end; return n"
+    r_move = run(
+        ["kubectl", "exec", "-n", NS, "deploy/redis", "--",
+         "redis-cli", "EVAL", lua, "0"],
+        capture=True, check=False,
+    )
+    if r_move.returncode == 0:
+        ok(f"Moved {count} stuck task(s) from 'celery' → 'default' for reprocessing")
+    else:
+        warn("Could not move stuck tasks — they may need manual recovery")
+
+
+def verify_celery_queues():
+    """
+    Verify that Celery workers are consuming from the correct queues.
+    """
+    step("Verifying Celery queue configuration")
+    
+    # Check queue lengths
+    for queue in ["ingest", "modules", "celery"]:
+        r = run(
+            ["kubectl", "exec", "-n", NS, "deploy/redis", "--",
+             "redis-cli", "llen", queue],
+            capture=True, check=False,
+        )
+        if r.returncode == 0:
+            count = r.stdout.strip()
+            info(f"Queue '{queue}': {count} tasks")
+    
+    # Check worker logs for queue consumption
+    r = run(
+        ["kubectl", "logs", "-n", NS, "-l", "app=processor", "--tail=20"],
+        capture=True, check=False,
+    )
+    if r.returncode == 0 and "ready" in r.stdout.lower():
+        ok("Celery workers are running")
+    else:
+        warn("Celery workers may not be ready yet")
+
+
 def wait_for_elasticsearch():
     step("Waiting for Elasticsearch (up to 3 minutes)")
     for i in range(36):
@@ -586,30 +726,16 @@ def apply_es_template():
     ok("Template applied") if r.returncode == 0 else warn("Could not apply template yet — retry with --no-build")
 
 
-def get_ingress_ip():
-    # Traefik's LoadBalancer service in k3s lives in kube-system
-    r = run([
-        "kubectl", "get", "svc", "traefik",
-        "-n", "kube-system",
-        "-o", "jsonpath={.status.loadBalancer.ingress[0].ip}",
-    ], capture=True, check=False)
-    ip = r.stdout.strip()
-    if ip:
-        return ip
-    # Fallback: try the external IP field (some distros populate this instead)
-    r2 = run([
-        "kubectl", "get", "svc", "traefik",
-        "-n", "kube-system",
-        "-o", "jsonpath={.spec.externalIPs[0]}",
-    ], capture=True, check=False)
-    return r2.stdout.strip() or "127.0.0.1"
+def get_ingress_ip(cfg):
+    # Return hostname from config - user manages their own ingress
+    return cfg["access"]["hostname"]
 
 
 def print_summary(cfg):
     hostname   = cfg["access"]["hostname"]
     https_port = cfg["access"].get("https_port", 443)
     port_str   = f":{https_port}" if https_port != 443 else ""
-    ip         = get_ingress_ip()
+    ip         = get_ingress_ip(cfg)
     auto_cert  = not (cfg["access"].get("tls_cert") and cfg["access"].get("tls_key"))
 
     print()
@@ -679,10 +805,14 @@ def cmd_destroy(cfg):
 
 def main():
     p = argparse.ArgumentParser(description="TraceX — universal deploy")
-    p.add_argument("--no-build", action="store_true", help="Skip Docker image build")
-    p.add_argument("--status",   action="store_true", help="Show pod/service status")
-    p.add_argument("--destroy",  action="store_true", help="Delete namespace / cluster")
-    p.add_argument("--logs",     metavar="SERVICE",   help="Stream logs (api/processor/frontend)")
+    p.add_argument("--no-build",      action="store_true", help="Skip Docker image build")
+    p.add_argument("--status",        action="store_true", help="Show pod/service status")
+    p.add_argument("--destroy",       action="store_true", help="Delete namespace / cluster")
+    p.add_argument("--logs",          metavar="SERVICE",   help="Stream logs (api/processor/frontend)")
+    p.add_argument("--setup-traefik", action="store_true",
+                   help="Also apply kube-system manifests (traefik-config.yaml). "
+                        "Use only on first deploy or when intentionally reconfiguring Traefik. "
+                        "WARNING: this restarts Traefik and will break Tailscale operator DNS until re-applied.")
     args = p.parse_args()
 
     cfg = load_config()
@@ -697,13 +827,22 @@ def main():
     info(f"Hostname : {cfg['access']['hostname']}")
     info(f"Registry : {cfg['images']['registry'] or '(none — direct load)'}")
     info(f"ES heap  : {cfg['resources']['elasticsearch_heap_mb']} MB")
+    
+    # ⚠️  CRITICAL: This script ONLY manages the forensics-operator namespace
+    info("\n  ⚠️  This script will NOT touch:")
+    info("     - analyse namespace (CoreDNS, Bloodhound, etc.)")
+    info("     - kube-system namespace (Traefik, k3s system)")
+    info("     - tailscale namespace")
+    info("     - Any other namespace")
+    info(f"     Only {NS} namespace will be modified.\n")
 
-    # 1. Verify Docker is up (needed for build/load)
-    if not cmd_exists("docker"):
-        die("Docker not found. Install Docker Desktop or the Docker CLI.")
-    if run(["docker", "info"], capture=True, check=False).returncode != 0:
-        die("Docker daemon is not running.")
-    ok("Docker is running")
+    # 1. Verify Docker is up (needed for build/load — not required for --no-build)
+    if not args.no_build:
+        if not cmd_exists("docker"):
+            die("Docker not found. Install Docker Desktop or the Docker CLI.")
+        if run(["docker", "info"], capture=True, check=False).returncode != 0:
+            die("Docker daemon is not running.")
+        ok("Docker is running")
 
     # 2. Verify / switch kubectl context
     setup_cluster(cfg)
@@ -712,29 +851,40 @@ def main():
     if not args.no_build:
         build_images(cfg)
 
-    # 4. Load images into the cluster (auto-detects engine)
-    pull_policy = load_images(cfg)
+    # 4. Load images into the cluster (auto-detects engine).
+    #    Skipped with --no-build: manifests are re-applied as-is, images already present.
+    if not args.no_build:
+        pull_policy = load_images(cfg)
+    else:
+        pull_policy = "IfNotPresent" if cfg["images"]["registry"] else "Never"
+        ok("Skipping image load (--no-build)")
 
-    # 5. Ensure Traefik ingress controller is present (k3s includes it by default)
-    ensure_traefik_ingress()
-
-    # 6. Ensure namespace exists, then create/verify TLS secret
+    # 5. Ensure namespace exists, then create/verify TLS secret
     _ensure_namespace()
     setup_tls_secret(cfg)
 
-    # 7. Apply all manifests with substituted values
-    apply_all_manifests(cfg, pull_policy)
+    # 7. Remove any cluster objects that were deleted from the manifests
+    cleanup_stale_resources()
 
-    # 8. Force-restart app pods so they pick up the newly loaded images.
+    # 8. Apply all manifests with substituted values
+    apply_all_manifests(cfg, pull_policy, setup_traefik=args.setup_traefik)
+
+    # 9. Force-restart app pods so they pick up the newly loaded images.
     #    (k3s loads images directly into containerd — kubectl apply alone does
     #     NOT trigger a rollout when the image tag is unchanged.)
     rollout_restart_apps()
 
-    # 9. Wait for Elasticsearch, apply index template
+    # 10. Clear any stale Celery tasks from the default queue
+    clear_stale_celery_tasks()
+
+    # 11. Verify Celery workers are consuming from correct queues
+    verify_celery_queues()
+
+    # 12. Wait for Elasticsearch, apply index template
     wait_for_elasticsearch()
     apply_es_template()
 
-    # 8. Done
+    # 13. Done
     print_summary(cfg)
 
 

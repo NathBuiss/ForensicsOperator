@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: elasticsearch
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
 spec:
   serviceName: elasticsearch-service
   replicas: 1
@@ -32,7 +32,7 @@ spec:
             - name: ES_JAVA_OPTS
               value: "-Xms__FO_ES_HEAP__ -Xmx__FO_ES_HEAP__"
             - name: cluster.name
-              value: forensics-operator
+              value: __FO_NAMESPACE__
           ports:
             - containerPort: 9200
             - containerPort: 9300

@@ -14,6 +14,10 @@ export default defineConfig({
         // Falls back to http://localhost:8000 for plain local dev (npm run dev).
         target: process.env.API_TARGET || 'http://localhost:8000',
         changeOrigin: true,
+        // Generous proxy timeout so slow endpoints (e.g. metrics) never cause
+        // a "Failed to fetch" network error on the frontend side.
+        proxyTimeout: 30000,
+        timeout: 30000,
       },
     },
   },

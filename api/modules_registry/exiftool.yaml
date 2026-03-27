@@ -1,0 +1,29 @@
+id: exiftool
+name: ExifTool
+description: >-
+  Extract metadata from documents, images, executables and office files.
+  Reveals author, timestamps, GPS coordinates, camera model, embedded macros,
+  and document revision history. Supports 500+ file formats.
+input_extensions:
+  - .pdf
+  - .docx
+  - .doc
+  - .xlsx
+  - .xls
+  - .pptx
+  - .ppt
+  - .jpg
+  - .jpeg
+  - .png
+  - .tiff
+  - .tif
+  - .gif
+  - .bmp
+  - .exe
+  - .dll
+  - .sys
+  - .so
+input_filenames: []
+available: true
+category: Metadata Extraction
+tags: [exif, metadata, documents, images, executables]

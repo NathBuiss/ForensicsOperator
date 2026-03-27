@@ -47,6 +47,18 @@ async def get_current_user(
         user = get_user(username)
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
+        # Defensive: backfill role for pre-RBAC accounts still in Redis.
+        # The startup migration normally handles this; this guard covers edge cases.
+        if not user.get("role"):
+            import redis as _redis_lib
+            from config import settings as _settings
+            from auth.service import _USER_KEY, user_count
+            try:
+                r = _redis_lib.Redis.from_url(_settings.REDIS_URL, decode_responses=True)
+                r.hset(_USER_KEY.format(username=username), "role", "admin")
+                user["role"] = "admin"
+            except Exception:
+                user["role"] = "admin"  # best-effort in memory
         return user
     except JWTError:
         raise HTTPException(
@@ -57,6 +69,17 @@ async def get_current_user(
 
 
 async def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    """Only allow users with the 'admin' role."""
     if current_user.get("role") != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return current_user
+
+
+async def require_analyst_or_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    """Allow users with either the 'analyst' or 'admin' role."""
+    if current_user.get("role") not in ("admin", "analyst"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Analyst or admin access required",
+        )
     return current_user

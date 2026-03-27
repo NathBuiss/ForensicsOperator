@@ -1,18 +1,28 @@
 import { useState, useEffect } from 'react'
-import { AlertTriangle, Plus, Trash2, Play, CheckCircle, Loader2, ChevronDown, ChevronUp } from 'lucide-react'
+import { AlertTriangle, Plus, Trash2, Play, CheckCircle, Loader2,
+         ChevronDown, ChevronUp, Sparkles, Brain } from 'lucide-react'
 import { api } from '../api/client'
 
 export default function AlertRules({ caseId }) {
-  const [rules, setRules]         = useState([])
-  const [loading, setLoading]     = useState(true)
-  const [checking, setChecking]   = useState(false)
-  const [matches, setMatches]     = useState(null)
-  const [showForm, setShowForm]   = useState(false)
-  const [form, setForm]           = useState({ name:'', description:'', artifact_type:'', query:'', threshold:1 })
+  const [rules, setRules]             = useState([])
+  const [loading, setLoading]         = useState(true)
+  const [checking, setChecking]       = useState(false)
+  const [matches, setMatches]         = useState(null)
+  const [showForm, setShowForm]       = useState(false)
+  const [form, setForm]               = useState({ name:'', description:'', artifact_type:'', query:'', threshold:1 })
   const [expandedMatch, setExpandedMatch] = useState(null)
+  const [matchAnalysis, setMatchAnalysis] = useState({}) // {i: analysis}
+  const [analyzingMatch, setAnalyzingMatch] = useState(null) // match index being analyzed
+  // AI rule generation
+  const [aiDesc, setAiDesc]           = useState('')
+  const [generating, setGenerating]   = useState(false)
+  const [showAiForm, setShowAiForm]   = useState(false)
 
   useEffect(() => {
-    api.alertRules.list(caseId).then(r => setRules(r.rules || [])).catch(() => {}).finally(() => setLoading(false))
+    api.alertRules.list(caseId)
+      .then(r => setRules(r.rules || []))
+      .catch(() => {})
+      .finally(() => setLoading(false))
   }, [caseId])
 
   async function createRule(e) {
@@ -30,12 +40,56 @@ export default function AlertRules({ caseId }) {
   }
 
   async function checkRules() {
-    setChecking(true); setMatches(null)
+    setChecking(true); setMatches(null); setMatchAnalysis({})
     try {
       const r = await api.alertRules.check(caseId)
       setMatches(r)
     } catch (e) { alert('Check failed: ' + e.message) }
     finally { setChecking(false) }
+  }
+
+  // ── AI rule generation ───────────────────────────────────────────────────
+
+  async function generateRule(e) {
+    e.preventDefault()
+    if (!aiDesc.trim()) return
+    setGenerating(true)
+    try {
+      const r = await api.llm.generateRule({ description: aiDesc })
+      setForm({
+        name:          r.name || aiDesc.slice(0, 60),
+        description:   r.description || '',
+        artifact_type: r.artifact_type || '',
+        query:         r.query || '',
+        threshold:     r.threshold || 1,
+      })
+      setShowAiForm(false)
+      setShowForm(true)
+      setAiDesc('')
+    } catch (err) {
+      alert('AI generation failed: ' + err.message)
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  // ── AI match analysis ────────────────────────────────────────────────────
+
+  async function analyzeMatch(i, match) {
+    setAnalyzingMatch(i)
+    try {
+      const r = await api.llm.analyzeAlertRule({
+        rule_name:     match.rule.name,
+        rule_query:    match.rule.query,
+        match_count:   match.match_count,
+        sample_events: match.sample_events,
+      })
+      setMatchAnalysis(prev => ({ ...prev, [i]: r.analysis }))
+    } catch (err) {
+      alert('AI analysis failed: ' + err.message)
+    } finally {
+      setAnalyzingMatch(null)
+    }
   }
 
   return (
@@ -48,6 +102,9 @@ export default function AlertRules({ caseId }) {
           <p className="text-xs text-gray-500 mt-1">Define suspicious patterns and check them on demand</p>
         </div>
         <div className="flex gap-2">
+          <button onClick={() => setShowAiForm(v => !v)} className="btn-ghost text-xs">
+            <Sparkles size={13} className="text-purple-400" /> AI Generate
+          </button>
           <button onClick={() => setShowForm(v => !v)} className="btn-ghost text-xs">
             <Plus size={13} /> New Rule
           </button>
@@ -57,7 +114,31 @@ export default function AlertRules({ caseId }) {
         </div>
       </div>
 
-      {/* Create form */}
+      {/* AI generate form */}
+      {showAiForm && (
+        <form onSubmit={generateRule} className="card p-4 mb-4 space-y-3 border border-purple-900/40 bg-purple-950/10">
+          <p className="text-xs font-semibold text-purple-300 flex items-center gap-1.5">
+            <Sparkles size={12} /> AI Rule Generation
+          </p>
+          <p className="text-[10px] text-gray-500">Describe what you want to detect in plain language. The AI will generate an Elasticsearch query and prefill the rule form.</p>
+          <div className="flex gap-2">
+            <input
+              autoFocus
+              value={aiDesc}
+              onChange={e => setAiDesc(e.target.value)}
+              placeholder="e.g. detect failed RDP logins followed by a successful one (pass-the-hash)"
+              className="input flex-1 text-xs"
+              required
+            />
+            <button type="submit" disabled={generating || !aiDesc.trim()} className="btn-primary text-xs whitespace-nowrap">
+              {generating ? <Loader2 size={12} className="animate-spin" /> : <><Sparkles size={12} /> Generate</>}
+            </button>
+            <button type="button" onClick={() => setShowAiForm(false)} className="btn-ghost text-xs">Cancel</button>
+          </div>
+        </form>
+      )}
+
+      {/* Manual create form */}
       {showForm && (
         <form onSubmit={createRule} className="card p-4 mb-4 space-y-3">
           <p className="text-xs font-semibold text-gray-300">New Alert Rule</p>
@@ -126,14 +207,63 @@ export default function AlertRules({ caseId }) {
                 </div>
               </button>
               {expandedMatch === i && (
-                <div className="px-3 py-2 space-y-1">
-                  {m.sample_events.map((ev, j) => (
-                    <div key={j} className="text-[10px] text-gray-400 font-mono truncate">
-                      {ev.timestamp?.slice(0,19).replace('T',' ')} — {ev.message}
+                <div className="px-3 py-2 space-y-2">
+                  {/* Sample events */}
+                  <div className="space-y-1">
+                    {m.sample_events.map((ev, j) => (
+                      <div key={j} className="text-[10px] text-gray-400 font-mono truncate">
+                        {ev.timestamp?.slice(0,19).replace('T',' ')} — {ev.message}
+                      </div>
+                    ))}
+                    {m.match_count > 3 && (
+                      <p className="text-[10px] text-gray-600 italic">…and {m.match_count - 3} more</p>
+                    )}
+                  </div>
+
+                  {/* AI analysis */}
+                  {!matchAnalysis[i] && (
+                    <button
+                      onClick={() => analyzeMatch(i, m)}
+                      disabled={analyzingMatch === i}
+                      className="btn-ghost text-[10px] text-purple-400 hover:text-purple-300 flex items-center gap-1 mt-1"
+                    >
+                      {analyzingMatch === i
+                        ? <><Loader2 size={10} className="animate-spin" /> Analyzing…</>
+                        : <><Brain size={10} /> AI Analysis</>}
+                    </button>
+                  )}
+                  {matchAnalysis[i] && (
+                    <div className="mt-2 p-2 rounded bg-purple-950/20 border border-purple-900/40 space-y-1.5">
+                      <p className="text-[10px] font-semibold text-purple-300 flex items-center gap-1">
+                        <Brain size={10} /> AI Forensic Analysis
+                        <span className="ml-auto text-gray-600 font-normal">{matchAnalysis[i].model_used}</span>
+                      </p>
+                      {matchAnalysis[i].summary && (
+                        <p className="text-[10px] text-gray-300">{matchAnalysis[i].summary}</p>
+                      )}
+                      {matchAnalysis[i].severity && (
+                        <span className={`badge text-[9px] ${
+                          matchAnalysis[i].severity === 'critical' ? 'bg-red-900/40 text-red-300 border-red-800/40' :
+                          matchAnalysis[i].severity === 'high'     ? 'bg-orange-900/40 text-orange-300 border-orange-800/40' :
+                          'bg-yellow-900/40 text-yellow-300 border-yellow-800/40'
+                        }`}>{matchAnalysis[i].severity}</span>
+                      )}
+                      {(matchAnalysis[i].recommendations || []).length > 0 && (
+                        <div>
+                          <p className="text-[9px] text-gray-500 font-semibold uppercase tracking-wider mb-0.5">Actions</p>
+                          {matchAnalysis[i].recommendations.slice(0, 3).map((r, k) => (
+                            <p key={k} className="text-[10px] text-gray-400">• {r}</p>
+                          ))}
+                        </div>
+                      )}
+                      {(matchAnalysis[i].mitre_techniques || []).length > 0 && (
+                        <div className="flex flex-wrap gap-1 pt-0.5">
+                          {matchAnalysis[i].mitre_techniques.slice(0, 5).map((t, k) => (
+                            <span key={k} className="badge bg-indigo-900/30 text-indigo-300 border-indigo-800/40 text-[9px]">{t}</span>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                  ))}
-                  {m.match_count > 3 && (
-                    <p className="text-[10px] text-gray-600 italic">…and {m.match_count - 3} more</p>
                   )}
                 </div>
               )}

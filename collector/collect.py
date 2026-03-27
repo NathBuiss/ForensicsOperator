@@ -54,22 +54,30 @@ BANNER = f"""
 
 # Default collection sets — all enabled when nothing is specified
 DEFAULT_WINDOWS = {"evtx", "registry", "prefetch", "lnk", "browser", "tasks", "triage"}
-DEFAULT_LINUX   = {"logs", "history", "config", "cron", "ssh", "triage"}
+DEFAULT_LINUX   = {"logs", "history", "config", "cron", "ssh", "triage", "network", "suricata", "zeek"}
+DEFAULT_MACOS   = {"logs", "history", "config", "launchagents", "browser", "triage", "network"}
+# "memory" is intentionally NOT in the defaults — dumps are multi-GB.
+# Add explicitly with --collect memory or --collect memory,evtx,...
 
 # Human-readable names (used in the header printout)
 ARTIFACT_LABELS = {
-    "evtx":     "Event Logs (EVTX)",
-    "registry": "Registry Hives",
-    "prefetch": "Prefetch Files",
-    "lnk":      "LNK / Recent Items",
-    "browser":  "Browser Artifacts",
-    "tasks":    "Scheduled Tasks",
-    "triage":   "System Triage (live)",
-    "logs":     "System Logs",
-    "history":  "Shell Histories",
-    "config":   "System Configuration",
-    "cron":     "Cron Jobs",
-    "ssh":      "SSH Artifacts",
+    "evtx":         "Event Logs (EVTX)",
+    "registry":     "Registry Hives",
+    "prefetch":     "Prefetch Files",
+    "lnk":          "LNK / Recent Items",
+    "browser":      "Browser Artifacts",
+    "tasks":        "Scheduled Tasks",
+    "triage":       "System Triage (live)",
+    "logs":         "System Logs",
+    "history":      "Shell Histories",
+    "config":       "System Configuration",
+    "cron":         "Cron Jobs",
+    "ssh":          "SSH Artifacts",
+    "launchagents": "Launch Agents / Daemons",
+    "network":      "PCAP / Network Captures",
+    "suricata":     "Suricata IDS Logs (EVE JSON)",
+    "zeek":         "Zeek / Bro Network Logs",
+    "memory":       "Physical Memory Dump (live acquisition)",
 }
 
 
@@ -182,6 +190,7 @@ class WindowsCollector(Collector):
         if self._want("browser"):  self._browser()
         if self._want("tasks"):    self._scheduled_tasks()
         if self._want("triage"):   self._system_triage()
+        if self._want("memory"):   self._memory()
 
     def _evtx(self) -> None:
         print("  [*] Event Logs (EVTX)")
@@ -275,13 +284,31 @@ class WindowsCollector(Collector):
         print("  [*] Browser Artifacts")
         users_dir = Path(os.environ.get("SystemDrive", "C:")) / "Users"
         PROFILES = [
+            # Chrome
             ("chrome", r"AppData\Local\Google\Chrome\User Data\Default\History"),
             ("chrome", r"AppData\Local\Google\Chrome\User Data\Default\Web Data"),
             ("chrome", r"AppData\Local\Google\Chrome\User Data\Default\Cookies"),
             ("chrome", r"AppData\Local\Google\Chrome\User Data\Default\Login Data"),
+            ("chrome", r"AppData\Local\Google\Chrome\User Data\Default\Bookmarks"),
+            # Edge
             ("edge",   r"AppData\Local\Microsoft\Edge\User Data\Default\History"),
             ("edge",   r"AppData\Local\Microsoft\Edge\User Data\Default\Cookies"),
             ("edge",   r"AppData\Local\Microsoft\Edge\User Data\Default\Web Data"),
+            ("edge",   r"AppData\Local\Microsoft\Edge\User Data\Default\Login Data"),
+            # Brave
+            ("brave",  r"AppData\Local\BraveSoftware\Brave-Browser\User Data\Default\History"),
+            ("brave",  r"AppData\Local\BraveSoftware\Brave-Browser\User Data\Default\Cookies"),
+            ("brave",  r"AppData\Local\BraveSoftware\Brave-Browser\User Data\Default\Web Data"),
+            ("brave",  r"AppData\Local\BraveSoftware\Brave-Browser\User Data\Default\Login Data"),
+            # Opera
+            ("opera",  r"AppData\Roaming\Opera Software\Opera Stable\History"),
+            ("opera",  r"AppData\Roaming\Opera Software\Opera Stable\Cookies"),
+            ("opera",  r"AppData\Roaming\Opera Software\Opera Stable\Web Data"),
+            ("opera",  r"AppData\Roaming\Opera Software\Opera Stable\Login Data"),
+            # Vivaldi
+            ("vivaldi", r"AppData\Local\Vivaldi\User Data\Default\History"),
+            ("vivaldi", r"AppData\Local\Vivaldi\User Data\Default\Cookies"),
+            ("vivaldi", r"AppData\Local\Vivaldi\User Data\Default\Login Data"),
         ]
         for user_dir in (sorted(users_dir.iterdir()) if users_dir.exists() else []):
             if not user_dir.is_dir():
@@ -337,6 +364,63 @@ class WindowsCollector(Collector):
             lines.append(self._run_cmd(cmd, timeout=45))
         self._write_text("system_triage.txt", "\n".join(lines), "system_triage.txt")
 
+    def _memory(self) -> None:
+        print("  [*] Physical Memory Dump (live acquisition)")
+        print("  [!] Note: Memory dumps are typically 4–64 GB — this may take a while")
+
+        dump_path = self.staging / f"memory-{HOSTNAME}-{TS_NOW}.dmp"
+
+        # Locate WinPmem — check PATH, then script directory, then CWD
+        winpmem: str | None = (
+            shutil.which("winpmem")
+            or shutil.which("winpmem_mini_x64_rc2")
+        )
+        if not winpmem:
+            script_dir = Path(sys.argv[0]).resolve().parent
+            for name in [
+                "winpmem_mini_x64_rc2.exe", "winpmem.exe",
+                "winpmem_x64.exe", "winpmem_mini_x64.exe",
+            ]:
+                for search_dir in (script_dir, Path.cwd()):
+                    candidate = search_dir / name
+                    if candidate.exists():
+                        winpmem = str(candidate)
+                        break
+                if winpmem:
+                    break
+
+        if not winpmem:
+            self._warn(
+                "winpmem not found. Download the latest release from:\n"
+                "      https://github.com/Velocidex/WinPmem/releases\n"
+                "      Then place winpmem_mini_x64_rc2.exe next to this collector and re-run."
+            )
+            return
+
+        self._log(f"Using: {winpmem}")
+        print(f"      winpmem: {winpmem}")
+        print(f"      Output : {dump_path}")
+
+        try:
+            r = subprocess.run(
+                [winpmem, str(dump_path)],
+                capture_output=True,
+                timeout=7200,   # 2 hours
+            )
+            if r.returncode == 0:
+                self._add(dump_path, f"memory/{dump_path.name}")
+                size_gb = dump_path.stat().st_size / (1024 ** 3)
+                print(f"  [+] Memory dump complete ({size_gb:.1f} GB)")
+            else:
+                err = (r.stderr or r.stdout or b"").decode(errors="replace")[:400]
+                self._warn(f"winpmem failed (code {r.returncode}) — run as Administrator?\n      {err}")
+        except subprocess.TimeoutExpired:
+            self._warn("Memory acquisition timed out (>2 hours)")
+        except FileNotFoundError:
+            self._warn(f"winpmem binary not executable: {winpmem}")
+        except Exception as exc:
+            self._warn(f"Memory acquisition error: {exc}")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Linux Collector
@@ -345,12 +429,16 @@ class WindowsCollector(Collector):
 class LinuxCollector(Collector):
 
     def collect_all(self) -> None:
-        if self._want("logs"):    self._logs()
-        if self._want("history"): self._shell_history()
-        if self._want("config"):  self._system_config()
-        if self._want("cron"):    self._cron()
-        if self._want("ssh"):     self._ssh_artifacts()
-        if self._want("triage"):  self._system_triage()
+        if self._want("logs"):     self._logs()
+        if self._want("history"):  self._shell_history()
+        if self._want("config"):   self._system_config()
+        if self._want("cron"):     self._cron()
+        if self._want("ssh"):      self._ssh_artifacts()
+        if self._want("network"):  self._network_captures()
+        if self._want("suricata"): self._suricata_logs()
+        if self._want("zeek"):     self._zeek_logs()
+        if self._want("triage"):   self._system_triage()
+        if self._want("memory"):   self._memory()
 
     def _logs(self) -> None:
         print("  [*] System Logs")
@@ -418,6 +506,96 @@ class LinuxCollector(Collector):
                     if f.is_file() and f.name not in PRIVATE:
                         self._add(f, f"ssh/{user_dir.name}/{f.name}")
 
+    def _network_captures(self) -> None:
+        """Collect PCAP/PCAPNG files from common locations (max 10 files, 500 MB each)."""
+        print("  [*] PCAP / Network Captures")
+        SEARCH_DIRS = [
+            Path("/var/log"),
+            Path("/tmp"),
+            Path("/var/capture"),
+            Path("/opt/pcap"),
+            Path("/data"),
+            Path("/captures"),
+        ]
+        MAX_SIZE = 500 * 1024 * 1024  # 500 MB per file
+        count = 0
+        for d in SEARCH_DIRS:
+            if not d.exists():
+                continue
+            for p in sorted(d.rglob("*.pcap")) + sorted(d.rglob("*.pcapng")) + sorted(d.rglob("*.cap")):
+                if count >= 10:
+                    break
+                if p.stat().st_size <= MAX_SIZE:
+                    if self._add(p, f"network/{p.name}"):
+                        count += 1
+            if count >= 10:
+                break
+        # Live capture — only if tcpdump is available and no pcaps found
+        if count == 0 and shutil.which("tcpdump"):
+            cap_path = self.staging / f"live-{HOSTNAME}-{TS_NOW}.pcap"
+            print("      Live capture: 30 s via tcpdump")
+            try:
+                subprocess.run(
+                    ["tcpdump", "-i", "any", "-w", str(cap_path), "-G", "30", "-W", "1"],
+                    timeout=35, capture_output=True,
+                )
+                self._add(cap_path, f"network/{cap_path.name}")
+            except Exception as exc:
+                self._log(f"tcpdump: {exc}")
+
+    def _suricata_logs(self) -> None:
+        """Collect Suricata EVE JSON logs."""
+        print("  [*] Suricata IDS Logs (EVE JSON)")
+        SEARCH_DIRS = [
+            Path("/var/log/suricata"),
+            Path("/var/log/suricata/"),
+            Path("/opt/suricata/log"),
+            Path("/etc/suricata"),
+        ]
+        count = 0
+        for d in SEARCH_DIRS:
+            if not d.exists():
+                continue
+            for p in sorted(d.glob("eve*.json")) + sorted(d.glob("*.json")):
+                if count >= 20:
+                    break
+                if self._add(p, f"suricata/{p.name}"):
+                    count += 1
+            for p in sorted(d.glob("*.log")):
+                if count >= 20:
+                    break
+                if self._add(p, f"suricata/{p.name}"):
+                    count += 1
+
+    def _zeek_logs(self) -> None:
+        """Collect Zeek (formerly Bro) network analysis logs."""
+        print("  [*] Zeek Network Logs")
+        SEARCH_DIRS = [
+            Path("/var/log/zeek"),
+            Path("/var/log/bro"),
+            Path("/opt/zeek/logs"),
+            Path("/opt/bro/logs"),
+            Path("/nsm/zeek/logs"),
+        ]
+        count = 0
+        for d in SEARCH_DIRS:
+            if not d.exists():
+                continue
+            # Priority logs
+            for name in ["conn.log", "dns.log", "http.log", "ssl.log", "x509.log",
+                         "files.log", "weird.log", "notice.log", "alarm.log"]:
+                p = d / name
+                if self._add(p, f"zeek/{p.name}"):
+                    count += 1
+            # Remaining logs (up to 50 total)
+            for p in sorted(d.rglob("*.log")):
+                if count >= 50:
+                    break
+                if self._add(p, f"zeek/{p.relative_to(d)}"):
+                    count += 1
+            if count > 0:
+                break  # Found logs in this dir, no need to check others
+
     def _system_triage(self) -> None:
         print("  [*] System Triage (live commands)")
         lines: list[str] = []
@@ -442,6 +620,275 @@ class LinuxCollector(Collector):
             lines.append(f"\n{'='*60}\n{header}\n{'='*60}")
             lines.append(self._run_cmd(cmd, timeout=30))
         self._write_text("system_triage.txt", "\n".join(lines), "system_triage.txt")
+
+    def _memory(self) -> None:
+        print("  [*] Physical Memory Dump (live acquisition)")
+        print("  [!] Note: Memory dumps are typically 4–64 GB — this may take a while")
+        print("  [!] Root privileges are required for memory acquisition")
+
+        dump_path = self.staging / f"memory-{HOSTNAME}-{TS_NOW}.lime"
+
+        # 1. Try avml (Microsoft's user-space memory acquisition tool)
+        avml = shutil.which("avml")
+        if avml:
+            self._log(f"Using avml: {avml}")
+            print(f"      avml : {avml}")
+            print(f"      Output: {dump_path}")
+            try:
+                r = subprocess.run(
+                    [avml, str(dump_path)],
+                    capture_output=True,
+                    timeout=7200,
+                )
+                if r.returncode == 0 and dump_path.exists() and dump_path.stat().st_size > 0:
+                    self._add(dump_path, f"memory/{dump_path.name}")
+                    size_gb = dump_path.stat().st_size / (1024 ** 3)
+                    print(f"  [+] Memory dump complete ({size_gb:.1f} GB)")
+                    return
+                err = (r.stderr or r.stdout or b"").decode(errors="replace")[:400]
+                self._warn(f"avml failed (code {r.returncode}): {err}")
+            except subprocess.TimeoutExpired:
+                self._warn("avml timed out (>2 hours)")
+            except Exception as exc:
+                self._warn(f"avml error: {exc}")
+
+        # 2. Try fmem / dd /dev/fmem
+        for mem_dev in ("/dev/fmem", "/dev/mem"):
+            if Path(mem_dev).exists():
+                raw_path = self.staging / f"memory-{HOSTNAME}-{TS_NOW}.raw"
+                print(f"      Trying {mem_dev} → {raw_path}")
+                try:
+                    r = subprocess.run(
+                        ["dd", f"if={mem_dev}", f"of={raw_path}", "bs=1M"],
+                        capture_output=True, timeout=7200,
+                    )
+                    if r.returncode == 0 and raw_path.stat().st_size > 0:
+                        self._add(raw_path, f"memory/{raw_path.name}")
+                        size_gb = raw_path.stat().st_size / (1024 ** 3)
+                        print(f"  [+] Memory image via {mem_dev} ({size_gb:.1f} GB)")
+                        return
+                except Exception as exc:
+                    self._log(f"{mem_dev} dd error: {exc}")
+
+        self._warn(
+            "No memory acquisition tool found.\n"
+            "      Install avml for user-space acquisition:\n"
+            "        https://github.com/microsoft/avml/releases\n"
+            "      Or load the LiME kernel module for full physical memory."
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# macOS Collector
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MacOSCollector(Collector):
+
+    def collect_all(self) -> None:
+        if self._want("logs"):         self._logs()
+        if self._want("history"):      self._shell_history()
+        if self._want("config"):       self._system_config()
+        if self._want("launchagents"): self._launch_agents()
+        if self._want("browser"):      self._browser()
+        if self._want("triage"):       self._system_triage()
+        if self._want("memory"):       self._memory()
+
+    # ── Logs ──────────────────────────────────────────────────────────────────
+
+    def _logs(self) -> None:
+        print("  [*] System Logs")
+        # Traditional syslog-style files
+        for name in ["system.log", "install.log", "fsck_apfs.log", "wifi.log"]:
+            self._add(Path("/var/log") / name, f"logs/{name}")
+        # Compress rotated logs
+        for p in sorted(Path("/var/log").glob("*.gz"))[:30]:
+            self._add(p, f"logs/{p.name}")
+        # Unified Logging System — export last 7 days as JSON
+        out = self._run_cmd(
+            ["log", "show", "--style", "json", "--last", "7d", "--info"],
+            timeout=120,
+        )
+        if out:
+            tmp = self.staging / "unified_logs.ndjson"
+            # 'log show --style json' returns a JSON array; save as-is
+            tmp.write_text(out, encoding="utf-8", errors="replace")
+            self._add(tmp, "logs/unified_logs.ndjson")
+        else:
+            # Fallback: human-readable text
+            out_text = self._run_cmd(
+                ["log", "show", "--last", "7d", "--info"], timeout=120,
+            )
+            if out_text:
+                tmp = self.staging / "unified_logs.log"
+                tmp.write_text(out_text, encoding="utf-8", errors="replace")
+                self._add(tmp, "logs/unified_logs.log")
+
+    # ── Shell history (same as Linux) ─────────────────────────────────────────
+
+    def _shell_history(self) -> None:
+        print("  [*] Shell Histories")
+        HIST = [".bash_history", ".zsh_history", ".sh_history", ".python_history"]
+        home = Path.home().parent  # /Users
+        candidates = [Path("/var/root")]
+        if home.exists():
+            candidates += sorted(home.iterdir())
+        for user_dir in candidates:
+            if user_dir.is_dir():
+                for h in HIST:
+                    self._add(user_dir / h, f"history/{user_dir.name}/{h}")
+
+    # ── System config ─────────────────────────────────────────────────────────
+
+    def _system_config(self) -> None:
+        print("  [*] System Configuration")
+        for p in [
+            "/etc/passwd", "/etc/group", "/etc/hosts",
+            "/etc/resolv.conf", "/etc/ssh/sshd_config",
+            "/private/etc/sudoers",
+            "/System/Library/CoreServices/SystemVersion.plist",
+        ]:
+            self._add(Path(p), f"config/{Path(p).name}")
+        # sudoers.d
+        for d in ["/etc/sudoers.d", "/private/etc/sudoers.d"]:
+            if Path(d).exists():
+                for f in sorted(Path(d).iterdir()):
+                    if f.is_file():
+                        self._add(f, f"config/sudoers.d/{f.name}")
+
+    # ── LaunchAgents / LaunchDaemons (macOS persistence) ─────────────────────
+
+    def _launch_agents(self) -> None:
+        print("  [*] Launch Agents / Daemons")
+        dirs = [
+            "/Library/LaunchAgents",
+            "/Library/LaunchDaemons",
+            "/System/Library/LaunchAgents",
+            "/System/Library/LaunchDaemons",
+        ]
+        # Per-user LaunchAgents
+        home = Path.home().parent
+        if home.exists():
+            for user_dir in sorted(home.iterdir()):
+                dirs.append(str(user_dir / "Library" / "LaunchAgents"))
+
+        for d in dirs:
+            dp = Path(d)
+            if dp.exists():
+                for f in sorted(dp.glob("*.plist"))[:200]:
+                    rel = f.relative_to(dp.parent)
+                    self._add(f, f"launchagents/{dp.name}/{f.name}")
+
+    # ── Browser artifacts ─────────────────────────────────────────────────────
+
+    def _browser(self) -> None:
+        print("  [*] Browser Artifacts")
+        home = Path.home().parent
+        candidates = sorted(home.iterdir()) if home.exists() else []
+        for user_dir in candidates:
+            if not user_dir.is_dir():
+                continue
+            lib = user_dir / "Library"
+            # Chromium-based browsers (Chrome, Brave, Edge, Opera, Vivaldi)
+            chromium_browsers = [
+                ("chrome",  "Google/Chrome"),
+                ("brave",   "BraveSoftware/Brave-Browser"),
+                ("edge",    "Microsoft Edge"),
+                ("opera",   "com.operasoftware.Opera"),
+                ("vivaldi", "Vivaldi"),
+            ]
+            for bname, subpath in chromium_browsers:
+                profile = lib / "Application Support" / subpath / "Default"
+                for db in ["History", "Cookies", "Web Data", "Login Data", "Bookmarks"]:
+                    self._add(profile / db, f"browser/{user_dir.name}/{bname}/{db}")
+            # Safari
+            safari_dir = lib / "Safari"
+            for sf in ["History.db", "Downloads.plist", "Bookmarks.plist",
+                       "RecentlyClosedTabs.plist", "LastSession.plist"]:
+                self._add(safari_dir / sf, f"browser/{user_dir.name}/safari/{sf}")
+            # Firefox
+            ff_profiles = lib / "Application Support" / "Firefox" / "Profiles"
+            if ff_profiles.exists():
+                for profile in sorted(ff_profiles.iterdir()):
+                    for db in ["places.sqlite", "cookies.sqlite", "logins.json", "formhistory.sqlite"]:
+                        self._add(profile / db, f"browser/{user_dir.name}/firefox/{profile.name}/{db}")
+            # Quarantine database (file download history)
+            quarantine = lib / "Preferences" / "com.apple.LaunchServices.QuarantineEventsV2"
+            self._add(quarantine, f"browser/{user_dir.name}/quarantine_events.sqlite")
+
+    # ── System triage ─────────────────────────────────────────────────────────
+
+    def _system_triage(self) -> None:
+        print("  [*] System Triage (live commands)")
+        lines: list[str] = []
+        for header, cmd in [
+            ("OS VERSION",       ["sw_vers"]),
+            ("UNAME",            ["uname", "-a"]),
+            ("PROCESSES",        ["ps", "auxww"]),
+            ("NETWORK SOCKETS",  ["netstat", "-anv"]),
+            ("NETWORK IFACEs",   ["ifconfig"]),
+            ("ROUTING TABLE",    ["netstat", "-rn"]),
+            ("ARP CACHE",        ["arp", "-an"]),
+            ("CURRENT USERS",    ["who"]),
+            ("LAST LOGINS",      ["last", "-n", "200"]),
+            ("MOUNTS",           ["mount"]),
+            ("DISK USAGE",       ["df", "-h"]),
+            ("LOADED KEXTS",     ["kextstat"]),
+            ("LAUNCH DAEMONS",   ["launchctl", "list"]),
+            ("INSTALLED APPS",   ["system_profiler", "SPApplicationsDataType"]),
+            ("NETWORK SERVICES", ["networksetup", "-listallnetworkservices"]),
+            ("FIREWALL",         ["socketfilterfw", "--getglobalstate"]),
+            ("SUID FILES",       ["find", "/", "-perm", "-4000", "-type", "f", "-ls"]),
+            ("ENVIRONMENT",      ["env"]),
+        ]:
+            lines.append(f"\n{'='*60}\n{header}\n{'='*60}")
+            lines.append(self._run_cmd(cmd, timeout=60))
+        self._write_text("system_triage.txt", "\n".join(lines), "system_triage.txt")
+
+    # ── Memory acquisition ────────────────────────────────────────────────────
+
+    def _memory(self) -> None:
+        print("  [*] Physical Memory Dump (live acquisition)")
+        print("  [!] Note: Memory dumps are typically 4–64 GB — this may take a while")
+        print("  [!] Root privileges are required for memory acquisition")
+
+        dump_path = self.staging / f"memory-{HOSTNAME}-{TS_NOW}.raw"
+
+        # osxpmem (most reliable tool for macOS)
+        osxpmem = shutil.which("osxpmem")
+        if not osxpmem:
+            # Check common locations
+            for loc in ["/usr/local/bin/osxpmem", Path.cwd() / "osxpmem",
+                        Path(__file__).parent / "osxpmem"]:
+                if Path(loc).exists():
+                    osxpmem = str(loc)
+                    break
+
+        if osxpmem:
+            self._log(f"Using osxpmem: {osxpmem}")
+            print(f"      Output: {dump_path}")
+            try:
+                r = subprocess.run(
+                    [osxpmem, str(dump_path)],
+                    capture_output=True, timeout=7200,
+                )
+                if r.returncode == 0 and dump_path.exists() and dump_path.stat().st_size > 0:
+                    self._add(dump_path, f"memory/{dump_path.name}")
+                    size_gb = dump_path.stat().st_size / (1024 ** 3)
+                    print(f"  [+] Memory dump complete ({size_gb:.1f} GB)")
+                    return
+                err = (r.stderr or r.stdout or b"").decode(errors="replace")[:400]
+                self._warn(f"osxpmem failed (code {r.returncode}): {err}")
+            except subprocess.TimeoutExpired:
+                self._warn("osxpmem timed out (>2 hours)")
+            except Exception as exc:
+                self._warn(f"osxpmem error: {exc}")
+
+        self._warn(
+            "No memory acquisition tool found.\n"
+            "      Download osxpmem for macOS memory acquisition:\n"
+            "        https://github.com/google/rekall/releases\n"
+            "      Run: sudo osxpmem memory.raw"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -525,12 +972,19 @@ def main() -> None:
     output   = Path(cfg["output"]) if cfg.get("output") else \
                Path.cwd() / f"fo-artifacts-{HOSTNAME}-{TS_NOW}.zip"
 
-    # Resolve collect set
+    # Resolve collect set.
+    # "memory" is opt-in only (large dumps) so it's never added by default,
+    # but is always accepted when the user explicitly names it.
     raw_collect = cfg.get("collect", [])
     if IS_WINDOWS:
-        collect_set = (set(raw_collect) & DEFAULT_WINDOWS) if raw_collect else DEFAULT_WINDOWS
+        allowed = DEFAULT_WINDOWS | {"memory"}
+        collect_set = (set(raw_collect) & allowed) if raw_collect else DEFAULT_WINDOWS
+    elif IS_MACOS:
+        allowed = DEFAULT_MACOS | {"memory"}
+        collect_set = (set(raw_collect) & allowed) if raw_collect else DEFAULT_MACOS
     else:
-        collect_set = (set(raw_collect) & DEFAULT_LINUX)   if raw_collect else DEFAULT_LINUX
+        allowed = DEFAULT_LINUX | {"memory"}
+        collect_set = (set(raw_collect) & allowed) if raw_collect else DEFAULT_LINUX
 
     print(BANNER)
     print(f"  Host     : {HOSTNAME}")
@@ -543,7 +997,9 @@ def main() -> None:
 
     if IS_WINDOWS:
         collector: Collector = WindowsCollector(output, collect_set, args.verbose, args.dry_run)
-    elif IS_LINUX or IS_MACOS:
+    elif IS_MACOS:
+        collector = MacOSCollector(output, collect_set, args.verbose, args.dry_run)
+    elif IS_LINUX:
         collector = LinuxCollector(output, collect_set, args.verbose, args.dry_run)
     else:
         print(f"  [!] Unsupported OS: {platform.system()}", file=sys.stderr)

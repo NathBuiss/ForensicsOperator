@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: frontend
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
 spec:
   replicas: 2
   selector:
@@ -21,11 +21,11 @@ spec:
             - containerPort: 80
           resources:
             requests:
-              memory: "64Mi"
-              cpu: "50m"
+              memory: "__FO_FRONTEND_MEMORY_REQUEST__"
+              cpu: "__FO_FRONTEND_CPU_REQUEST__"
             limits:
-              memory: "128Mi"
-              cpu: "200m"
+              memory: "__FO_FRONTEND_MEMORY_LIMIT__"
+              cpu: "__FO_FRONTEND_CPU_LIMIT__"
           livenessProbe:
             httpGet:
               path: /
@@ -37,7 +37,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: frontend-service
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
 spec:
   selector:
     app: frontend

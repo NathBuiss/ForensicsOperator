@@ -10,7 +10,7 @@ import { useLocation } from 'react-router-dom'
 import {
   Code2, Plus, Save, Trash2, CheckCircle, AlertCircle,
   RefreshCw, FileCode2, X, ChevronRight, Cpu, Puzzle,
-  Play, BookOpen, Copy, Check,
+  Play, BookOpen, Copy, Check, Lock,
 } from 'lucide-react'
 import { api } from '../api/client'
 
@@ -76,69 +76,98 @@ ${name}_module.py — custom analysis module: ${name.replace(/_/g, ' ')}.
 
 Naming rules
   • File must end with _module.py
-  • MODULE_NAME must match the file stem before _module
+  • MODULE_NAME is displayed in the Modules panel
+  • INPUT_EXTENSIONS filters which source files are shown when launching
 
-Docs: /docs  →  "Creating a Custom Module"
+Security model
+  • Code runs in an isolated subprocess with resource limits:
+      CPU: 3600s   Memory: 2 GB   File writes: 500 MB   Subprocesses: 64
+  • Sensitive env vars are stripped before your code runs
+  • tmp_dir is the only writable work area (cleaned up automatically)
 """
-import json
-import os
+import re
+import subprocess
 from pathlib import Path
 
-# ── Metadata (read by the API to display in the Modules list) ─────────────────
+# ── Module metadata (read by the platform to populate the Modules list) ────────
 
 MODULE_NAME        = "${name.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}"
 MODULE_DESCRIPTION = "Custom analysis module — describe what it does here"
-# INPUT_EXTENSIONS   = [".log", ".txt"]   # leave empty to accept any file
+
+# File extensions this module accepts (lower-case, with dot). Leave empty for any.
 INPUT_EXTENSIONS   = []
+# Exact filenames to match regardless of extension (e.g. ["NTUSER.DAT", "$MFT"])
 INPUT_FILENAMES    = []
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Entry point ────────────────────────────────────────────────────────────────
 
-def run(run_id: str, case_id: str, source_files: list, params: dict,
-        minio_client, redis_client, tmp_dir: Path) -> dict:
+def run(
+    run_id: str,
+    case_id: str,
+    source_files: list,
+    params: dict,
+    minio_client,       # minio.Minio — fget_object / put_object / etc.
+    redis_client,       # redis.Redis (decode_responses=True)
+    tmp_dir: Path,      # clean temp directory, wiped after the run
+) -> list:
     """
-    Execute the module against the provided source files.
+    Execute the module and return a list of findings.
 
-    Parameters
-    ----------
-    run_id        Unique ID for this run (string)
-    case_id       Case this run belongs to
-    source_files  List of dicts: [{job_id, filename, minio_key}]
-    params        User-supplied parameters (arbitrary dict)
-    minio_client  Boto3-compatible MinIO client
-    redis_client  Redis client (decode_responses=True)
-    tmp_dir       pathlib.Path to a clean temporary directory
-
-    Returns
-    -------
-    dict with keys:
-      hits         list of result dicts (required)
-      total_hits   int  (optional — computed from len(hits) if omitted)
+    Each finding dict must have at minimum:
+      filename  str   — source file the finding came from
+      message   str   — human-readable description
+      level     str   — "critical" | "high" | "medium" | "low" | "info"
+    Additional fields are stored and rendered in the results panel as-is.
     """
+    MINIO_BUCKET = "forensics-cases"
     hits = []
 
     for sf in source_files:
         local_path = tmp_dir / sf["filename"]
 
-        # Download the source file from MinIO
-        minio_client.fget_object(
-            os.getenv("MINIO_BUCKET", "forensics-cases"),
-            sf["minio_key"],
-            str(local_path),
-        )
+        # ── Download source file from MinIO ────────────────────────────────────
+        minio_client.fget_object(MINIO_BUCKET, sf["minio_key"], str(local_path))
 
-        # ── TODO: replace with your real analysis logic ───────────────────────
-        hits.append({
-            "filename": sf["filename"],
-            "message":  f"Processed {sf['filename']}",
-            "level":    "info",
-        })
+        # ── Example: extract printable strings and flag suspicious patterns ────
+        try:
+            proc = subprocess.run(
+                ["strings", "-n", "8", str(local_path)],
+                capture_output=True, text=True, timeout=120,
+            )
+            strings_found = proc.stdout.splitlines()
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            # Pure-Python fallback if 'strings' binary is unavailable
+            with open(local_path, "rb") as fh:
+                data = fh.read()
+            strings_found = [
+                s.decode("ascii", errors="replace")
+                for s in re.findall(rb"[ -~]{8,}", data)
+            ]
 
-    return {
-        "hits":       hits,
-        "total_hits": len(hits),
-    }
+        # Flag patterns of interest — replace or extend this dict
+        ioc_patterns = {
+            r"(?i)powershell":               ("high",     "PowerShell reference"),
+            r"(?i)mimikatz":                 ("critical", "Mimikatz reference"),
+            r"(?i)cmd\\.exe":                ("medium",   "cmd.exe reference"),
+            r"https?://[^\\s]{10,}":         ("medium",   "URL found"),
+            r"\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b": ("low", "IP address found"),
+        }
+
+        for string in strings_found:
+            for pattern, (level, label) in ioc_patterns.items():
+                if re.search(pattern, string):
+                    hits.append({
+                        "filename": sf["filename"],
+                        "level":    level,
+                        "message":  f"{label}: {string[:200]}",
+                        "string":   string[:500],
+                    })
+
+        # Limit to first 1000 hits per file
+        hits = hits[:1000]
+
+    return hits
 `
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -279,6 +308,9 @@ export default function Studio() {
   const [sidebarTab, setSidebarTab]     = useState('ingesters')
   const [ingesterFiles, setIngFiles]    = useState([])
   const [moduleFiles, setModFiles]      = useState([])
+  // YAML module registry files shown as read-only reference
+  const [refModFiles, setRefModFiles]   = useState([])
+  const [showRef, setShowRef]           = useState(false)
 
   // Multi-tab state — each tab: { type, name, code, originalCode, loading,
   //   saving, validating, validation, saveMsg, copied }
@@ -305,12 +337,18 @@ export default function Studio() {
 
   const loadLists = useCallback(async () => {
     try {
-      const [ing, mod] = await Promise.all([
+      const [ing, mod, ingBuiltin, modBuiltin] = await Promise.all([
         api.editor.listIngesters(),
         api.editor.listModules(),
+        api.editor.listBuiltinIngesters().catch(() => ({ files: [] })),
+        api.editor.listBuiltinModules().catch(() => ({ files: [] })),
       ])
-      setIngFiles(ing.files || [])
+      // Ingesters: built-in Python files first, then custom
+      setIngFiles([...(ingBuiltin.files || []), ...(ing.files || [])])
+      // Modules: only custom Python modules in the editable list
       setModFiles(mod.files || [])
+      // YAML built-in module registry files go to reference section only
+      setRefModFiles(modBuiltin.files || [])
     } catch (_) {}
   }, [])
 
@@ -341,7 +379,7 @@ export default function Studio() {
 
   // ── Open a file (or switch to existing tab) ───────────────────────────────
 
-  async function openFile(type, name) {
+  async function openFile(type, name, builtin = false) {
     const key = fileId(type, name)
 
     // Already open? Just switch to it
@@ -350,9 +388,12 @@ export default function Studio() {
       return
     }
 
+    // Read-only = YAML registry reference files opened from the ref panel
+    const readOnly = builtin && type === 'module'
+
     // Add a new loading tab and make it active
     const newTab = {
-      type, name,
+      type, name, builtin, readOnly,
       code: '', originalCode: '',
       loading: true, saving: false, validating: false,
       validation: null, saveMsg: null, copied: false,
@@ -361,9 +402,16 @@ export default function Studio() {
     setActiveTabKey(key)
 
     try {
-      const res = type === 'ingester'
-        ? await api.editor.getIngester(name)
-        : await api.editor.getModule(name)
+      let res
+      if (builtin) {
+        res = type === 'ingester'
+          ? await api.editor.getBuiltinIngester(name)
+          : await api.editor.getBuiltinModule(name)
+      } else {
+        res = type === 'ingester'
+          ? await api.editor.getIngester(name)
+          : await api.editor.getModule(name)
+      }
       updateTab(type, name, {
         code: res.content,
         originalCode: res.content,
@@ -442,13 +490,21 @@ export default function Studio() {
 
   async function handleSave() {
     if (!activeTab) return
-    const { type, name, code } = activeTab   // capture at call time
+    const { type, name, code, builtin } = activeTab   // capture at call time
     updateTab(type, name, { saving: true, validation: null, saveMsg: null })
     try {
-      if (type === 'ingester') {
-        await api.editor.saveIngester(name, { content: code })
+      if (builtin) {
+        if (type === 'ingester') {
+          await api.editor.saveBuiltinIngester(name, { content: code })
+        } else {
+          await api.editor.saveBuiltinModule(name, { content: code })
+        }
       } else {
-        await api.editor.saveModule(name, { content: code })
+        if (type === 'ingester') {
+          await api.editor.saveIngester(name, { content: code })
+        } else {
+          await api.editor.saveModule(name, { content: code })
+        }
       }
       updateTab(type, name, {
         originalCode: code,
@@ -486,14 +542,22 @@ export default function Studio() {
   async function handleDelete() {
     if (!activeTab) return
     setShowDelete(false)
-    const { type, name } = activeTab
+    const { type, name, builtin } = activeTab
     const key = fileId(type, name)
     const idx = openTabs.findIndex(t => fileId(t.type, t.name) === key)
     try {
-      if (type === 'ingester') {
-        await api.editor.deleteIngester(name)
+      if (builtin) {
+        if (type === 'ingester') {
+          await api.editor.deleteBuiltinIngester(name)
+        } else {
+          await api.editor.deleteBuiltinModule(name)
+        }
       } else {
-        await api.editor.deleteModule(name)
+        if (type === 'ingester') {
+          await api.editor.deleteIngester(name)
+        } else {
+          await api.editor.deleteModule(name)
+        }
       }
       // Force-close tab (no dirty check — file is already deleted)
       const remaining = openTabs.filter(t => fileId(t.type, t.name) !== key)
@@ -520,6 +584,7 @@ export default function Studio() {
 
   const sidebarFiles    = sidebarTab === 'ingesters' ? ingesterFiles : moduleFiles
   const sidebarFileType = sidebarTab === 'ingesters' ? 'ingester' : 'module'
+  // NewFileModal only cares about custom file names (no collisions with built-ins expected)
   const existingNames   = sidebarFiles.map(f => f.name)
 
   return (
@@ -563,33 +628,39 @@ export default function Studio() {
         </div>
 
         {/* File list */}
-        <div className="flex-1 overflow-y-auto py-1">
+        <div className="flex-1 overflow-y-auto py-1 min-h-0">
           {sidebarFiles.length === 0 ? (
             <div className="px-3 py-4 text-center">
               <FileCode2 size={20} className="text-gray-300 mx-auto mb-2" />
               <p className="text-[11px] text-gray-400">No files yet</p>
             </div>
-          ) : (
-            sidebarFiles.map(f => {
+          ) : (() => {
+            const builtins = sidebarFiles.filter(f => f.builtin)
+            const customs  = sidebarFiles.filter(f => !f.builtin)
+            const renderFile = f => {
               const key        = fileId(sidebarFileType, f.name)
               const isActive   = activeTabKey === key
               const openTab    = openTabs.find(t => fileId(t.type, t.name) === key)
               const isOpen     = Boolean(openTab)
               const isDirtyTab = isOpen && openTab.code !== openTab.originalCode
-
               return (
                 <button
                   key={f.name}
-                  onClick={() => openFile(sidebarFileType, f.name)}
+                  onClick={() => openFile(sidebarFileType, f.name, !!f.builtin)}
                   className={`w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors ${
                     isActive
                       ? 'bg-brand-accentlight text-brand-accent'
                       : isOpen
                         ? 'bg-blue-50/50 text-gray-700 hover:bg-blue-50'
-                        : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+                        : f.builtin
+                          ? 'text-gray-400 hover:bg-gray-50 hover:text-gray-600'
+                          : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
                   }`}
                 >
-                  <FileCode2 size={13} className="flex-shrink-0 opacity-60" />
+                  {f.builtin
+                    ? <Lock size={11} className="flex-shrink-0 opacity-50" />
+                    : <FileCode2 size={13} className="flex-shrink-0 opacity-60" />
+                  }
                   <span className="text-[11px] font-mono truncate flex-1">{f.name}</span>
                   {isDirtyTab && (
                     <span className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0" title="Unsaved changes" />
@@ -599,9 +670,57 @@ export default function Studio() {
                   )}
                 </button>
               )
-            })
-          )}
+            }
+            return (
+              <>
+                {builtins.length > 0 && (
+                  <>
+                    <p className="px-3 pt-2 pb-1 text-[9px] font-semibold text-gray-400 uppercase tracking-widest">
+                      Built-in
+                    </p>
+                    {builtins.map(renderFile)}
+                  </>
+                )}
+                {customs.length > 0 && (
+                  <>
+                    <p className="px-3 pt-3 pb-1 text-[9px] font-semibold text-gray-400 uppercase tracking-widest">
+                      Custom
+                    </p>
+                    {customs.map(renderFile)}
+                  </>
+                )}
+              </>
+            )
+          })()}
         </div>
+
+        {/* ── Module Registry Reference (YAML files, read-only) ─── */}
+        {sidebarTab === 'modules' && refModFiles.length > 0 && (
+          <div className="border-t border-gray-200 flex-shrink-0">
+            <button
+              onClick={() => setShowRef(v => !v)}
+              className="w-full flex items-center gap-1.5 px-3 py-2 text-[10px] font-semibold text-gray-500 uppercase tracking-widest hover:bg-gray-50 transition-colors"
+            >
+              <BookOpen size={10} />
+              Registry Reference
+              <ChevronRight size={10} className={`ml-auto transition-transform ${showRef ? 'rotate-90' : ''}`} />
+            </button>
+            {showRef && (
+              <div className="py-1 max-h-40 overflow-y-auto">
+                {refModFiles.map(f => (
+                  <button
+                    key={f.name}
+                    onClick={() => openFile('module', f.name, true)}
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-gray-400 hover:bg-gray-50 hover:text-gray-600 transition-colors"
+                  >
+                    <Lock size={9} className="flex-shrink-0 opacity-50" />
+                    <span className="text-[10px] font-mono truncate flex-1">{f.name}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </aside>
 
       {/* ── Editor pane ─────────────────────────────────────────────────────── */}
@@ -707,32 +826,40 @@ export default function Studio() {
                     ? <><Check size={12} className="text-green-600" /> Copied</>
                     : <><Copy size={12} /> Copy</>}
                 </button>
-                <button
-                  onClick={handleValidate}
-                  disabled={activeTab.validating}
-                  className="btn-outline text-xs py-1 px-2"
-                >
-                  {activeTab.validating
-                    ? <RefreshCw size={12} className="animate-spin" />
-                    : <Play size={12} />}
-                  {activeTab.validating ? 'Checking…' : 'Validate'}
-                </button>
-                <button
-                  onClick={handleSave}
-                  disabled={activeTab.saving || !isDirty}
-                  className="btn-primary text-xs py-1 px-2"
-                >
-                  {activeTab.saving
-                    ? <RefreshCw size={12} className="animate-spin" />
-                    : <Save size={12} />}
-                  {activeTab.saving ? 'Saving…' : 'Save'}
-                </button>
-                <button
-                  onClick={() => setShowDelete(true)}
-                  className="btn-danger text-xs py-1 px-2"
-                >
-                  <Trash2 size={12} />
-                </button>
+                {activeTab.readOnly ? (
+                  <span className="badge bg-gray-100 text-gray-500 text-[10px] flex items-center gap-1">
+                    <Lock size={9} /> Read-only reference
+                  </span>
+                ) : (
+                  <>
+                    <button
+                      onClick={handleValidate}
+                      disabled={activeTab.validating}
+                      className="btn-outline text-xs py-1 px-2"
+                    >
+                      {activeTab.validating
+                        ? <RefreshCw size={12} className="animate-spin" />
+                        : <Play size={12} />}
+                      {activeTab.validating ? 'Checking…' : 'Validate'}
+                    </button>
+                    <button
+                      onClick={handleSave}
+                      disabled={activeTab.saving || !isDirty}
+                      className="btn-primary text-xs py-1 px-2"
+                    >
+                      {activeTab.saving
+                        ? <RefreshCw size={12} className="animate-spin" />
+                        : <Save size={12} />}
+                      {activeTab.saving ? 'Saving…' : 'Save'}
+                    </button>
+                    <button
+                      onClick={() => setShowDelete(true)}
+                      className="btn-danger text-xs py-1 px-2"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </>
+                )}
               </div>
             </div>
 
@@ -756,7 +883,8 @@ export default function Studio() {
                 <CodeEditor
                   key={activeTabKey}
                   value={activeTab.code}
-                  onChange={v => updateTab(activeTab.type, activeTab.name, { code: v })}
+                  onChange={v => !activeTab.readOnly && updateTab(activeTab.type, activeTab.name, { code: v })}
+                  readOnly={activeTab.readOnly}
                 />
               )}
             </div>

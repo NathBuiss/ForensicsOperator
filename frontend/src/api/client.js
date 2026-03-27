@@ -58,6 +58,7 @@ export const api = {
     upload:   (caseId, formData) => request('POST', `/cases/${caseId}/ingest`, formData),
     listJobs: (caseId)           => request('GET',  `/cases/${caseId}/jobs`),
     getJob:   (jobId)            => request('GET',  `/jobs/${jobId}`),
+    retryJob: (jobId)            => request('POST', `/jobs/${jobId}/retry`),
   },
 
   search: {
@@ -90,8 +91,13 @@ export const api = {
   },
 
   auth: {
-    me:    ()     => request('GET', '/auth/me'),
-    login: (data) => request('POST', '/auth/login', data),
+    me:             ()               => request('GET',    '/auth/me'),
+    login:          (data)           => request('POST',   '/auth/login', data),
+    listUsers:      ()               => request('GET',    '/auth/users'),
+    createUser:     (data)           => request('POST',   '/auth/users', data),
+    updateUser:     (username, data)  => request('PUT',    `/auth/users/${username}`, data),
+    deleteUser:     (username)        => request('DELETE', `/auth/users/${username}`),
+    changePassword: (data)           => request('PUT',    '/auth/me/password', data),
   },
 
   savedSearches: {
@@ -112,6 +118,11 @@ export const api = {
     seedLibrary:     (replace=false)  => request('POST',   `/alert-rules/library/seed?replace=${replace}`),
     runLibrary:      (caseId)         => request('POST',   `/cases/${caseId}/alert-rules/run-library`),
     runSingleRule:   (caseId, ruleId) => request('POST',   `/cases/${caseId}/alert-rules/library/${ruleId}/run`),
+    importSigma:     (data)           => request('POST',   '/alert-rules/library/sigma', data),
+    getLibraryRule:  (id)             => request('GET',    `/alert-rules/library/${id}`),
+    generateRule:    (data)           => request('POST',   '/alert-rules/generate', data),
+    analyzeResult:   (data)           => request('POST',   '/alert-rules/analyze', data),
+    parseSigma:      (data)           => request('POST',   '/alert-rules/sigma/parse', data),
   },
 
   export: {
@@ -131,18 +142,86 @@ export const api = {
     listRuns:     (caseId)       => request('GET',  `/cases/${caseId}/module-runs`),
     getRun:       (runId)        => request('GET',  `/module-runs/${runId}`),
     validateYara: (rules)        => request('POST', '/modules/yara/validate', { rules }),
+    analyze:      (runId)        => request('POST', `/module-runs/${runId}/analyze`),
+    retryRun:     (runId)        => request('POST', `/module-runs/${runId}/retry`),
+  },
+
+  llm: {
+    getConfig:         ()     => request('GET',    '/admin/llm-config'),
+    updateConfig:      (data) => request('PUT',    '/admin/llm-config', data),
+    clearConfig:       ()     => request('DELETE', '/admin/llm-config'),
+    testConfig:        ()     => request('POST',   '/admin/llm-config/test'),
+    analyzeModuleRun:  (runId)     => request('POST', `/module-runs/${runId}/analyze`),
+    analyzeAlertRule:  (data)      => request('POST', '/alert-rules/analyze', data),
+    explainEvents:     (data)      => request('POST', '/events/explain', data),
+    generateRule:      (data)      => request('POST', '/alert-rules/generate', data),
+    searchAssist:      (data)      => request('POST', '/search/ai-assist', data),
   },
 
   editor: {
-    listIngesters:  ()            => request('GET',    '/editor/ingesters'),
-    getIngester:    (name)        => request('GET',    `/editor/ingesters/${name}`),
-    saveIngester:   (name, data)  => request('PUT',    `/editor/ingesters/${name}`, data),
-    deleteIngester: (name)        => request('DELETE', `/editor/ingesters/${name}`),
-    listModules:    ()            => request('GET',    '/editor/modules'),
-    getModule:      (name)        => request('GET',    `/editor/modules/${name}`),
-    saveModule:     (name, data)  => request('PUT',    `/editor/modules/${name}`, data),
-    deleteModule:   (name)        => request('DELETE', `/editor/modules/${name}`),
-    validate:       (code)        => request('POST',   '/editor/validate', { code }),
+    listIngesters:        ()            => request('GET',    '/editor/ingesters'),
+    getIngester:          (name)        => request('GET',    `/editor/ingesters/${name}`),
+    saveIngester:         (name, data)  => request('PUT',    `/editor/ingesters/${name}`, data),
+    deleteIngester:       (name)        => request('DELETE', `/editor/ingesters/${name}`),
+    listModules:          ()            => request('GET',    '/editor/modules'),
+    getModule:            (name)        => request('GET',    `/editor/modules/${name}`),
+    saveModule:           (name, data)  => request('PUT',    `/editor/modules/${name}`, data),
+    deleteModule:         (name)        => request('DELETE', `/editor/modules/${name}`),
+    validate:             (code)        => request('POST',   '/editor/validate', { code }),
+    // Built-in ingester plugin files (editable)
+    listBuiltinIngesters: ()            => request('GET',    '/editor/builtin-ingesters'),
+    getBuiltinIngester:   (name)        => request('GET',    `/editor/builtin-ingesters/${name}`),
+    saveBuiltinIngester:  (name, data)  => request('PUT',    `/editor/builtin-ingesters/${name}`, data),
+    deleteBuiltinIngester:(name)        => request('DELETE', `/editor/builtin-ingesters/${name}`),
+    // Built-in module YAML registry files (editable)
+    listBuiltinModules:   ()            => request('GET',    '/editor/builtin-modules'),
+    getBuiltinModule:     (name)        => request('GET',    `/editor/builtin-modules/${name}`),
+    saveBuiltinModule:    (name, data)  => request('PUT',    `/editor/builtin-modules/${name}`, data),
+    deleteBuiltinModule:  (name)        => request('DELETE', `/editor/builtin-modules/${name}`),
+  },
+
+  s3: {
+    getConfig:    ()             => request('GET',    '/admin/s3-config'),
+    setConfig:    (data)         => request('PUT',    '/admin/s3-config', data),
+    clearConfig:  ()             => request('DELETE', '/admin/s3-config'),
+    testConfig:   ()             => request('POST',   '/admin/s3-config/test'),
+    browse:       (prefix = '', delimiter = '/') => request('GET', `/s3/browse?prefix=${encodeURIComponent(prefix)}&delimiter=${encodeURIComponent(delimiter)}`),
+    importToCase: (caseId, data) => request('POST',   `/cases/${caseId}/s3-import`, data),
+  },
+
+  metrics: {
+    dashboard: () => request('GET', '/metrics/dashboard'),
+  },
+
+  cti: {
+    listFeeds:    () => request('GET', '/cti/feeds'),
+    addFeed:      (data) => request('POST', '/cti/feeds', data),
+    updateFeed:   (id, data) => request('PUT', `/cti/feeds/${id}`, data),
+    deleteFeed:   (id) => request('DELETE', `/cti/feeds/${id}`),
+    pullFeed:     (id) => request('POST', `/cti/feeds/${id}/pull`),
+    importBundle: (data) => request('POST', '/cti/import', data),
+    listIOCs:     (params = {}) => { const q = new URLSearchParams(params).toString(); return request('GET', `/cti/iocs${q ? '?' + q : ''}`) },
+    iocStats:     () => request('GET', '/cti/iocs/stats'),
+    clearIOCs:    () => request('DELETE', '/cti/iocs'),
+    matchCase:    (caseId) => request('POST', `/cases/${caseId}/cti/match`),
+  },
+
+  malware: {
+    uploadFile: (formData) => request('POST', '/malware-analysis/upload', formData),
+    createRun:  (data)     => request('POST', '/malware-analysis/runs', data),
+    listRuns:   ()         => request('GET',  '/malware-analysis/runs'),
+  },
+
+  cuckooConfig: {
+    get:   ()     => request('GET',    '/admin/cuckoo-config'),
+    set:   (data) => request('PUT',    '/admin/cuckoo-config', data),
+    clear: ()     => request('DELETE', '/admin/cuckoo-config'),
+  },
+
+  mwoConfig: {
+    get:   ()     => request('GET',    '/admin/malwoverview-config'),
+    set:   (data) => request('PUT',    '/admin/malwoverview-config', data),
+    clear: ()     => request('DELETE', '/admin/malwoverview-config'),
   },
 
   collector: {

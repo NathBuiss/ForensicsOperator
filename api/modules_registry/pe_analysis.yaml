@@ -1,0 +1,11 @@
+id: pe_analysis
+name: PE Analysis
+description: "Analyze Windows PE executables — imports, exports, sections, resources, compilation timestamps, suspicious indicators."
+input_extensions:
+  - .exe
+  - .dll
+  - .sys
+  - .ocx
+  - .scr
+available: true
+run_on_files: true

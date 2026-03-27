@@ -1,0 +1,9 @@
+id: grep_search
+name: Pattern Search (grep)
+description: "Search files for regex patterns — IOCs, keywords, base64 strings, encoded commands."
+input_extensions:
+  - "*"
+available: true
+run_on_files: true
+config_keys:
+  - patterns

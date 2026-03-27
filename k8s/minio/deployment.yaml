@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: minio
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
 spec:
   replicas: 1
   selector:
@@ -35,11 +35,11 @@ spec:
               name: console
           resources:
             requests:
-              memory: "256Mi"
-              cpu: "100m"
+              memory: "__FO_MINIO_MEMORY_REQUEST__"
+              cpu: "__FO_MINIO_CPU_REQUEST__"
             limits:
-              memory: "512Mi"
-              cpu: "500m"
+              memory: "__FO_MINIO_MEMORY_LIMIT__"
+              cpu: "__FO_MINIO_CPU_LIMIT__"
           volumeMounts:
             - name: minio-data
               mountPath: /data
@@ -58,7 +58,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: minio-pvc
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
 spec:
   accessModes: ["ReadWriteOnce"]
   resources:
@@ -69,7 +69,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: minio-secret
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
 type: Opaque
 stringData:
   access_key: __FO_MINIO_ACCESS_KEY__
@@ -79,7 +79,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: minio-service
-  namespace: forensics-operator
+  namespace: __FO_NAMESPACE__
 spec:
   selector:
     app: minio
