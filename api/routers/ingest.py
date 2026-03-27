@@ -37,7 +37,14 @@ router = APIRouter(tags=["ingest"])
 def _dispatch_celery_task(job_id: str, case_id: str, minio_key: str, filename: str) -> None:
     """Dispatch a Celery ingest task via send_task (no direct processor import needed)."""
     from celery import Celery
+    from kombu import Exchange, Queue
+    _ex = Exchange("forensics", type="direct")
     app = Celery(broker=settings.REDIS_URL)
+    app.conf.task_queues = (
+        Queue("ingest",  _ex, routing_key="ingest"),
+        Queue("modules", _ex, routing_key="modules"),
+        Queue("default", _ex, routing_key="default"),
+    )
     app.send_task(
         "ingest.process_artifact",
         args=[job_id, case_id, minio_key, filename],

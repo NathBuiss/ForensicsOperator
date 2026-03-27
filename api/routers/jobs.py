@@ -56,7 +56,14 @@ def retry_job(job_id: str):
     # Re-dispatch the Celery ingest task
     try:
         from celery import Celery
+        from kombu import Exchange, Queue
+        _ex = Exchange("forensics", type="direct")
         celery_app = Celery(broker=settings.REDIS_URL)
+        celery_app.conf.task_queues = (
+            Queue("ingest",  _ex, routing_key="ingest"),
+            Queue("modules", _ex, routing_key="modules"),
+            Queue("default", _ex, routing_key="default"),
+        )
         celery_app.send_task(
             "ingest.process_artifact",
             args=[job_id, case_id, minio_object_key, original_filename],
