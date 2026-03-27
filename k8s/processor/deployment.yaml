@@ -5,6 +5,11 @@ metadata:
   namespace: __FO_NAMESPACE__
 spec:
   replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0        # never schedule extra pods during rollout (avoids Pending on resource-constrained nodes)
+      maxUnavailable: 1  # terminate one old pod first, then start the replacement
   selector:
     matchLabels:
       app: processor

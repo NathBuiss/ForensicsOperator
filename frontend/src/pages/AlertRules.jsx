@@ -5,6 +5,7 @@ import { api } from '../api/client'
 
 export default function AlertRules({ caseId }) {
   const [rules, setRules]             = useState([])
+  const [libraryRules, setLibraryRules] = useState([])
   const [loading, setLoading]         = useState(true)
   const [checking, setChecking]       = useState(false)
   const [run, setRun]                 = useState(null)   // full run: {ran_at, rules_checked, matches, analyses}
@@ -27,6 +28,11 @@ export default function AlertRules({ caseId }) {
       .then(r => setRules(r.rules || []))
       .catch(() => {})
       .finally(() => setLoading(false))
+
+    // Load global library rules (these are what Check All runs against)
+    api.alertRules.listLibrary()
+      .then(r => setLibraryRules(r.rules || []))
+      .catch(() => {})
 
     // Restore last run + analyses from Redis (survives page refresh)
     api.alertRules.lastRun(caseId)
@@ -61,7 +67,8 @@ export default function AlertRules({ caseId }) {
     setChecking(true)
     setAnalyses({})
     try {
-      const freshRun = await api.alertRules.check(caseId)
+      // Run all library rules against this case (same rules visible on /alert-rules page)
+      const freshRun = await api.alertRules.runLibrary(caseId)
       setRun(freshRun)
       // Auto-analyze every triggered match in parallel (fire-and-forget)
       if (freshRun.matches?.length) {
@@ -206,8 +213,9 @@ export default function AlertRules({ caseId }) {
           <button onClick={() => setShowForm(v => !v)} className="btn-ghost text-xs">
             <Plus size={13} /> New Rule
           </button>
-          <button onClick={checkRules} disabled={checking || rules.length === 0} className="btn-primary text-xs">
-            {checking ? <><Loader2 size={12} className="animate-spin" /> Checking…</> : <><Play size={12} /> Check All</>}
+          <button onClick={checkRules} disabled={checking || libraryRules.length === 0} className="btn-primary text-xs"
+            title={`Run all ${libraryRules.length} library rules against this case`}>
+            {checking ? <><Loader2 size={12} className="animate-spin" /> Checking…</> : <><Play size={12} /> Check All ({libraryRules.length})</>}
           </button>
         </div>
       </div>
@@ -334,14 +342,34 @@ export default function AlertRules({ caseId }) {
         </div>
       )}
 
-      {/* Rules list */}
+      {/* Library rules — read-only, these are what Check All runs */}
+      {libraryRules.length > 0 && (
+        <div className="mb-4">
+          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+            <Play size={9} className="text-brand-accent" />
+            Library Rules — checked by "Check All" ({libraryRules.length})
+          </p>
+          <div className="space-y-1">
+            {libraryRules.map(rule => (
+              <div key={rule.id} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-900/40 border border-gray-800/40 text-xs">
+                <AlertTriangle size={10} className="text-amber-500 flex-shrink-0" />
+                <span className="font-medium text-gray-300 truncate">{rule.name}</span>
+                {rule.artifact_type && (
+                  <span className="badge bg-gray-700/60 text-gray-400 border border-gray-600/40 text-[9px] flex-shrink-0">{rule.artifact_type}</span>
+                )}
+                <span className="text-gray-600 text-[9px] flex-shrink-0 ml-auto">≥{rule.threshold}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Case-specific rules list */}
       {loading ? (
         <div className="space-y-2">{[1,2].map(i => <div key={i} className="skeleton h-14 w-full" />)}</div>
       ) : rules.length === 0 ? (
-        <div className="card p-10 text-center">
-          <AlertTriangle size={28} className="text-gray-700 mx-auto mb-3" />
-          <p className="text-gray-400 text-sm font-medium mb-1">No alert rules defined</p>
-          <p className="text-gray-600 text-xs">Create rules to detect suspicious patterns like brute force, privilege escalation, or lateral movement.</p>
+        <div className="card p-6 text-center">
+          <p className="text-gray-500 text-xs">No case-specific rules — use AI Generate or New Rule to add ad-hoc rules for this case only.</p>
         </div>
       ) : (
         <div className="space-y-2">
