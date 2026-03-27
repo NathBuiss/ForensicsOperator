@@ -819,7 +819,7 @@ def generate_alert_rule(req: GenerateRuleRequest) -> Any:
     return result
 
 
-def _call_llm_with_system(cfg: dict, system_prompt: str, user_msg: str) -> str:
+def _call_llm_with_system(cfg: dict, system_prompt: str, user_msg: str, max_tokens: int = 600) -> str:
     """Generic LLM call with a custom system prompt."""
     provider = cfg.get("provider", "").lower()
     model    = cfg.get("model", "")
@@ -830,7 +830,7 @@ def _call_llm_with_system(cfg: dict, system_prompt: str, user_msg: str) -> str:
 
     if provider == "anthropic":
         body = json.dumps({
-            "model": model, "max_tokens": 600,
+            "model": model, "max_tokens": max_tokens,
             "system": system_prompt,
             "messages": [{"role": "user", "content": user_msg}],
         }).encode()
@@ -855,7 +855,7 @@ def _call_llm_with_system(cfg: dict, system_prompt: str, user_msg: str) -> str:
     else:
         url = base_url or "https://api.openai.com/v1"
         body = json.dumps({
-            "model": model, "max_tokens": 600, "temperature": 0.2,
+            "model": model, "max_tokens": max_tokens, "temperature": 0.2,
             "messages": [{"role": "system", "content": system_prompt},
                          {"role": "user", "content": user_msg}],
         }).encode()
@@ -864,3 +864,62 @@ def _call_llm_with_system(cfg: dict, system_prompt: str, user_msg: str) -> str:
                                         "Authorization": f"Bearer {api_key}"}, method="POST")
         with _ur.urlopen(req_http, timeout=60) as resp:
             return json.loads(resp.read())["choices"][0]["message"]["content"]
+
+
+# ── YARA rule generation ───────────────────────────────────────────────────────
+
+class GenerateYaraRequest(BaseModel):
+    description: str   # "detect Cobalt Strike beacon loading into memory"
+    context: str = ""  # optional: known strings, hex patterns, file type hints
+
+
+_YARA_GEN_PROMPT = """\
+You are an expert malware analyst and YARA rule author specializing in digital forensics.
+Generate a complete, syntactically valid YARA rule that detects the described threat.
+
+Rules for the YARA rule:
+- Include a meta section with description, author = "AI", and date
+- Include a strings section with relevant ASCII strings, wide strings, or hex byte patterns
+- Include a meaningful condition (not just "any of them" unless truly appropriate)
+- Use rule names in UpperCamelCase with no spaces
+
+Return ONLY a JSON object with these exact keys, no markdown, no explanation:
+{"name": "RuleName", "description": "One sentence description", "tags": ["malware", "apt"], "content": "rule RuleName {\\n    meta:\\n        ...\\n    strings:\\n        ...\\n    condition:\\n        ...\\n}"}
+"""
+
+
+@router.post("/yara-rules/generate")
+def generate_yara_rule(req: GenerateYaraRequest) -> Any:
+    """Use the configured LLM to generate a complete YARA rule from a description."""
+    r = _redis()
+    cfg = _get_config(r)
+    if not cfg or not cfg.get("enabled"):
+        raise HTTPException(
+            status_code=400,
+            detail="LLM not configured. Go to Settings → AI Analysis.",
+        )
+
+    user_msg = f"Write a YARA rule to detect: {req.description}"
+    if req.context:
+        user_msg += f"\nAdditional context / hints: {req.context}"
+
+    try:
+        raw = _call_llm_with_system(cfg, _YARA_GEN_PROMPT, user_msg, max_tokens=1500)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}")
+
+    try:
+        clean = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        result = json.loads(clean)
+    except (json.JSONDecodeError, ValueError):
+        # Fallback: the raw text is likely the YARA rule itself
+        result = {
+            "name":        req.description[:60].replace(" ", "_"),
+            "description": req.description,
+            "tags":        [],
+            "content":     raw,
+        }
+
+    result["generated_at"] = datetime.now(timezone.utc).isoformat()
+    result["model_used"]   = f"{cfg.get('provider', '?')}/{cfg.get('model', '?')}"
+    return result

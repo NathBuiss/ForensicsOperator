@@ -111,6 +111,8 @@ export const api = {
     create:          (caseId, data)   => request('POST',   `/cases/${caseId}/alert-rules`, data),
     delete:          (caseId, id)     => request('DELETE', `/cases/${caseId}/alert-rules/${id}`),
     check:           (caseId)         => request('POST',   `/cases/${caseId}/alert-rules/check`),
+    lastRun:         (caseId)         => request('GET',    `/cases/${caseId}/alert-rules/last-run`),
+    reanalyzeMatch:  (caseId, ruleId) => request('POST',   `/cases/${caseId}/alert-rules/last-run/analyze/${ruleId}`),
     listLibrary:     ()               => request('GET',    '/alert-rules/library'),
     createLibraryRule: (data)         => request('POST',   '/alert-rules/library', data),
     updateLibraryRule: (id, data)     => request('PUT',    `/alert-rules/library/${id}`, data),
@@ -226,11 +228,12 @@ export const api = {
   },
 
   yaraRules: {
-    list:      ()         => request('GET',    '/yara-rules'),
-    get:       (id)       => request('GET',    `/yara-rules/${id}`),
-    create:    (data)     => request('POST',   '/yara-rules', data),
-    update:    (id, data) => request('PUT',    `/yara-rules/${id}`, data),
-    delete:    (id)       => request('DELETE', `/yara-rules/${id}`),
+    list:         ()         => request('GET',    '/yara-rules'),
+    get:          (id)       => request('GET',    `/yara-rules/${id}`),
+    create:       (data)     => request('POST',   '/yara-rules', data),
+    update:       (id, data) => request('PUT',    `/yara-rules/${id}`, data),
+    delete:       (id)       => request('DELETE', `/yara-rules/${id}`),
+    generateYara: (data)     => request('POST',   '/yara-rules/generate', data),
     exportUrl: ()         => {
       const token = getToken()
       return `/api/v1/yara-rules/export${token ? `?_token=${encodeURIComponent(token)}` : ''}`

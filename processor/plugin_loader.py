@@ -72,7 +72,9 @@ class PluginLoader:
 
         # Sort descending by PLUGIN_PRIORITY so high-priority specific parsers
         # are always tried before generic fallbacks (log2timeline, plaso).
-        self._plugin_classes.sort(key=lambda c: c.PLUGIN_PRIORITY, reverse=True)
+        # getattr default=50 keeps old plugins (pre-PLUGIN_PRIORITY) working
+        # without a full container rebuild.
+        self._plugin_classes.sort(key=lambda c: getattr(c, 'PLUGIN_PRIORITY', 50), reverse=True)
 
         self._loaded = True
         logger.info(

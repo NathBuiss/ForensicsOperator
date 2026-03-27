@@ -3,13 +3,64 @@ import { RefreshCw, Upload, AlertTriangle } from 'lucide-react'
 import { api } from '../api/client'
 import { useUpload } from '../contexts/UploadContext'
 
-const ACCEPTED_TYPES = ['.evtx', '.plaso', '.pf', '.lnk', '.dat', '.hive', '.jsonl', '.csv', '.zip',
-                         '.pcap', '.pcapng', '.cap', '.sqlite', '.db', '.sqlite3', '.sqlitedb',
-                         '.plist', '.xml', '.log', '.ab', '.txt']
-const ACCEPTED_NAMES = ['$MFT', 'NTUSER.DAT', 'SYSTEM', 'SOFTWARE', 'SAM', 'SECURITY',
-                        'HISTORY', 'COOKIES', 'LOGIN DATA', 'BOOKMARKS', 'WEB DATA',
-                        'PLACES.SQLITE', 'COOKIES.SQLITE']
-const ACCEPT_ATTR   = [...ACCEPTED_TYPES, ...ACCEPTED_NAMES.map(n => `.${n.replace('$', '')}`)].join(',')
+// ── Accepted file types ───────────────────────────────────────────────────
+// Covers every extension recognised by the built-in plugins and module runners.
+// The accept attribute is a hint to the OS file picker — not a hard block.
+const ACCEPTED_TYPES = [
+  // Windows event logs & artifacts
+  '.evtx', '.evt',
+  // Plaso storage file
+  '.plaso',
+  // Prefetch, LNK, Registry hives
+  '.pf', '.lnk', '.dat', '.hive',
+  // Network captures
+  '.pcap', '.pcapng', '.cap',
+  // Structured logs / NDJSON
+  '.log', '.json', '.ndjson', '.jsonl',
+  // SQLite / ESE databases
+  '.sqlite', '.db', '.sqlite3', '.sqlitedb', '.db3', '.esedb', '.edb',
+  // Memory forensics images
+  '.dmp', '.raw', '.lime', '.mem', '.vmem', '.vmdk', '.dd', '.img',
+  '.e01', '.ex01', '.001',
+  // macOS artifacts
+  '.plist', '.asl',
+  // Linux login records
+  '.utmp', '.utmpx', '.wtmp',
+  // Office / OLE documents (oletools)
+  '.doc', '.docm', '.docx',
+  '.xls', '.xlsm', '.xlsx',
+  '.ppt', '.pptm', '.pptx',
+  '.rtf', '.mht',
+  // PE / executables / binaries
+  '.exe', '.dll', '.sys', '.scr', '.ocx', '.so', '.elf', '.bin',
+  // Archives (auto-extracted on ingest)
+  '.zip', '.tar', '.gz', '.7z', '.rar',
+  // Android backup
+  '.ab',
+  // Scripts / text / CSV
+  '.ps1', '.bat', '.vbs', '.js', '.txt', '.csv',
+  // Misc
+  '.msi', '.jar', '.pdf', '.xml',
+]
+
+const ACCEPTED_NAMES = [
+  // Windows Registry hives (no extension)
+  '$MFT', 'NTUSER.DAT', 'USRCLASS.DAT', 'SYSTEM', 'SOFTWARE', 'SAM', 'SECURITY', 'DEFAULT',
+  // Browser artefacts
+  'HISTORY', 'COOKIES', 'LOGIN DATA', 'BOOKMARKS', 'WEB DATA', 'FAVICONS', 'SHORTCUTS',
+  'TOP SITES', 'PLACES.SQLITE', 'COOKIES.SQLITE', 'FORMHISTORY.SQLITE',
+  // iOS / macOS
+  'SMS.DB', 'CALL_HISTORY.DB', 'ADDRESSBOOK.SQLITEDB', 'CONSOLIDATED.DB', 'MANIFEST.DB',
+  // Zeek named logs
+  'CONN.LOG', 'DNS.LOG', 'HTTP.LOG', 'SSL.LOG', 'SSH.LOG', 'FTP.LOG', 'SMTP.LOG',
+  'FILES.LOG', 'WEIRD.LOG', 'NOTICE.LOG',
+  // Linux syslogs
+  'SYSLOG', 'AUTH.LOG', 'KERN.LOG', 'DAEMON.LOG', 'MESSAGES', 'SECURE', 'DMESG',
+  // Suricata
+  'EVE.JSON',
+]
+
+const ACCEPT_ATTR = [...ACCEPTED_TYPES, ...ACCEPTED_NAMES.map(n => `.${n.replace(/^\$/, '')}`)].join(',')
 
 const STUCK_THRESHOLD_MS = 5 * 60 * 1000  // 5 minutes
 
@@ -264,7 +315,7 @@ export default function Ingest({ caseId, onComplete }) {
     <div className="p-6 max-w-2xl">
       <h2 className="text-sm font-semibold text-brand-text mb-1">Ingest Forensics Files</h2>
       <p className="text-xs text-gray-500 mb-1">
-        Supported: {ACCEPTED_TYPES.join(', ')}, {ACCEPTED_NAMES.join(', ')}
+        Supported: {ACCEPTED_TYPES.join(' ')} and common named artefacts (NTUSER.DAT, $MFT, conn.log, eve.json…)
       </p>
       <p className="text-xs text-gray-400 mb-4">
         📦 <strong>.zip</strong> archives are extracted automatically — each file inside is processed as a separate job.
