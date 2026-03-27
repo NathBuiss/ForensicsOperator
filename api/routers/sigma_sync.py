@@ -6,7 +6,7 @@ from typing import Optional, List
 
 import redis as redis_lib
 from config import settings
-from auth.dependencies import require_role
+from auth.dependencies import require_admin
 from services.sigma_sync import SigmaSyncService
 
 router = APIRouter(tags=["sigma-sync"])
@@ -26,7 +26,7 @@ class SigmaSyncResponse(BaseModel):
 
 
 @router.get("/sigma/status")
-def get_sigma_status(current_user: dict = Depends(require_role("admin"))):
+def get_sigma_status(current_user: dict = Depends(require_admin)):
     """Get Sigma HQ sync status."""
     service = SigmaSyncService()
     return service.get_sync_status()
@@ -35,7 +35,7 @@ def get_sigma_status(current_user: dict = Depends(require_role("admin"))):
 @router.post("/sigma/sync", response_model=SigmaSyncResponse)
 def sync_sigma_rules(
     request: SigmaSyncRequest,
-    current_user: dict = Depends(require_role("admin"))
+    current_user: dict = Depends(require_admin)
 ):
     """
     Sync rules from Sigma HQ.
@@ -67,7 +67,7 @@ def sync_sigma_rules(
 
 
 @router.delete("/sigma/clear")
-def clear_sigma_rules(current_user: dict = Depends(require_role("admin"))):
+def clear_sigma_rules(current_user: dict = Depends(require_admin)):
     """Clear all synced Sigma HQ rules."""
     service = SigmaSyncService()
     result = service.clear_sigma_rules()
@@ -78,7 +78,7 @@ def clear_sigma_rules(current_user: dict = Depends(require_role("admin"))):
 def list_sigma_rules(
     skip: int = 0,
     limit: int = 50,
-    current_user: dict = Depends(require_role("admin"))
+    current_user: dict = Depends(require_admin)
 ):
     """List synced Sigma HQ rules."""
     redis_client = redis_lib.Redis.from_url(settings.REDIS_URL, decode_responses=True)
