@@ -601,7 +601,8 @@ def rollout_restart_apps():
     Required when images are loaded directly into containerd (k3s / kind) with
     a fixed tag — Kubernetes has no way to detect the image changed, so it won't
     restart pods on its own.  This sets the restart annotation and waits up to
-    90 s per deployment.
+    5 minutes per deployment (processor has 3 init containers that may need to
+    wait for ES / Redis / MinIO, so a generous timeout is needed).
     """
     step("Restarting application pods (api · processor · frontend)")
     for svc in SERVICES:
@@ -614,16 +615,16 @@ def rollout_restart_apps():
         else:
             warn(f"Could not restart {svc} — skipping (may not exist on first deploy)")
 
-    # Wait for each rollout to finish (non-blocking warn on timeout)
+    # Wait for each rollout to finish
     for svc in SERVICES:
         r = run(
-            ["kubectl", "rollout", "status", f"deployment/{svc}", "-n", NS, "--timeout=90s"],
+            ["kubectl", "rollout", "status", f"deployment/{svc}", "-n", NS, "--timeout=5m0s"],
             capture=True, check=False,
         )
         if r.returncode == 0:
             ok(f"Rollout complete: {svc}")
         else:
-            warn(f"Rollout timeout for {svc} — pods may still be starting")
+            warn(f"Rollout timeout for {svc} — pods may still be initialising (check: kubectl get pods -n {NS})")
 
 
 def clear_stale_celery_tasks():
@@ -764,6 +765,7 @@ def print_summary(cfg):
        python3 deploy.py --status          # pod health
        python3 deploy.py --logs api        # stream API logs
        python3 deploy.py --logs processor  # stream processor logs
+       python3 deploy.py --restart         # re-apply + restart pods (no rebuild)
        python3 deploy.py --no-build        # re-apply config without rebuilding
        python3 deploy.py --destroy         # remove everything
 """)
@@ -806,6 +808,9 @@ def cmd_destroy(cfg):
 def main():
     p = argparse.ArgumentParser(description="TraceX — universal deploy")
     p.add_argument("--no-build",      action="store_true", help="Skip Docker image build")
+    p.add_argument("--restart",       action="store_true",
+                   help="Skip build AND image load — just re-apply manifests and force-restart pods. "
+                        "Use after 'git pull' when images are already in the registry/cluster.")
     p.add_argument("--status",        action="store_true", help="Show pod/service status")
     p.add_argument("--destroy",       action="store_true", help="Delete namespace / cluster")
     p.add_argument("--logs",          metavar="SERVICE",   help="Stream logs (api/processor/frontend)")
@@ -821,13 +826,18 @@ def main():
     if args.logs:    cmd_logs(args.logs); return
     if args.destroy: cmd_destroy(cfg); return
 
+    # --restart implies --no-build
+    if args.restart:
+        args.no_build = True
+
     # ── Deployment ────────────────────────────────────────────────────────────
-    print("\n  TraceX — Deploying\n")
+    mode = "Restart-only" if args.restart else ("No-build" if args.no_build else "Full")
+    print(f"\n  TraceX — Deploying ({mode})\n")
     info(f"Context  : {cfg['cluster'].get('context') or '(current)'}")
     info(f"Hostname : {cfg['access']['hostname']}")
     info(f"Registry : {cfg['images']['registry'] or '(none — direct load)'}")
     info(f"ES heap  : {cfg['resources']['elasticsearch_heap_mb']} MB")
-    
+
     # ⚠️  CRITICAL: This script ONLY manages the forensics-operator namespace
     info("\n  ⚠️  This script will NOT touch:")
     info("     - analyse namespace (CoreDNS, Bloodhound, etc.)")
@@ -836,7 +846,7 @@ def main():
     info("     - Any other namespace")
     info(f"     Only {NS} namespace will be modified.\n")
 
-    # 1. Verify Docker is up (needed for build/load — not required for --no-build)
+    # 1. Verify Docker is up (needed for build/load — not required for --no-build/--restart)
     if not args.no_build:
         if not cmd_exists("docker"):
             die("Docker not found. Install Docker Desktop or the Docker CLI.")
@@ -852,7 +862,7 @@ def main():
         build_images(cfg)
 
     # 4. Load images into the cluster (auto-detects engine).
-    #    Skipped with --no-build: manifests are re-applied as-is, images already present.
+    #    Skipped with --no-build / --restart: manifests are re-applied as-is.
     if not args.no_build:
         pull_policy = load_images(cfg)
     else:
@@ -869,20 +879,22 @@ def main():
     # 8. Apply all manifests with substituted values
     apply_all_manifests(cfg, pull_policy, setup_traefik=args.setup_traefik)
 
-    # 9. Force-restart app pods so they pick up the newly loaded images.
-    #    (k3s loads images directly into containerd — kubectl apply alone does
-    #     NOT trigger a rollout when the image tag is unchanged.)
-    rollout_restart_apps()
-
-    # 10. Clear any stale Celery tasks from the default queue
-    clear_stale_celery_tasks()
-
-    # 11. Verify Celery workers are consuming from correct queues
-    verify_celery_queues()
-
-    # 12. Wait for Elasticsearch, apply index template
+    # 9. Wait for Elasticsearch BEFORE restarting app pods — the processor has
+    #    an init container that blocks until ES is up.  Restarting first would
+    #    cause the processor rollout to time out waiting for that init container.
     wait_for_elasticsearch()
     apply_es_template()
+
+    # 10. Force-restart app pods so they pick up the newly loaded images.
+    #     (k3s loads images directly into containerd — kubectl apply alone does
+    #      NOT trigger a rollout when the image tag is unchanged.)
+    rollout_restart_apps()
+
+    # 11. Clear any stale Celery tasks from the default queue
+    clear_stale_celery_tasks()
+
+    # 12. Verify Celery workers are consuming from correct queues
+    verify_celery_queues()
 
     # 13. Done
     print_summary(cfg)

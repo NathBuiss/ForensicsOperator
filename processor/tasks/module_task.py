@@ -946,25 +946,24 @@ def _run_strings(run_id: str, work_dir: Path, sources_dir: Path, params: dict, t
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _run_hindsight(run_id: str, work_dir: Path, sources_dir: Path, params: dict, tool_meta: dict) -> list[dict]:
-    # 1. Try PATH first
-    hindsight_bin = shutil.which("hindsight") or shutil.which("hindsight.py")
+    # Prefer `python -m hindsight` — avoids PATH / permission issues with the
+    # pip-installed console script (e.g. /usr/local/bin/hindsight.py not executable).
+    use_module = importlib.util.find_spec("hindsight") is not None
+    hindsight_bin = None
 
-    # 2. pip may install scripts outside PATH — check the canonical scripts dir
-    if not hindsight_bin:
-        scripts_dir = sysconfig.get_path("scripts")
-        if scripts_dir:
-            for candidate in (os.path.join(scripts_dir, "hindsight"),
-                              os.path.join(scripts_dir, "hindsight.py")):
-                if os.path.isfile(candidate):
-                    hindsight_bin = candidate
-                    break
+    if not use_module:
+        # Fall back to an executable binary in PATH or the canonical scripts dir
+        hindsight_bin = shutil.which("hindsight") or shutil.which("hindsight.py")
+        if not hindsight_bin:
+            scripts_dir = sysconfig.get_path("scripts")
+            if scripts_dir:
+                for candidate in (os.path.join(scripts_dir, "hindsight"),
+                                  os.path.join(scripts_dir, "hindsight.py")):
+                    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                        hindsight_bin = candidate
+                        break
 
-    # 3. pyhindsight has __main__.py — use `python -m hindsight` when importable
-    use_module = False
-    if not hindsight_bin and importlib.util.find_spec("hindsight") is not None:
-        use_module = True
-
-    if not hindsight_bin and not use_module:
+    if not use_module and not hindsight_bin:
         raise RuntimeError(
             "hindsight binary not found. Ensure pyhindsight is installed in the processor image."
         )

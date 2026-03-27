@@ -320,6 +320,7 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
   const [yaraRules, setYaraRules]           = useState('')
   const [yaraValidating, setYaraValidating] = useState(false)
   const [yaraValid, setYaraValid]           = useState(null)  // null | {valid, error}
+  const [grepPatterns, setGrepPatterns]     = useState('')
   const yaraDebounce                        = useRef(null)
 
   useEffect(() => {
@@ -384,6 +385,7 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
     setSelectedJobs(new Set())
     setYaraRules('')
     setYaraValid(null)
+    setGrepPatterns('')
   }
 
   async function handleRun() {
@@ -395,6 +397,9 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
       const params = {}
       if (selectedModule.id === 'yara' && yaraRules.trim()) {
         params.custom_rules = yaraRules.trim()
+      }
+      if (selectedModule.id === 'grep_search' && grepPatterns.trim()) {
+        params.patterns = grepPatterns.split('\n').map(p => p.trim()).filter(Boolean)
       }
       const run = await api.modules.createRun(caseId, {
         module_id: selectedModule.id,
@@ -565,6 +570,23 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
                         )}
                       </div>
                     </>
+                  )}
+
+                  {/* ── Grep search patterns ─────────────────────────────── */}
+                  {selectedModule.id === 'grep_search' && (
+                    <div className="flex-1 flex flex-col px-4 pb-4 min-h-0">
+                      <p className="section-title text-[11px] uppercase tracking-wider text-gray-400 mb-2 flex-shrink-0">
+                        Search Patterns
+                        <span className="ml-1.5 font-normal normal-case text-gray-400">(one regex per line — leave empty for built-in IOC patterns)</span>
+                      </p>
+                      <textarea
+                        value={grepPatterns}
+                        onChange={e => setGrepPatterns(e.target.value)}
+                        placeholder={"192\\.168\\.\\d+\\.\\d+\ncmd\\.exe\nbase64\\.b64decode"}
+                        spellCheck={false}
+                        className="flex-1 w-full min-h-0 px-3 py-2.5 text-[11px] font-mono border border-gray-200 bg-gray-950 text-green-300 rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-brand-accent/30 focus:border-brand-accent leading-relaxed"
+                      />
+                    </div>
                   )}
 
                   {/* ── YARA custom rules ─────────────────────────────────── */}
