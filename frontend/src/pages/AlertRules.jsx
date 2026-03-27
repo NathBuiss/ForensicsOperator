@@ -3,6 +3,41 @@ import { AlertTriangle, Plus, Trash2, Play, CheckCircle, Loader2,
          ChevronDown, ChevronUp, Sparkles, Brain, RefreshCw, Clock } from 'lucide-react'
 import { api } from '../api/client'
 
+function LibraryRulesList({ rules }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="mb-4 border border-gray-800/40 rounded-xl overflow-hidden">
+      <button
+        onClick={() => setOpen(v => !v)}
+        className="w-full flex items-center justify-between px-3 py-2.5 bg-gray-900/40 hover:bg-gray-900/60 transition-colors text-xs"
+      >
+        <span className="flex items-center gap-1.5 font-semibold text-gray-400">
+          <Play size={9} className="text-brand-accent" />
+          Library Rules — run by "Check All"
+        </span>
+        <span className="flex items-center gap-2 text-gray-500">
+          <span className="badge bg-gray-700/60 text-gray-400 border border-gray-600/40 text-[9px]">{rules.length} rules</span>
+          {open ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+        </span>
+      </button>
+      {open && (
+        <div className="max-h-64 overflow-y-auto divide-y divide-gray-800/30">
+          {rules.map(rule => (
+            <div key={rule.id} className="flex items-center gap-2 px-3 py-1.5 text-xs">
+              <AlertTriangle size={9} className="text-amber-500 flex-shrink-0" />
+              <span className="text-gray-300 truncate flex-1">{rule.name}</span>
+              {rule.artifact_type && (
+                <span className="text-[9px] text-gray-500 flex-shrink-0">{rule.artifact_type}</span>
+              )}
+              <span className="text-gray-600 text-[9px] flex-shrink-0">≥{rule.threshold}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function AlertRules({ caseId }) {
   const [rules, setRules]             = useState([])
   const [libraryRules, setLibraryRules] = useState([])
@@ -286,7 +321,7 @@ export default function AlertRules({ caseId }) {
       )}
 
       {/* Check results */}
-      {run?.ran_at && (
+      {run?.rules_checked !== undefined && (
         <div className={`card p-4 mb-4 ${matches.length > 0 ? 'border-yellow-800/50 bg-yellow-950/10' : 'border-green-800/50 bg-green-950/10'}`}>
           <div className="flex items-center gap-2 mb-2">
             {matches.length > 0
@@ -299,7 +334,7 @@ export default function AlertRules({ caseId }) {
             </span>
             <span className="text-xs text-gray-500 ml-auto flex items-center gap-1">
               <Clock size={10} />
-              {new Date(run.ran_at).toLocaleString()}
+              {run.ran_at ? new Date(run.ran_at).toLocaleString() : 'just now'}
               <span className="ml-1">{run.rules_checked} rules checked</span>
             </span>
           </div>
@@ -342,26 +377,9 @@ export default function AlertRules({ caseId }) {
         </div>
       )}
 
-      {/* Library rules — read-only, these are what Check All runs */}
+      {/* Library rules — collapsible, read-only, these are what Check All runs */}
       {libraryRules.length > 0 && (
-        <div className="mb-4">
-          <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
-            <Play size={9} className="text-brand-accent" />
-            Library Rules — checked by "Check All" ({libraryRules.length})
-          </p>
-          <div className="space-y-1">
-            {libraryRules.map(rule => (
-              <div key={rule.id} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-900/40 border border-gray-800/40 text-xs">
-                <AlertTriangle size={10} className="text-amber-500 flex-shrink-0" />
-                <span className="font-medium text-gray-300 truncate">{rule.name}</span>
-                {rule.artifact_type && (
-                  <span className="badge bg-gray-700/60 text-gray-400 border border-gray-600/40 text-[9px] flex-shrink-0">{rule.artifact_type}</span>
-                )}
-                <span className="text-gray-600 text-[9px] flex-shrink-0 ml-auto">≥{rule.threshold}</span>
-              </div>
-            ))}
-          </div>
-        </div>
+        <LibraryRulesList rules={libraryRules} />
       )}
 
       {/* Case-specific rules list */}
