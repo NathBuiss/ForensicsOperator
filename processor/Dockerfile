@@ -45,6 +45,12 @@ RUN wget -q -O /tmp/regripper.zip \
 COPY processor/requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
+# ccl-chromium-reader is required by pyhindsight but is not published to PyPI.
+# Install directly from the GitHub source tarball.
+RUN pip3 install --no-cache-dir \
+    "https://github.com/cclgroupltd/ccl-chromium-reader/archive/refs/heads/main.tar.gz" \
+    || echo "Warning: ccl-chromium-reader unavailable — Chrome history parsing will fail"
+
 # ── Processor source code ─────────────────────────────────────────────────────
 COPY processor/ .
 RUN touch tasks/__init__.py utils/__init__.py
