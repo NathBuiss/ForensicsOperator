@@ -7,7 +7,8 @@ LnkParse3==1.4.0
 mft==0.7.0
 python-magic==0.4.27
 pyhindsight>=3.4.0
-# ccl-chromium-reader is a pyhindsight dep not on PyPI — installed via GitHub tarball in Dockerfile
+# ccl_chromium_reader is a pyhindsight dep not on PyPI — installed via git+https in Dockerfile:
+# pip install git+https://github.com/cclgroupltd/ccl_chromium_reader.git
 pefile>=2023.2.7
 oletools>=0.60
 dpkt>=1.9.8
