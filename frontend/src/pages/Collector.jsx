@@ -148,7 +148,9 @@ const PLATFORMS = [
     selectedBg: 'bg-violet-50',
     desc: 'Auto-detects OS at runtime — Windows + Linux + macOS',
     tip: 'Best when the target already has Python 3.8+. Manually select artifacts below.',
-    artifacts: [...WINDOWS_ARTIFACTS, ...LINUX_ARTIFACTS],
+    artifacts: [...WINDOWS_ARTIFACTS, ...LINUX_ARTIFACTS].filter(
+      (a, i, arr) => arr.findIndex(b => b.key === a.key) === i
+    ),
   },
 ]
 

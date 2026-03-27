@@ -130,7 +130,17 @@ export default function AlertRules({ caseId }) {
       )
     }
 
-    if (!analysis) return null
+    if (!analysis) {
+      return (
+        <button
+          onClick={() => runAnalysis(ruleId)}
+          className="mt-1 flex items-center gap-1 text-[10px] text-gray-600 hover:text-purple-400 transition-colors"
+          title="Run AI forensic analysis on this match"
+        >
+          <Brain size={10} /> AI Analysis
+        </button>
+      )
+    }
 
     return (
       <div className="mt-2 p-2 rounded bg-purple-950/20 border border-purple-900/40 space-y-1.5">
