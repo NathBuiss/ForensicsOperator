@@ -11,6 +11,7 @@ import { api } from '../api/client'
 import Timeline from './Timeline'
 import Ingest from './Ingest'
 import CollectorModal from '../components/CollectorModal'
+import AlertRules from './AlertRules'
 
 // ── Artifact badge colours ────────────────────────────────────────────────────
 const ARTIFACT_BADGE = {
@@ -1480,6 +1481,7 @@ export default function CaseTimeline() {
   const [showModules, setShowModules]       = useState(false)
   const [showModuleRuns, setShowModuleRuns] = useState(false)
   const [showCollector, setShowCollector]   = useState(false)
+  const [showAlertRules, setShowAlertRules] = useState(false)
 
   const loadCase = useCallback(() => {
     api.cases.get(caseId)
@@ -1570,15 +1572,11 @@ export default function CaseTimeline() {
           </button>
 
           <button
-            onClick={runAlerts}
-            disabled={runningAlerts}
-            className="btn-outline"
+            onClick={() => setShowAlertRules(v => !v)}
+            className={`btn-outline ${showAlertRules ? 'bg-yellow-50 border-yellow-300 text-yellow-700' : ''}`}
           >
-            {runningAlerts
-              ? <Loader2 size={14} className="animate-spin" />
-              : <Bell size={14} />
-            }
-            {runningAlerts ? 'Running…' : 'Run Alerts'}
+            <Bell size={14} />
+            Alert Rules
           </button>
 
           <button
@@ -1623,6 +1621,27 @@ export default function CaseTimeline() {
           onClose={() => setShowIngest(false)}
           onComplete={() => { setShowIngest(false); loadCase() }}
         />
+      )}
+
+      {showAlertRules && (
+        <div className="panel-backdrop" onClick={() => setShowAlertRules(false)}>
+          <div
+            className="absolute right-0 top-0 h-full w-[600px] bg-white border-l border-gray-200 flex flex-col overflow-y-auto"
+            style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.10)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 flex-shrink-0">
+              <div className="flex items-center gap-2">
+                <Bell size={15} className="text-yellow-500" />
+                <span className="font-semibold text-brand-text text-sm">Alert Rules</span>
+              </div>
+              <button onClick={() => setShowAlertRules(false)} className="btn-ghost p-1.5 rounded-lg">
+                <X size={16} />
+              </button>
+            </div>
+            <AlertRules caseId={caseId} />
+          </div>
+        </div>
       )}
 
       {alertResults && (
