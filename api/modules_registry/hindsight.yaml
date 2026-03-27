@@ -13,6 +13,7 @@ input_filenames:
   - Favicons
   - Shortcuts
   - Top Sites
-available: true
+available: false
+unavailable_reason: "Requires pyhindsight — pip install pyhindsight in the processor image"
 category: Browser Forensics
 tags: [browser, chrome, firefox, edge, history, cookies]

@@ -50,6 +50,7 @@ class SuricataPlugin(BasePlugin):
     """Parses Suricata EVE JSON log output."""
 
     PLUGIN_NAME = "suricata"
+    PLUGIN_PRIORITY = 100
     PLUGIN_VERSION = "1.0.0"
     DEFAULT_ARTIFACT_TYPE = "suricata"
     SUPPORTED_EXTENSIONS = [".json", ".jsonl", ".ndjson"]

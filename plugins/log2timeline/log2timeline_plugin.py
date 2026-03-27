@@ -82,6 +82,8 @@ class Log2TimelinePlugin(BasePlugin):
     DEFAULT_ARTIFACT_TYPE = "log2timeline"
     SUPPORTED_EXTENSIONS = sorted(_PRIMARY_EXTENSIONS | _SECONDARY_EXTENSIONS)
     SUPPORTED_MIME_TYPES = []   # detected by extension / filename
+    # Generic fallback — must lose to every dedicated parser
+    PLUGIN_PRIORITY = 10
 
     def __init__(self, context: PluginContext) -> None:
         super().__init__(context)
@@ -96,6 +98,10 @@ class Log2TimelinePlugin(BasePlugin):
 
     @classmethod
     def can_handle(cls, file_path: Path, mime_type: str) -> bool:
+        # Refuse immediately if the binary is not installed so the job
+        # fails with "no plugin found" rather than a runtime PluginFatalError.
+        if not (shutil.which("log2timeline.py") or shutil.which("log2timeline")):
+            return False
         # Primary: extensions / filenames with no dedicated plugin
         name = file_path.name.upper()
         ext  = file_path.suffix.lower()

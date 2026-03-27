@@ -148,14 +148,19 @@ export default function Performance() {
   const [esExpanded, setEsExpanded] = useState(false)
   const intervalRef = useRef(null)
 
+  // History (Redis LRANGE) is fast — update it independently so sparklines
+  // appear without waiting for the slow dashboard call (ES/Celery/MinIO).
+  function fetchHistory() {
+    api.metrics.history(480)
+      .then(hist => setHistory(hist.snapshots || []))
+      .catch(() => {})
+  }
+
   async function fetchMetrics() {
+    fetchHistory()   // fire-and-forget; resolves state when ready
     try {
-      const [res, hist] = await Promise.all([
-        api.metrics.dashboard(),
-        api.metrics.history(480),
-      ])
+      const res = await api.metrics.dashboard()
       setData(res)
-      setHistory(hist.snapshots || [])
       setError(null)
     } catch (err) {
       setError(err.message)

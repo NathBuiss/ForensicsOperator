@@ -22,7 +22,7 @@ from config import settings
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
 # Per-section deadline in seconds.  Total endpoint budget ≈ _SECTION_TIMEOUT + 0.5 s.
-_SECTION_TIMEOUT = 3.0
+_SECTION_TIMEOUT = 1.5
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

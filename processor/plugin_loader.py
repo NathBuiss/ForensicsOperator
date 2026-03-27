@@ -70,6 +70,10 @@ class PluginLoader:
         else:
             logger.debug("Custom ingester dir %s not found — skipping", self.ingester_dir)
 
+        # Sort descending by PLUGIN_PRIORITY so high-priority specific parsers
+        # are always tried before generic fallbacks (log2timeline, plaso).
+        self._plugin_classes.sort(key=lambda c: c.PLUGIN_PRIORITY, reverse=True)
+
         self._loaded = True
         logger.info(
             "Loaded %d plugin class(es): %s",

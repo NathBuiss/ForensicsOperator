@@ -306,7 +306,10 @@ def run_module(
         }
         runner = RUNNERS.get(module_id)
 
-        if runner is not None:
+        if module_id == "cti_match":
+            # Special runner: queries ES events directly — needs case_id
+            results = _run_cti_match(run_id, case_id, work_dir, sources_dir, params, tool_meta)
+        elif runner is not None:
             # Built-in module — run directly in this process
             results = runner(run_id, work_dir, sources_dir, params, tool_meta)
         else:
@@ -3672,4 +3675,160 @@ def _run_malwoverview(
             tool_meta["stderr"] += f"  Error processing {file_path.name}: {exc}\n"
 
     tool_meta["log"] += f"\nmalwoverview: {len(results)} file(s) queried\n"
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CTI IOC Matching
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CTI_IOC_TYPES = ("hash", "ip", "domain", "url", "email", "filename")
+_CTI_TYPE_KEY  = "fo:cti:iocs:type:{type}"
+
+_CTI_MATCH_FIELDS: dict[str, list[str]] = {
+    "hash":     ["process.hash.md5", "process.hash.sha1", "process.hash.sha256",
+                 "file.hash.md5", "file.hash.sha1", "file.hash.sha256", "message"],
+    "ip":       ["network.src_ip", "network.dst_ip", "network.dest_ip",
+                 "source.ip", "destination.ip", "message"],
+    "domain":   ["dns.question.name", "url.domain", "host.hostname", "message"],
+    "url":      ["url.full", "url.original", "message"],
+    "email":    ["email.from.address", "email.to.address", "user.email", "message"],
+    "filename": ["file.name", "process.executable", "process.name", "message"],
+}
+
+_CTI_BATCH_SIZE = 500
+
+
+def _cti_get_nested(doc: dict, dotted_key: str):
+    """Safely traverse a nested dict by dotted key path."""
+    parts = dotted_key.split(".")
+    cur = doc
+    for part in parts:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+        if cur is None:
+            return None
+    return cur
+
+
+def _run_cti_match(
+    run_id: str,
+    case_id: str,
+    work_dir: Path,
+    sources_dir: Path,
+    params: dict,
+    tool_meta: dict,
+) -> list[dict]:
+    """Scan all case events in Elasticsearch against the CTI IOC database."""
+    r = redis.from_url(REDIS_URL, decode_responses=True)
+
+    # Load all IOCs into memory grouped by type
+    ioc_sets: dict[str, dict[str, dict]] = {}
+    for ioc_type in _CTI_IOC_TYPES:
+        type_key = _CTI_TYPE_KEY.format(type=ioc_type)
+        members = r.smembers(type_key)
+        lookup: dict[str, dict] = {}
+        for m in members:
+            try:
+                obj = json.loads(m)
+                val = obj.get("value", "").lower()
+                if val:
+                    lookup[val] = obj
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if lookup:
+            ioc_sets[ioc_type] = lookup
+
+    total_iocs = sum(len(v) for v in ioc_sets.values())
+    tool_meta["log"] += f"Loaded {total_iocs} IOC(s) across {len(ioc_sets)} type(s)\n"
+
+    if not ioc_sets:
+        tool_meta["stdout"] += "No IOCs loaded — ingest CTI feeds first.\n"
+        return []
+
+    # Scan ES events in batches via search_after (no scroll TTL issues)
+    index = f"fo-case-{case_id}-*"
+    results: list[dict] = []
+    events_scanned = 0
+    search_after = None
+
+    while True:
+        body: dict = {
+            "query": {"match_all": {}},
+            "size": _CTI_BATCH_SIZE,
+            "sort": [{"_doc": "asc"}],
+            "_source": True,
+        }
+        if search_after:
+            body["search_after"] = search_after
+
+        try:
+            url  = f"{ELASTICSEARCH_URL.rstrip('/')}/{index}/_search"
+            data = json.dumps(body).encode("utf-8")
+            req  = urllib.request.Request(
+                url, data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                es_resp = json.loads(resp.read())
+        except Exception as exc:
+            logger.error("[%s] CTI match ES query failed: %s", run_id, exc)
+            tool_meta["stderr"] += f"ES query failed: {exc}\n"
+            break
+
+        hits = es_resp.get("hits", {}).get("hits", [])
+        if not hits:
+            break
+
+        for hit in hits:
+            source      = hit.get("_source", {})
+            event_fo_id = source.get("fo_id", hit.get("_id", ""))
+            event_ts    = source.get("timestamp", "")
+            host_obj    = source.get("host", {})
+            hostname    = host_obj.get("hostname", "") if isinstance(host_obj, dict) else ""
+            events_scanned += 1
+
+            for ioc_type, lookup in ioc_sets.items():
+                fields = _CTI_MATCH_FIELDS.get(ioc_type, ["message"])
+                for field in fields:
+                    field_value = _cti_get_nested(source, field)
+                    if field_value is None:
+                        continue
+                    field_str = str(field_value).lower()
+                    for ioc_value, ioc_obj in lookup.items():
+                        if ioc_value in field_str:
+                            results.append({
+                                "id":            str(uuid.uuid4()),
+                                "timestamp":     event_ts,
+                                "level":         "high",
+                                "level_int":     LEVEL_INT.get("high", 4),
+                                "rule_title":    f"CTI Match — {ioc_type}: {ioc_obj.get('value', ioc_value)[:80]}",
+                                "computer":      hostname,
+                                "details_raw":   json.dumps({
+                                    "event_fo_id":   event_fo_id,
+                                    "ioc_type":      ioc_type,
+                                    "ioc_value":     ioc_obj.get("value", ioc_value),
+                                    "indicator_id":  ioc_obj.get("indicator_id", ""),
+                                    "feed_name":     ioc_obj.get("feed_name", ""),
+                                    "matched_field": field,
+                                }),
+                                "event_fo_id":   event_fo_id,
+                                "ioc_type":      ioc_type,
+                                "ioc_value":     ioc_obj.get("value", ioc_value),
+                                "feed_name":     ioc_obj.get("feed_name", ""),
+                                "matched_field": field,
+                            })
+
+        search_after = hits[-1].get("sort")
+        if not search_after:
+            break
+
+    tool_meta["log"]    += f"Scanned {events_scanned} event(s), {len(results)} IOC match(es)\n"
+    tool_meta["stdout"] += (
+        f"Events scanned : {events_scanned}\n"
+        f"IOCs checked   : {total_iocs}\n"
+        f"Matches found  : {len(results)}\n"
+    )
     return results

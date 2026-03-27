@@ -59,6 +59,10 @@ class BasePlugin(abc.ABC):
     DEFAULT_ARTIFACT_TYPE: ClassVar[str] = "generic"
     SUPPORTED_EXTENSIONS: ClassVar[list[str]] = []
     SUPPORTED_MIME_TYPES: ClassVar[list[str]] = []
+    # Higher value = tried first. Specific parsers should use 100; generic
+    # fallbacks (log2timeline, plaso) should use 10 so they never shadow
+    # a dedicated plugin.
+    PLUGIN_PRIORITY: ClassVar[int] = 50
 
     def __init__(self, context: PluginContext) -> None:
         self.ctx = context
