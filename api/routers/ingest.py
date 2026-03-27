@@ -26,7 +26,6 @@ from typing import List
 
 from services import storage, jobs as job_svc
 from services.cases import get_case
-from config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["ingest"])
@@ -35,21 +34,9 @@ router = APIRouter(tags=["ingest"])
 # ── Celery dispatch ────────────────────────────────────────────────────────────
 
 def _dispatch_celery_task(job_id: str, case_id: str, minio_key: str, filename: str) -> None:
-    """Dispatch a Celery ingest task via send_task (no direct processor import needed)."""
-    from celery import Celery
-    app = Celery(broker=settings.REDIS_URL)
-    # Use the empty/default exchange so Kombu pushes *directly* to the Redis
-    # list named after the queue, bypassing binding-table lookups entirely.
-    app.conf.update(
-        task_default_exchange="",
-        task_default_exchange_type="direct",
-    )
-    app.send_task(
-        "ingest.process_artifact",
-        args=[job_id, case_id, minio_key, filename],
-        task_id=job_id,
-        queue="ingest",
-    )
+    """Dispatch a Celery ingest task via direct Redis push."""
+    from services.celery_dispatch import dispatch_ingest
+    dispatch_ingest(job_id, case_id, minio_key, filename)
 
 
 # ── Background upload helper ──────────────────────────────────────────────────

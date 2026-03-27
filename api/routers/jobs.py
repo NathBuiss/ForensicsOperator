@@ -1,10 +1,8 @@
 """Job status endpoints."""
 import logging
 
-from celery import Celery
 from fastapi import APIRouter, HTTPException
 
-from config import settings
 from services import jobs as job_svc
 
 logger = logging.getLogger(__name__)
@@ -55,18 +53,8 @@ def retry_job(job_id: str):
 
     # Re-dispatch the Celery ingest task
     try:
-        from celery import Celery
-        celery_app = Celery(broker=settings.REDIS_URL)
-        celery_app.conf.update(
-            task_default_exchange="",
-            task_default_exchange_type="direct",
-        )
-        celery_app.send_task(
-            "ingest.process_artifact",
-            args=[job_id, case_id, minio_object_key, original_filename],
-            task_id=job_id,
-            queue="ingest",
-        )
+        from services.celery_dispatch import dispatch_ingest
+        dispatch_ingest(job_id, case_id, minio_object_key, original_filename)
     except Exception as exc:
         logger.exception("Failed to re-dispatch Celery task for job %s", job_id)
         raise HTTPException(

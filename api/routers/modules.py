@@ -38,7 +38,6 @@ from services.cases import get_case
 from services import module_runs as run_svc, storage
 from services.module_runs import MALWARE_CASE_ID, get_redis
 from auth.dependencies import require_admin
-from config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["modules"])
@@ -240,18 +239,8 @@ def create_module_run(case_id: str, req: CreateModuleRunRequest):
     run_svc.create_module_run(run_id, case_id, req.module_id, source_files)
 
     try:
-        from celery import Celery
-        celery_app = Celery(broker=settings.REDIS_URL)
-        celery_app.conf.update(
-            task_default_exchange="",
-            task_default_exchange_type="direct",
-        )
-        celery_app.send_task(
-            "module.run",
-            args=[run_id, case_id, req.module_id, source_files, req.params],
-            task_id=run_id,
-            queue="modules",
-        )
+        from services.celery_dispatch import dispatch_module
+        dispatch_module(run_id, case_id, req.module_id, source_files, req.params)
     except Exception as exc:
         logger.error("Celery dispatch failed for module run %s: %s", run_id, exc)
         run_svc.update_module_run(run_id, status="FAILED", error=str(exc))
@@ -295,18 +284,8 @@ def retry_module_run(run_id: str):
     run_svc.reset_module_run_for_retry(run_id)
 
     try:
-        from celery import Celery
-        celery_app = Celery(broker=settings.REDIS_URL)
-        celery_app.conf.update(
-            task_default_exchange="",
-            task_default_exchange_type="direct",
-        )
-        celery_app.send_task(
-            "module.run",
-            args=[run_id, case_id, module_id, source_files, {}],
-            task_id=run_id,
-            queue="modules",
-        )
+        from services.celery_dispatch import dispatch_module
+        dispatch_module(run_id, case_id, module_id, source_files, {})
     except Exception as exc:
         logger.error("Celery dispatch failed for module run retry %s: %s", run_id, exc)
         run_svc.update_module_run(run_id, status="FAILED", error=str(exc))
@@ -368,18 +347,8 @@ def create_standalone_run(req: StandaloneRunRequest):
     run_svc.create_module_run(run_id, MALWARE_CASE_ID, req.module_id, source_files)
 
     try:
-        from celery import Celery
-        celery_app = Celery(broker=settings.REDIS_URL)
-        celery_app.conf.update(
-            task_default_exchange="",
-            task_default_exchange_type="direct",
-        )
-        celery_app.send_task(
-            "module.run",
-            args=[run_id, MALWARE_CASE_ID, req.module_id, source_files, req.params],
-            task_id=run_id,
-            queue="modules",
-        )
+        from services.celery_dispatch import dispatch_module
+        dispatch_module(run_id, MALWARE_CASE_ID, req.module_id, source_files, req.params)
     except Exception as exc:
         logger.error("Celery dispatch failed for standalone run %s: %s", run_id, exc)
         run_svc.update_module_run(run_id, status="FAILED", error=str(exc))
