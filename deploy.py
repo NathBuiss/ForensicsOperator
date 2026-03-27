@@ -274,8 +274,9 @@ def create_k3d_cluster(cfg):
 
 # ── Image build ───────────────────────────────────────────────────────────────
 
-def build_images(cfg):
-    step("Building Docker images")
+def build_images(cfg, no_cache=False):
+    step("Building Docker images" + (" (--no-cache)" if no_cache else ""))
+    cache_flag = ["--no-cache"] if no_cache else []
     for svc in SERVICES:
         img = image_name(svc, cfg)
         print(f"  Building {img} ...")
@@ -285,9 +286,9 @@ def build_images(cfg):
             #   api:       needs COPY collector/collect.py ...
             run(["docker", "build", "-t", img,
                  "-f", str(ROOT / svc / "Dockerfile"),
-                 str(ROOT)])
+                 str(ROOT)] + cache_flag)
         else:
-            run(["docker", "build", "-t", img, str(ROOT / svc)])
+            run(["docker", "build", "-t", img, str(ROOT / svc)] + cache_flag)
         ok(f"Built {img}")
 
 
@@ -302,7 +303,7 @@ def load_images(cfg):
     """
     if cfg["images"]["registry"]:
         push_to_registry(cfg)
-        return "IfNotPresent"   # cluster will pull from registry
+        return "Always"   # always pull so nodes pick up the newly pushed image
 
     engine, engine_id = detect_engine()
     step(f"Loading images into cluster (engine: {engine})")
@@ -334,6 +335,8 @@ def push_to_registry(cfg):
         img = image_name(svc, cfg)
         run(["docker", "push", img])
         ok(f"Pushed {img}")
+    # NOTE: returns "Always" so that after a push, nodes always pull the new image.
+    # "IfNotPresent" would silently keep the old cached image even after a push.
 
 
 def _load_k3d(cfg, cluster_name):
@@ -767,6 +770,7 @@ def print_summary(cfg):
        python3 deploy.py --logs processor  # stream processor logs
        python3 deploy.py --restart         # re-apply + restart pods (no rebuild)
        python3 deploy.py --no-build        # re-apply config without rebuilding
+       python3 deploy.py --no-cache        # full rebuild ignoring Docker cache
        python3 deploy.py --destroy         # remove everything
 """)
 
@@ -808,6 +812,7 @@ def cmd_destroy(cfg):
 def main():
     p = argparse.ArgumentParser(description="TraceX — universal deploy")
     p.add_argument("--no-build",      action="store_true", help="Skip Docker image build")
+    p.add_argument("--no-cache",      action="store_true", help="Pass --no-cache to docker build (force full rebuild)")
     p.add_argument("--restart",       action="store_true",
                    help="Skip build AND image load — just re-apply manifests and force-restart pods. "
                         "Use after 'git pull' when images are already in the registry/cluster.")
@@ -859,7 +864,7 @@ def main():
 
     # 3. Build images
     if not args.no_build:
-        build_images(cfg)
+        build_images(cfg, no_cache=getattr(args, 'no_cache', False))
 
     # 4. Load images into the cluster (auto-detects engine).
     #    Skipped with --no-build / --restart: manifests are re-applied as-is.

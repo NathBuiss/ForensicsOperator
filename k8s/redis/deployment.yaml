@@ -33,17 +33,7 @@ spec:
         - name: redis-data
           persistentVolumeClaim:
             claimName: redis-pvc
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: redis-pvc
-  namespace: __FO_NAMESPACE__
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: __FO_REDIS_STORAGE__
+
 ---
 apiVersion: v1
 kind: Service

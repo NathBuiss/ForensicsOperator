@@ -2,7 +2,7 @@
   "_readme": "Edit this file then run: python3 deploy.py",
 
   "_comment_namespace": "Kubernetes namespace for all deployed resources. Use different values for prod vs dev.",
-  "namespace": "forensics-operator",
+  "namespace": "forensics-operator-dev",
 
   "cluster": {
     "_comment_context": "The kubectl context to use. Leave empty to use whatever kubectl is currently pointing at.",
@@ -17,7 +17,7 @@
 
   "access": {
     "_comment": "The hostname you will type in your browser. Add it to /etc/hosts pointing to your cluster's ingress IP.",
-    "hostname": "forensics.local",
+    "hostname": "tracex-dev.csirt.lab",
     "http_port": 80,
     "https_port": 443,
 
@@ -46,30 +46,30 @@
 
   "resources": {
     "_comment": "Reduce elasticsearch_heap_mb to 256 on machines with less than 8 GB RAM.",
-    "elasticsearch_heap_mb": 512,
-    "elasticsearch_storage_gi": 10,
-    "minio_storage_gi": 20,
-    "redis_storage_gi": 2,
+    "elasticsearch_heap_mb": 2048,
+    "elasticsearch_storage_gi": 20,
+    "minio_storage_gi": 30,
+    "redis_storage_gi": 5,
     "_comment_api": "API resources: increase for better performance with large file uploads",
-    "api_memory_request": "512Mi",
-    "api_memory_limit": "2Gi",
-    "api_cpu_request": "100m",
-    "api_cpu_limit": "1000m",
+    "api_memory_request": "2Gi",
+    "api_memory_limit": "4Gi",
+    "api_cpu_request": "1000m",
+    "api_cpu_limit": "10000m",
     "_comment_processor": "Processor resources: increase for faster forensic analysis",
-    "processor_memory_request": "1Gi",
-    "processor_memory_limit": "8Gi",
-    "processor_cpu_request": "500m",
-    "processor_cpu_limit": "4000m",
+    "processor_memory_request": "8Gi",
+    "processor_memory_limit": "16Gi",
+    "processor_cpu_request": "5000m",
+    "processor_cpu_limit": "40000m",
     "_comment_minio": "MinIO resources: critical for upload performance",
-    "minio_memory_request": "1Gi",
-    "minio_memory_limit": "4Gi",
-    "minio_cpu_request": "250m",
-    "minio_cpu_limit": "1000m",
+    "minio_memory_request": "4Gi",
+    "minio_memory_limit": "8Gi",
+    "minio_cpu_request": "750m",
+    "minio_cpu_limit": "1500m",
     "_comment_frontend": "Frontend resources: lightweight",
-    "frontend_memory_request": "128Mi",
-    "frontend_memory_limit": "512Mi",
-    "frontend_cpu_request": "50m",
-    "frontend_cpu_limit": "200m"
+    "frontend_memory_request": "512Mi",
+    "frontend_memory_limit": "2048Mi",
+    "frontend_cpu_request": "250m",
+    "frontend_cpu_limit": "600m"
   },
 
   "images": {
