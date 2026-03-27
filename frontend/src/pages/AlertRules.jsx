@@ -141,7 +141,14 @@ export default function AlertRules({ caseId }) {
     setRunningCaseRuleId(rule.id)
     try {
       const r = await api.alertRules.runSingleCaseRule(caseId, rule.id)
-      setCaseRuleResults(p => ({ ...p, [rule.id]: { fired: r.fired, match_count: r.match?.match_count ?? 0 } }))
+      setCaseRuleResults(p => ({
+        ...p,
+        [rule.id]: {
+          fired:         r.fired,
+          match_count:   r.match?.match_count ?? 0,
+          sample_events: r.match?.sample_events || [],
+        },
+      }))
     } catch (e) {
       setCaseRuleResults(p => ({ ...p, [rule.id]: { error: true } }))
     } finally {
@@ -287,6 +294,7 @@ export default function AlertRules({ caseId }) {
 
   return (
     <div className="p-4">
+    <div className="max-w-2xl mx-auto">
       <div className="flex items-center justify-between mb-5">
         <div>
           <h1 className="text-base font-bold text-brand-text flex items-center gap-2">
@@ -436,6 +444,7 @@ export default function AlertRules({ caseId }) {
       )}
 
       {/* Case-specific rules list */}
+
       {loading ? (
         <div className="space-y-2">{[1,2].map(i => <div key={i} className="skeleton h-14 w-full" />)}</div>
       ) : rules.length === 0 ? (
@@ -445,47 +454,83 @@ export default function AlertRules({ caseId }) {
       ) : (
         <div className="space-y-2">
           {rules.map(rule => (
-            <div key={rule.id} className="card p-3 flex items-start gap-3">
-              <div className="w-7 h-7 rounded-lg bg-yellow-50 border border-yellow-200 flex items-center justify-center flex-shrink-0 mt-0.5">
-                <AlertTriangle size={12} className="text-yellow-600" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 mb-0.5">
-                  <span className="text-sm font-semibold text-gray-800">{rule.name}</span>
-                  {rule.artifact_type && (
-                    <span className="badge bg-gray-100 text-gray-500 border border-gray-200 text-[10px]">{rule.artifact_type}</span>
-                  )}
-                  <span className="badge bg-gray-100 text-gray-400 border border-gray-200 text-[10px]">≥{rule.threshold}</span>
+            <div key={rule.id} className="card overflow-hidden">
+              {/* Rule header row */}
+              <div className="p-3 flex items-start gap-3">
+                <div className="w-7 h-7 rounded-lg bg-yellow-50 border border-yellow-200 flex items-center justify-center flex-shrink-0 mt-0.5">
+                  <AlertTriangle size={12} className="text-yellow-600" />
                 </div>
-                {rule.description && <p className="text-xs text-gray-500 mb-1">{rule.description}</p>}
-                <code className="text-[10px] text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">{rule.query}</code>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <span className="text-sm font-semibold text-gray-800">{rule.name}</span>
+                    {rule.artifact_type && (
+                      <span className="badge bg-gray-100 text-gray-500 border border-gray-200 text-[10px]">{rule.artifact_type}</span>
+                    )}
+                    <span className="badge bg-gray-100 text-gray-400 border border-gray-200 text-[10px]">≥{rule.threshold}</span>
+                  </div>
+                  {rule.description && <p className="text-xs text-gray-500 mb-1">{rule.description}</p>}
+                  <code className="text-[10px] text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">{rule.query}</code>
+                </div>
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  {(() => {
+                    const res = caseRuleResults[rule.id]
+                    if (!res) return null
+                    return res.error
+                      ? <span className="text-[9px] text-red-400">err</span>
+                      : res.fired
+                        ? <span className="badge bg-yellow-100 text-yellow-700 border border-yellow-200 text-[9px]">{res.match_count} hit{res.match_count !== 1 ? 's' : ''}</span>
+                        : <span className="badge bg-green-50 text-green-600 border border-green-200 text-[9px]">clean</span>
+                  })()}
+                  <button
+                    onClick={() => runCaseRule(rule)}
+                    disabled={!!runningCaseRuleId}
+                    title={`Run "${rule.name}" against this case`}
+                    className="btn-ghost p-1.5 text-gray-400 hover:text-brand-accent disabled:opacity-40"
+                  >
+                    {runningCaseRuleId === rule.id ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
+                  </button>
+                  <button onClick={() => deleteRule(rule.id)} className="btn-ghost p-1.5 text-gray-400 hover:text-red-500">
+                    <Trash2 size={13} />
+                  </button>
+                </div>
               </div>
-              <div className="flex items-center gap-1 flex-shrink-0">
-                {(() => {
-                  const res = caseRuleResults[rule.id]
-                  if (!res) return null
-                  return res.error
-                    ? <span className="text-[9px] text-red-400">err</span>
-                    : res.fired
-                      ? <span className="badge bg-yellow-100 text-yellow-700 border border-yellow-200 text-[9px]">{res.match_count} hit{res.match_count !== 1 ? 's' : ''}</span>
-                      : <span className="badge bg-green-50 text-green-600 border border-green-200 text-[9px]">clean</span>
-                })()}
-                <button
-                  onClick={() => runCaseRule(rule)}
-                  disabled={!!runningCaseRuleId}
-                  title={`Run "${rule.name}" against this case`}
-                  className="btn-ghost p-1.5 text-gray-400 hover:text-brand-accent disabled:opacity-40"
-                >
-                  {runningCaseRuleId === rule.id ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
-                </button>
-                <button onClick={() => deleteRule(rule.id)} className="btn-ghost p-1.5 text-gray-400 hover:text-red-500">
-                  <Trash2 size={13} />
-                </button>
-              </div>
+
+              {/* Inline run result */}
+              {(() => {
+                const res = caseRuleResults[rule.id]
+                if (!res || res.error) return null
+                return (
+                  <div className={`border-t px-4 py-3 text-xs ${res.fired ? 'bg-yellow-50 border-yellow-200' : 'bg-green-50 border-green-200'}`}>
+                    <div className="flex items-center gap-2 mb-2">
+                      {res.fired
+                        ? <><AlertTriangle size={12} className="text-yellow-600" /><span className="font-semibold text-yellow-700">{res.match_count} match{res.match_count !== 1 ? 'es' : ''} found</span></>
+                        : <><CheckCircle size={12} className="text-green-600" /><span className="font-semibold text-green-700">No matches — all clear</span></>
+                      }
+                    </div>
+                    {res.fired && res.sample_events.length > 0 && (
+                      <div className="space-y-1">
+                        <p className="text-[9px] font-semibold uppercase tracking-wider text-gray-400 mb-1">Sample events</p>
+                        {res.sample_events.map((ev, j) => (
+                          <div key={j} className="text-[10px] text-gray-700 font-mono bg-white border border-yellow-200 rounded px-2 py-1 truncate">
+                            <span className="text-gray-400 mr-2">{ev.timestamp?.slice(0, 19).replace('T', ' ')}</span>
+                            {ev.message}
+                          </div>
+                        ))}
+                        {res.match_count > res.sample_events.length && (
+                          <p className="text-[10px] text-gray-400 italic">
+                            …and {res.match_count - res.sample_events.length} more
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )
+              })()}
             </div>
           ))}
         </div>
       )}
+    </div>
     </div>
   )
 }
