@@ -537,6 +537,7 @@ def apply_all_manifests(cfg, pull_policy, setup_traefik=False):
     subs = build_substitutions(cfg, pull_policy)
 
     def apply_one(path):
+        import re
         content = path.read_text()
         for k, v in subs.items():
             content = content.replace(k, str(v))
@@ -545,7 +546,30 @@ def apply_all_manifests(cfg, pull_policy, setup_traefik=False):
             input=content, capture_output=True, text=True,
         )
         if r.returncode != 0:
-            print(r.stderr)
+            stderr = r.stderr or ""
+            # StatefulSet immutable-field error: delete the StatefulSet (PVCs are
+            # retained by Kubernetes) and re-apply so the new spec can be created.
+            if "StatefulSet" in stderr and "Forbidden" in stderr and "spec" in stderr:
+                name_match = re.search(r"^\s*name:\s+(\S+)", content, re.MULTILINE)
+                ns_match   = re.search(r"^\s*namespace:\s+(\S+)", content, re.MULTILINE)
+                if name_match and ns_match:
+                    sts_name = name_match.group(1)
+                    sts_ns   = ns_match.group(1)
+                    warn(f"StatefulSet '{sts_name}' has immutable field changes — "
+                         f"deleting and recreating (PVCs/data are preserved)")
+                    run(["kubectl", "delete", "statefulset", sts_name,
+                         "-n", sts_ns, "--ignore-not-found"], capture=True)
+                    r2 = subprocess.run(
+                        ["kubectl", "apply", "-f", "-"],
+                        input=content, capture_output=True, text=True,
+                    )
+                    if r2.returncode != 0:
+                        print(r2.stderr)
+                        die(f"kubectl apply failed for {path.name} after delete-and-recreate")
+                    for line in r2.stdout.strip().splitlines():
+                        info(line)
+                    return
+            print(stderr)
             die(f"kubectl apply failed for {path.name}")
         for line in r.stdout.strip().splitlines():
             info(line)
