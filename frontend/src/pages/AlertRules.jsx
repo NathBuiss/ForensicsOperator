@@ -3,8 +3,23 @@ import { AlertTriangle, Plus, Trash2, Play, CheckCircle, Loader2,
          ChevronDown, ChevronUp, Sparkles, Brain, RefreshCw, Clock } from 'lucide-react'
 import { api } from '../api/client'
 
-function LibraryRulesList({ rules }) {
+function LibraryRulesList({ rules, caseId }) {
   const [open, setOpen] = useState(false)
+  const [runningId, setRunningId] = useState(null)
+  const [results, setResults] = useState({}) // ruleId → {fired, match_count} | {error}
+
+  async function runRule(rule) {
+    setRunningId(rule.id)
+    try {
+      const r = await api.alertRules.runSingleRule(caseId, rule.id)
+      setResults(p => ({ ...p, [rule.id]: { fired: r.fired, match_count: r.match?.match_count ?? 0 } }))
+    } catch (e) {
+      setResults(p => ({ ...p, [rule.id]: { error: true } }))
+    } finally {
+      setRunningId(null)
+    }
+  }
+
   return (
     <div className="mb-4 border border-gray-200 rounded-xl overflow-hidden">
       <button
@@ -13,7 +28,7 @@ function LibraryRulesList({ rules }) {
       >
         <span className="flex items-center gap-1.5 font-semibold text-gray-600">
           <Play size={9} className="text-brand-accent" />
-          Library Rules — run by "Check All"
+          Library Rules
         </span>
         <span className="flex items-center gap-2 text-gray-500">
           <span className="badge bg-gray-100 text-gray-500 border border-gray-200 text-[9px]">{rules.length} rules</span>
@@ -21,17 +36,40 @@ function LibraryRulesList({ rules }) {
         </span>
       </button>
       {open && (
-        <div className="max-h-64 overflow-y-auto divide-y divide-gray-100">
-          {rules.map(rule => (
-            <div key={rule.id} className="flex items-center gap-2 px-3 py-1.5 text-xs">
-              <AlertTriangle size={9} className="text-amber-500 flex-shrink-0" />
-              <span className="text-gray-700 truncate flex-1">{rule.name}</span>
-              {rule.artifact_type && (
-                <span className="text-[9px] text-gray-500 flex-shrink-0">{rule.artifact_type}</span>
-              )}
-              <span className="text-gray-400 text-[9px] flex-shrink-0">≥{rule.threshold}</span>
-            </div>
-          ))}
+        <div className="max-h-80 overflow-y-auto divide-y divide-gray-100">
+          {rules.map(rule => {
+            const result = results[rule.id]
+            const isRunning = runningId === rule.id
+            return (
+              <div key={rule.id} className="flex items-center gap-2 px-3 py-2 text-xs">
+                <AlertTriangle size={9} className="text-amber-500 flex-shrink-0" />
+                <span className="text-gray-700 truncate flex-1">{rule.name}</span>
+                {rule.artifact_type && (
+                  <span className="text-[9px] text-gray-400 flex-shrink-0">{rule.artifact_type}</span>
+                )}
+                {result && !result.error && (
+                  result.fired
+                    ? <span className="badge bg-yellow-100 text-yellow-700 border border-yellow-200 text-[9px] flex-shrink-0">
+                        {result.match_count} hit{result.match_count !== 1 ? 's' : ''}
+                      </span>
+                    : <span className="badge bg-green-50 text-green-600 border border-green-200 text-[9px] flex-shrink-0">
+                        clean
+                      </span>
+                )}
+                {result?.error && (
+                  <span className="text-[9px] text-red-400 flex-shrink-0">err</span>
+                )}
+                <button
+                  onClick={() => runRule(rule)}
+                  disabled={isRunning || !!runningId}
+                  title={`Run "${rule.name}" against this case`}
+                  className="flex-shrink-0 p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-brand-accent disabled:opacity-40 transition-colors"
+                >
+                  {isRunning ? <Loader2 size={10} className="animate-spin" /> : <Play size={10} />}
+                </button>
+              </div>
+            )
+          })}
         </div>
       )}
     </div>
@@ -379,7 +417,7 @@ export default function AlertRules({ caseId }) {
 
       {/* Library rules — collapsible, read-only, these are what Check All runs */}
       {libraryRules.length > 0 && (
-        <LibraryRulesList rules={libraryRules} />
+        <LibraryRulesList rules={libraryRules} caseId={caseId} />
       )}
 
       {/* Case-specific rules list */}

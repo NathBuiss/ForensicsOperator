@@ -983,7 +983,7 @@ def _run_hindsight(run_id: str, work_dir: Path, sources_dir: Path, params: dict,
     output_dir.mkdir()
     output_prefix = str(output_dir / "results")
 
-    cmd = [sys.executable, hindsight_script, "-i", str(sources_dir), "-o", output_prefix, "-f", "json"]
+    cmd = [sys.executable, hindsight_script, "-i", str(sources_dir), "-o", output_prefix, "-f", "jsonl"]
     logger.info("[%s] Running: %s", run_id, " ".join(cmd))
 
     try:
@@ -992,44 +992,37 @@ def _run_hindsight(run_id: str, work_dir: Path, sources_dir: Path, params: dict,
         raise RuntimeError("Hindsight timed out after 10 minutes")
 
     # Hindsight may exit non-zero but still produce output
-    json_files = list(output_dir.glob("*.json"))
-    if not json_files:
+    jsonl_files = list(output_dir.glob("*.jsonl"))
+    if not jsonl_files:
         if proc.returncode != 0:
             raise RuntimeError(
                 f"Hindsight failed (code {proc.returncode}): {(proc.stderr or '')[:500]}"
             )
         return []
 
-    return _parse_hindsight_json(json_files[0])
+    return _parse_hindsight_jsonl(jsonl_files[0])
 
 
-def _parse_hindsight_json(json_path: Path) -> list[dict]:
-    try:
-        with open(json_path, "r", encoding="utf-8", errors="replace") as f:
-            data = json.load(f)
-    except json.JSONDecodeError:
-        return []
-
-    if not isinstance(data, list):
-        data = [data]
-
+def _parse_hindsight_jsonl(jsonl_path: Path) -> list[dict]:
+    """Parse hindsight JSONL output (one JSON object per line)."""
     results: list[dict] = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        # Columnar format (older hindsight): {"col_types": [...], "data": [[...], ...]}
-        if "col_types" in item and "data" in item:
-            cols = item["col_types"]
-            for row in item.get("data", []):
-                if isinstance(row, list):
-                    hit = _hindsight_item_to_hit(dict(zip(cols, row)))
-                    if hit:
-                        results.append(hit)
-        else:
-            hit = _hindsight_item_to_hit(item)
-            if hit:
-                results.append(hit)
-
+    try:
+        with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                hit = _hindsight_item_to_hit(item)
+                if hit:
+                    results.append(hit)
+    except Exception as exc:
+        logger.warning("Failed to parse hindsight JSONL output: %s", exc)
     return results
 
 
@@ -1927,21 +1920,47 @@ def _compile_yara_rules(custom_rules_source: str | None = None):
     return yara.compile(source=source)
 
 
-def _load_yara_library_rules(run_id: str) -> str:
-    """Fetch all YARA rules stored in the library (Redis) and return them as a single string."""
+def _load_yara_library_rules(run_id: str, selected_ids: list[str] | None = None) -> str:
+    """
+    Fetch YARA rules from the library (Redis).
+    If selected_ids is provided, only those rule IDs are included.
+    Each rule is compiled individually before inclusion — bad rules are skipped with a warning
+    so one invalid rule never prevents the rest from running.
+    """
     try:
+        import yara
         r = get_redis()
-        rule_ids = r.smembers("fo:yara_rules")
-        if not rule_ids:
+        all_ids = r.smembers("fo:yara_rules")
+        if not all_ids:
             return ""
+
+        # Normalise to strings
+        str_ids = {(rid.decode() if isinstance(rid, bytes) else rid) for rid in all_ids}
+
+        # Apply selection filter if provided
+        if selected_ids is not None:
+            str_ids = str_ids & set(selected_ids)
+
         parts: list[str] = []
-        for rid in rule_ids:
-            key = f"fo:yara_rule:{rid.decode() if isinstance(rid, bytes) else rid}"
+        skipped = 0
+        for rid in str_ids:
+            key = f"fo:yara_rule:{rid}"
             content = r.hget(key, "content")
-            if content:
-                parts.append(content.decode() if isinstance(content, bytes) else content)
+            if not content:
+                continue
+            content_str = content.decode() if isinstance(content, bytes) else content
+            # Validate before including — skip rules that don't compile cleanly
+            try:
+                yara.compile(source=content_str)
+                parts.append(content_str)
+            except yara.SyntaxError as exc:
+                skipped += 1
+                logger.warning("[%s] YARA: skipping library rule %s (syntax error): %s", run_id, rid, exc)
+
+        if skipped:
+            logger.warning("[%s] YARA: skipped %d invalid library rule(s)", run_id, skipped)
         if parts:
-            logger.info("[%s] YARA: loaded %d library rule(s) from library", run_id, len(parts))
+            logger.info("[%s] YARA: loaded %d valid library rule(s)", run_id, len(parts))
         return "\n\n".join(parts)
     except Exception as exc:
         logger.warning("[%s] YARA: could not load library rules: %s", run_id, exc)
@@ -1958,9 +1977,10 @@ def _run_yara(
     """Scan source files with YARA rules (built-in + library + optional custom rules)."""
     custom_rules     = params.get("custom_rules", "") or ""
     use_library      = params.get("use_library_rules", True)
+    selected_ids     = params.get("selected_rule_ids", None)  # list[str] | None
 
     # Merge library rules (fetched from Redis) with any inline custom rules from the run params
-    library_rules = _load_yara_library_rules(run_id) if use_library else ""
+    library_rules = _load_yara_library_rules(run_id, selected_ids) if use_library else ""
     all_extra = "\n\n".join(s for s in [custom_rules.strip(), library_rules.strip()] if s)
 
     try:
@@ -2979,6 +2999,22 @@ def _run_strings_analysis(
 # Pattern Search (grep) — regex-based IOC / keyword scanning
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _normalize_grep_pattern(pat: str) -> str:
+    """
+    Ensure pat is valid PCRE for grep -P.
+    If it's already valid regex, return as-is.
+    If it's invalid (e.g. a shell glob like *vent*), convert it:
+      * → .*   (glob wildcard → regex any-sequence)
+      ? → .    (glob single-char → regex any-char)
+    All other special chars are re.escape'd so they match literally.
+    """
+    try:
+        re.compile(pat)
+        return pat  # already valid regex — use unchanged
+    except re.error:
+        # Treat as shell glob: escape special chars, then un-escape * and ?
+        return re.escape(pat).replace(r'\*', '.*').replace(r'\?', '.')
+
 _DEFAULT_GREP_PATTERNS = [
     r'https?://[^\s<>"]+',
     r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b',
@@ -3019,6 +3055,7 @@ def _run_grep_search(
         tool_meta["stdout"] += f"\n=== {file_path.name} ===\n"
 
         for pat in patterns:
+            pat = _normalize_grep_pattern(pat)
             # Count matches
             try:
                 proc_count = subprocess.run(

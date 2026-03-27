@@ -318,11 +318,13 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
   const [error, setError]                   = useState(null)
 
   // YARA-specific state
-  const [yaraRules, setYaraRules]           = useState('')
-  const [yaraValidating, setYaraValidating] = useState(false)
-  const [yaraValid, setYaraValid]           = useState(null)  // null | {valid, error}
-  const [grepPatterns, setGrepPatterns]     = useState('')
-  const yaraDebounce                        = useRef(null)
+  const [yaraRules, setYaraRules]                   = useState('')
+  const [yaraValidating, setYaraValidating]         = useState(false)
+  const [yaraValid, setYaraValid]                   = useState(null)  // null | {valid, error}
+  const [yaraLibraryRules, setYaraLibraryRules]     = useState([])
+  const [selectedYaraIds, setSelectedYaraIds]       = useState(new Set())
+  const [grepPatterns, setGrepPatterns]             = useState('')
+  const yaraDebounce                                = useRef(null)
 
   useEffect(() => {
     Promise.all([api.modules.list(), api.modules.listSources(caseId)])
@@ -334,6 +336,14 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
       })
       .catch(err => { setError(err.message); setLoading(false) })
   }, [caseId])
+
+  // Load YARA library rules when YARA module is selected
+  useEffect(() => {
+    if (selectedModule?.id !== 'yara') return
+    api.yaraRules.list()
+      .then(r => setYaraLibraryRules(r.rules || []))
+      .catch(() => {})
+  }, [selectedModule])
 
   // Validate YARA rules with debounce
   useEffect(() => {
@@ -396,8 +406,9 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
     setError(null)
     try {
       const params = {}
-      if (selectedModule.id === 'yara' && yaraRules.trim()) {
-        params.custom_rules = yaraRules.trim()
+      if (selectedModule.id === 'yara') {
+        if (yaraRules.trim()) params.custom_rules = yaraRules.trim()
+        if (selectedYaraIds.size > 0) params.selected_rule_ids = [...selectedYaraIds]
       }
       if (selectedModule.id === 'grep_search' && grepPatterns.trim()) {
         params.patterns = grepPatterns.split('\n').map(p => p.trim()).filter(Boolean)
@@ -587,6 +598,35 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
                         spellCheck={false}
                         className="flex-1 w-full min-h-0 px-3 py-2.5 text-[11px] font-mono border border-gray-200 bg-gray-950 text-green-300 rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-brand-accent/30 focus:border-brand-accent leading-relaxed"
                       />
+                    </div>
+                  )}
+
+                  {/* ── YARA library rule selection ───────────────────────── */}
+                  {selectedModule.id === 'yara' && yaraLibraryRules.length > 0 && (
+                    <div className="px-4 pb-2 flex-shrink-0">
+                      <p className="section-title text-[11px] uppercase tracking-wider text-gray-400 mb-1.5">
+                        Library Rules <span className="normal-case font-normal text-gray-400 ml-1">(leave all unchecked to run all)</span>
+                      </p>
+                      <div className="max-h-32 overflow-y-auto space-y-0.5 border border-gray-200 rounded-lg p-2">
+                        {yaraLibraryRules.map(rule => (
+                          <label key={rule.id} className="flex items-center gap-2 cursor-pointer group">
+                            <input
+                              type="checkbox"
+                              checked={selectedYaraIds.has(rule.id)}
+                              onChange={e => setSelectedYaraIds(prev => {
+                                const s = new Set(prev)
+                                e.target.checked ? s.add(rule.id) : s.delete(rule.id)
+                                return s
+                              })}
+                              className="accent-brand-accent"
+                            />
+                            <span className="text-[11px] text-gray-700 truncate group-hover:text-gray-900">{rule.name}</span>
+                            {rule.tags?.length > 0 && (
+                              <span className="text-[9px] text-gray-400 flex-shrink-0">{rule.tags[0]}</span>
+                            )}
+                          </label>
+                        ))}
+                      </div>
                     </div>
                   )}
 
