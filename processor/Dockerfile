@@ -11,12 +11,15 @@ WORKDIR /app
 # libjpeg-dev / zlib1g-dev → optional image libraries for ExifTool
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-dev \
+    build-essential \
     libmagic1 libmagic-dev \
     wget curl git \
     binutils \
     perl \
     unzip \
     libimage-exiftool-perl \
+    libtsk-dev \
+    libewf-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Hayabusa DFIR binary + rules (Sigma-based EVTX threat hunting) ───────────
