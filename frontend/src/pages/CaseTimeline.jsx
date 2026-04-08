@@ -5,13 +5,14 @@ import {
   CheckCircle, Clock, Database, Loader2, Shield,
   Cpu, RefreshCw, Plus, Download, Play, Terminal,
   AlertCircle, ChevronDown, FileCode, ExternalLink,
-  Flag, Filter, Sparkles,
+  Flag, Filter, Sparkles, FolderOpen,
 } from 'lucide-react'
 import { api } from '../api/client'
 import Timeline from './Timeline'
 import Ingest from './Ingest'
 import CollectorModal from '../components/CollectorModal'
 import AlertRules from './AlertRules'
+import CaseFiles from './CaseFiles'
 
 // ── Artifact badge colours ────────────────────────────────────────────────────
 const ARTIFACT_BADGE = {
@@ -1526,6 +1527,7 @@ export default function CaseTimeline() {
   const [caseData, setCaseData]             = useState(null)
   const [loading, setLoading]               = useState(true)
   const [showIngest, setShowIngest]         = useState(false)
+  const [showFiles, setShowFiles]           = useState(false)
   const [alertResults, setAlertResults]     = useState(null)
   const [runningAlerts, setRunningAlerts]   = useState(false)
   const [showModules, setShowModules]       = useState(false)
@@ -1614,6 +1616,14 @@ export default function CaseTimeline() {
           </button>
 
           <button
+            onClick={() => setShowFiles(v => !v)}
+            className={`btn-outline ${showFiles ? 'bg-blue-50 border-blue-300 text-blue-700' : ''}`}
+          >
+            <FolderOpen size={14} />
+            Files
+          </button>
+
+          <button
             onClick={() => navigate(`/cases/${caseId}/search`)}
             className="btn-outline"
           >
@@ -1671,6 +1681,29 @@ export default function CaseTimeline() {
           onClose={() => setShowIngest(false)}
           onComplete={() => { setShowIngest(false); loadCase() }}
         />
+      )}
+
+      {showFiles && (
+        <div className="panel-backdrop" onClick={() => setShowFiles(false)}>
+          <div
+            className="absolute right-0 top-0 h-full w-[820px] bg-white border-l border-gray-200 flex flex-col"
+            style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.10)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 flex-shrink-0">
+              <div className="flex items-center gap-2">
+                <FolderOpen size={15} className="text-blue-500" />
+                <span className="font-semibold text-brand-text text-sm">Case Files</span>
+              </div>
+              <button onClick={() => setShowFiles(false)} className="btn-ghost p-1.5 rounded-lg">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-hidden">
+              <CaseFiles caseId={caseId} />
+            </div>
+          </div>
+        </div>
       )}
 
       {showAlertRules && (

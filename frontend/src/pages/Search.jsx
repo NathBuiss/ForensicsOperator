@@ -210,8 +210,11 @@ export default function Search() {
 
   useEffect(() => {
     const pq = location.state?.pivotQuery
-    if (pq) { setInputVal(pq); setQuery(pq) }
-  }, [location.state?.pivotQuery])
+    if (pq) { setInputVal(pq); setQuery(pq); return }
+    // Also support ?q= URL param (used by "View in Search" links from AlertRules)
+    const qParam = new URLSearchParams(location.search).get('q')
+    if (qParam) { setInputVal(qParam); setQuery(qParam) }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const doSearch = useCallback(async (q = query, f = filters, pg = 0) => {
     if (!q && !Object.keys(f).length) return
@@ -388,7 +391,7 @@ export default function Search() {
       </div>
 
       {/* ── Content area ──────────────────────────────────────────── */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden min-h-0">
 
         {/* Facets sidebar (collapsible) */}
         {showFacets && hasFacetData && (
@@ -531,6 +534,16 @@ export default function Search() {
             </>
           )}
         </div>
+
+        {/* Event detail side panel — inside the flex row so it appears on the right */}
+        {selectedEvent && (
+          <EventDetail
+            key={selectedEvent.fo_id}
+            event={selectedEvent}
+            caseId={caseId}
+            onClose={() => setSelectedEvent(null)}
+          />
+        )}
       </div>
 
       {showHelp      && <SearchHelpPanel onClose={() => setShowHelp(false)} />}
@@ -541,7 +554,6 @@ export default function Search() {
           onClose={() => setShowAiAssist(false)}
         />
       )}
-      {selectedEvent && <EventDetail event={selectedEvent} caseId={caseId} onClose={() => setSelectedEvent(null)} />}
     </div>
   )
 }

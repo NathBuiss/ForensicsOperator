@@ -22,6 +22,10 @@ volatility3>=2.5.0
 # The malwoverview module works without this (direct VT API fallback), but installing
 # adds the CLI for enriched output.
 malwoverview
+# Disk image filesystem browsing (The Sleuth Kit Python bindings)
+# Requires libtsk-dev + libewf-dev system packages in the container
+pytsk3>=20211111
+pyewf>=20201230
 # Sigma HQ integration - comment out if build fails, use manual install instead
 # pysigma>=0.11.0
 # pysigma-backend-elasticsearch>=1.0.0

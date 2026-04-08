@@ -241,6 +241,15 @@ export const api = {
     },
   },
 
+  caseFiles: {
+    list:        (caseId)         => request('GET',  `/cases/${caseId}/files`),
+    content:     (caseId, jobId)  => request('GET',  `/cases/${caseId}/files/${jobId}/content`),
+    search:      (caseId, data)   => request('POST', `/cases/${caseId}/files/search`, data),
+    diskImages:  (caseId)         => request('GET',  `/cases/${caseId}/disk-images`),
+    browse:      (caseId, jobId, path = '/') =>
+      request('GET', `/cases/${caseId}/disk-images/${jobId}/browse?path=${encodeURIComponent(path)}`),
+  },
+
   collector: {
     downloadUrl: ({ platform = 'py', caseId, apiUrl, collect } = {}) => {
       const params = new URLSearchParams({ platform })

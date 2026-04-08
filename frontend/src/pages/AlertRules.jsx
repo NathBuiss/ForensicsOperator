@@ -59,8 +59,13 @@ function AnalysisResult({ analysis, onReanalyze, analyzing }) {
 
 // ── Inline single-run result (used by both library and case-specific rules) ───
 
-function SingleRunResult({ result, rule, onSearchQuery, analysis, analyzing, onAnalyze }) {
+function SingleRunResult({ result, rule, caseId, analysis, analyzing, onAnalyze }) {
   if (!result || result.error) return null
+
+  function openInSearch(query) {
+    window.open(`/cases/${caseId}/search?q=${encodeURIComponent(query)}`, '_blank')
+  }
+
   return (
     <div className={`border-t px-4 py-3 text-xs space-y-2 ${result.fired ? 'bg-yellow-50 border-yellow-200' : 'bg-green-50 border-green-200'}`}>
       <div className="flex items-center gap-2">
@@ -72,10 +77,10 @@ function SingleRunResult({ result, rule, onSearchQuery, analysis, analyzing, onA
 
       {result.fired && (
         <>
-          {/* View all in search */}
-          {onSearchQuery && (
+          {/* View all in search — opens new tab */}
+          {caseId && (
             <button
-              onClick={() => onSearchQuery(rule.query)}
+              onClick={() => openInSearch(rule.query)}
               className="w-full flex items-center justify-between bg-brand-accent/10 hover:bg-brand-accent/20 border border-brand-accent/30 rounded-lg px-3 py-1.5 transition-colors"
             >
               <span className="text-[11px] font-medium text-brand-accent">
@@ -92,10 +97,9 @@ function SingleRunResult({ result, rule, onSearchQuery, analysis, analyzing, onA
               {result.sample_events.map((ev, j) => (
                 <button
                   key={j}
-                  onClick={() => onSearchQuery && onSearchQuery(ev.fo_id ? `fo_id:${ev.fo_id}` : rule.query)}
-                  className={`w-full text-left text-[10px] text-gray-700 font-mono bg-white border border-yellow-200 rounded px-2 py-1 truncate
-                    ${onSearchQuery ? 'hover:bg-blue-50 hover:border-blue-200 cursor-pointer' : 'cursor-default'}`}
-                  title={onSearchQuery ? 'Click to view in search' : ''}
+                  onClick={() => caseId && openInSearch(ev.fo_id ? `fo_id:"${ev.fo_id}"` : rule.query)}
+                  className="w-full text-left text-[10px] text-gray-700 font-mono bg-white border border-yellow-200 rounded px-2 py-1 truncate hover:bg-blue-50 hover:border-blue-200 cursor-pointer"
+                  title="Click to view in search (new tab)"
                 >
                   <span className="text-gray-400 mr-2">{ev.timestamp?.slice(0, 19).replace('T', ' ')}</span>
                   {ev.message}
@@ -228,7 +232,7 @@ function LibraryRulesList({ rules, caseId, onSearchQuery }) {
                     <SingleRunResult
                       result={result}
                       rule={rule}
-                      onSearchQuery={onSearchQuery}
+                      caseId={caseId}
                       analysis={analysis}
                       analyzing={analyzing}
                       onAnalyze={() => analyzeRule(rule)}
@@ -422,26 +426,24 @@ export default function AlertRules({ caseId, onSearchQuery }) {
         </button>
         {expandedMatch === i && (
           <div className="px-3 py-3 space-y-2 bg-white">
-            {onSearchQuery && (
-              <button
-                onClick={() => onSearchQuery(m.rule.query)}
-                className="w-full flex items-center justify-between bg-brand-accent/10 hover:bg-brand-accent/20 border border-brand-accent/30 rounded-lg px-3 py-1.5 transition-colors"
-              >
-                <span className="text-[11px] font-medium text-brand-accent">
-                  View all {m.match_count.toLocaleString()} events in Search
-                </span>
-                <ExternalLink size={11} className="text-brand-accent flex-shrink-0" />
-              </button>
-            )}
+            <button
+              onClick={() => window.open(`/cases/${caseId}/search?q=${encodeURIComponent(m.rule.query)}`, '_blank')}
+              className="w-full flex items-center justify-between bg-brand-accent/10 hover:bg-brand-accent/20 border border-brand-accent/30 rounded-lg px-3 py-1.5 transition-colors"
+            >
+              <span className="text-[11px] font-medium text-brand-accent">
+                View all {m.match_count.toLocaleString()} events in Search
+              </span>
+              <ExternalLink size={11} className="text-brand-accent flex-shrink-0" />
+            </button>
             {m.sample_events?.map((ev, j) => (
               <button
                 key={j}
-                onClick={() => onSearchQuery && onSearchQuery(ev.fo_id ? `fo_id:${ev.fo_id}` : m.rule.query)}
-                className={`w-full text-left bg-white hover:bg-blue-50 rounded border border-gray-200 hover:border-blue-300 px-2.5 py-2 transition-colors group ${onSearchQuery ? 'cursor-pointer' : 'cursor-default'}`}
+                onClick={() => window.open(`/cases/${caseId}/search?q=${encodeURIComponent(ev.fo_id ? `fo_id:${ev.fo_id}` : m.rule.query)}`, '_blank')}
+                className="w-full text-left bg-white hover:bg-blue-50 rounded border border-gray-200 hover:border-blue-300 px-2.5 py-2 transition-colors group cursor-pointer"
               >
                 <div className="flex items-center justify-between gap-2 mb-0.5">
                   <span className="text-[10px] text-gray-500 font-mono">{ev.timestamp?.slice(0,19).replace('T',' ')}</span>
-                  {onSearchQuery && <ExternalLink size={9} className="text-gray-300 group-hover:text-blue-400 flex-shrink-0 transition-colors" />}
+                  <ExternalLink size={9} className="text-gray-300 group-hover:text-blue-400 flex-shrink-0 transition-colors" />
                 </div>
                 <p className="text-[10px] text-brand-text">{ev.message}</p>
               </button>
@@ -640,7 +642,7 @@ export default function AlertRules({ caseId, onSearchQuery }) {
               <SingleRunResult
                 result={caseRuleResults[rule.id]}
                 rule={rule}
-                onSearchQuery={onSearchQuery}
+                caseId={caseId}
                 analysis={caseRuleAnalyses[rule.id]}
                 analyzing={analyzingCaseRuleIds.has(rule.id)}
                 onAnalyze={() => analyzeCaseRule(rule)}

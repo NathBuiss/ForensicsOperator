@@ -1,16 +1,31 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { X, Flag, Tag, Plus, Minus, Save, Search, Shield, AlertTriangle } from 'lucide-react'
+import { X, Flag, Tag, Plus, Minus, Save, Search, Shield, AlertTriangle, Brain, Loader2 } from 'lucide-react'
 import { api } from '../../api/client'
 import { extractIocs, iocSearchQuery } from '../../utils/ioc'
 import { getMitre, TACTIC_COLORS } from '../../utils/mitre'
 
 export default function EventDetail({ event: initialEvent, caseId, onClose, onFilterIn, onFilterOut }) {
-  const [event, setEvent]       = useState(initialEvent)
-  const [note, setNote]         = useState(event.analyst_note || '')
-  const [tagInput, setTagInput] = useState('')
-  const [saving, setSaving]     = useState(false)
+  const [event, setEvent]             = useState(initialEvent)
+  const [note, setNote]               = useState(event.analyst_note || '')
+  const [tagInput, setTagInput]       = useState('')
+  const [saving, setSaving]           = useState(false)
+  const [explaining, setExplaining]   = useState(false)
+  const [explanation, setExplanation] = useState(null)
   const navigate = useNavigate()
+
+  async function explainEvent() {
+    setExplaining(true)
+    setExplanation(null)
+    try {
+      const r = await api.llm.explainEvents({ events: [event] })
+      setExplanation(r)
+    } catch (err) {
+      setExplanation({ error: err.message })
+    } finally {
+      setExplaining(false)
+    }
+  }
 
   const mitre = getMitre(event)
   const iocs  = extractIocs(event.message)
@@ -96,7 +111,7 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
 
       <div className="flex-1 overflow-y-auto p-3 space-y-4 text-xs">
         {/* Actions */}
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           <button
             onClick={toggleFlag}
             className={`btn text-xs ${event.is_flagged ? 'bg-red-100 text-red-700 border border-red-200' : 'btn-ghost'}`}
@@ -104,7 +119,33 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
             <Flag size={12} />
             {event.is_flagged ? 'Flagged' : 'Flag'}
           </button>
+          <button
+            onClick={explainEvent}
+            disabled={explaining}
+            className="btn-ghost text-xs text-purple-600 hover:text-purple-800 border border-purple-200 rounded-lg"
+            title="Explain this event with AI"
+          >
+            {explaining ? <Loader2 size={12} className="animate-spin" /> : <Brain size={12} />}
+            {explaining ? 'Analyzing…' : 'Explain'}
+          </button>
         </div>
+
+        {/* AI explanation */}
+        {explanation && (
+          <div className={`rounded-lg p-2.5 text-xs ${explanation.error ? 'bg-red-50 border border-red-200' : 'bg-purple-50 border border-purple-200'}`}>
+            <div className="flex items-center justify-between mb-1.5">
+              <p className="text-[10px] font-semibold text-purple-700 uppercase tracking-wider flex items-center gap-1">
+                <Brain size={9} /> AI Explanation
+                {explanation.model_used && <span className="normal-case font-normal text-gray-400 ml-1">({explanation.model_used})</span>}
+              </p>
+              <button onClick={() => setExplanation(null)} className="text-gray-400 hover:text-gray-600"><X size={10} /></button>
+            </div>
+            {explanation.error
+              ? <p className="text-red-600">{explanation.error}</p>
+              : <p className="text-gray-700 leading-relaxed whitespace-pre-wrap">{explanation.explanation}</p>
+            }
+          </div>
+        )}
 
         {/* MITRE ATT&CK */}
         {mitre && (

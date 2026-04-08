@@ -867,6 +867,7 @@ export default function Studio() {
   async function handleValidate() {
     if (!activeTab) return
     const { type, name, code } = activeTab
+    setShowValidateModal(false)
     updateTab(type, name, { validating: true, validation: null })
     try {
       let res
@@ -969,6 +970,9 @@ export default function Studio() {
   // ── Render sidebar file list (for ingesters/modules) ──────────────────────
 
   function renderCodeFileSidebar(files, type) {
+    const filtered = filterText
+      ? files.filter(f => f.name.toLowerCase().includes(filterText.toLowerCase()))
+      : files
     if (files.length === 0) {
       return (
         <div className="px-3 py-4 text-center">
@@ -977,8 +981,11 @@ export default function Studio() {
         </div>
       )
     }
-    const builtins = files.filter(f => f.builtin)
-    const customs  = files.filter(f => !f.builtin)
+    if (filtered.length === 0) {
+      return <p className="px-3 py-2 text-[11px] text-gray-400 italic">No matches</p>
+    }
+    const builtins = filtered.filter(f => f.builtin)
+    const customs  = filtered.filter(f => !f.builtin)
     const renderFile = f => {
       const key        = fileId(type, f.name)
       const isActive   = activeTabKey === key
@@ -1028,6 +1035,9 @@ export default function Studio() {
   function renderRuleSidebar(rules, type) {
     // Also include any open "new unsaved" tabs for this type
     const unsaved = openTabs.filter(t => t.type === type && !t.ruleId)
+    const filtered = filterText
+      ? rules.filter(r => r.name.toLowerCase().includes(filterText.toLowerCase()))
+      : rules
 
     if (rules.length === 0 && unsaved.length === 0) {
       return (
@@ -1036,6 +1046,9 @@ export default function Studio() {
           <p className="text-[11px] text-gray-400">No rules yet</p>
         </div>
       )
+    }
+    if (filtered.length === 0 && unsaved.length === 0) {
+      return <p className="px-3 py-2 text-[11px] text-gray-400 italic">No matches</p>
     }
 
     const renderRule = (id, label, isUnsaved = false) => {
@@ -1071,10 +1084,10 @@ export default function Studio() {
             {unsaved.map(t => renderRule(t.name, t.label, true))}
           </>
         )}
-        {rules.length > 0 && (
+        {filtered.length > 0 && (
           <>
             {unsaved.length > 0 && <p className="px-3 pt-3 pb-1 text-[9px] font-semibold text-gray-400 uppercase tracking-widest">Library</p>}
-            {rules.map(r => renderRule(r.id, r.name))}
+            {filtered.map(r => renderRule(r.id, r.name))}
           </>
         )}
       </>
@@ -1106,14 +1119,20 @@ export default function Studio() {
           ))}
         </div>
 
-        {/* New button */}
-        <div className="px-3 py-2 flex-shrink-0">
+        {/* New button + filter */}
+        <div className="px-3 py-2 space-y-1.5 flex-shrink-0">
           <button
             onClick={() => setShowNew(true)}
             className="w-full btn-primary text-xs justify-center py-1.5"
           >
             <Plus size={12} /> {newBtnLabel}
           </button>
+          <input
+            value={filterText}
+            onChange={e => setFilterText(e.target.value)}
+            placeholder="Filter…"
+            className="input w-full text-xs py-1"
+          />
         </div>
 
         {/* File / rule list */}
@@ -1214,23 +1233,34 @@ export default function Studio() {
               </div>
 
               <div className="flex items-center gap-1.5 flex-shrink-0">
-                {/* Validation result */}
+                {/* Validation result — click to open full modal */}
                 {activeTab.validation && (
                   activeTab.validation.valid
-                    ? <span className="flex items-center gap-1 text-[11px] text-green-700 bg-green-50 border border-green-200 rounded-lg px-2 py-0.5 max-w-xs truncate">
+                    ? <button
+                        onClick={() => setShowValidateModal(true)}
+                        className="flex items-center gap-1 text-[11px] text-green-700 bg-green-50 border border-green-200 rounded-lg px-2 py-0.5 hover:bg-green-100 transition-colors"
+                      >
                         <CheckCircle size={11} />
                         {activeTab.validation.info || 'Valid'}
-                      </span>
-                    : <span className="flex items-center gap-1 text-[11px] text-red-600 bg-red-50 border border-red-200 rounded-lg px-2 py-0.5 max-w-xs truncate" title={activeTab.validation.error}>
+                      </button>
+                    : <button
+                        onClick={() => setShowValidateModal(true)}
+                        className="flex items-center gap-1 text-[11px] text-red-600 bg-red-50 border border-red-200 rounded-lg px-2 py-0.5 max-w-xs hover:bg-red-100 transition-colors"
+                        title="Click to see full error"
+                      >
                         <AlertCircle size={11} />
-                        <span className="truncate">{activeTab.validation.error}</span>
-                      </span>
+                        <span className="truncate max-w-[180px]">{activeTab.validation.error?.split('\n')[0]}</span>
+                        <span className="text-[10px] underline flex-shrink-0">details</span>
+                      </button>
                 )}
-                {/* Warning (yara: yara-python not available) */}
+                {/* Warning (yara: skipped) */}
                 {activeTab.validation?.warning && (
-                  <span className="text-[11px] text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-2 py-0.5">
+                  <button
+                    onClick={() => setShowValidateModal(true)}
+                    className="text-[11px] text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-2 py-0.5 hover:bg-amber-100 transition-colors"
+                  >
                     {activeTab.validation.warning}
-                  </span>
+                  </button>
                 )}
 
                 {/* Save message */}
@@ -1286,14 +1316,18 @@ export default function Studio() {
               </div>
             </div>
 
-            {/* Validation error detail */}
+            {/* Validation error hint — click to open modal */}
             {activeTab.validation && !activeTab.validation.valid && activeTab.validation.error && (
-              <div className="bg-red-50 border-b border-red-200 px-4 py-2 flex items-start gap-2">
-                <AlertCircle size={13} className="text-red-500 flex-shrink-0 mt-0.5" />
-                <pre className="text-[11px] text-red-700 font-mono whitespace-pre-wrap break-all leading-relaxed">
-                  {activeTab.validation.error}
-                </pre>
-              </div>
+              <button
+                onClick={() => setShowValidateModal(true)}
+                className="w-full bg-red-50 border-b border-red-200 px-4 py-1.5 flex items-center gap-2 hover:bg-red-100 transition-colors text-left"
+              >
+                <AlertCircle size={12} className="text-red-500 flex-shrink-0" />
+                <span className="text-[11px] text-red-700 font-mono truncate flex-1">
+                  {activeTab.validation.error.split('\n')[0]}
+                </span>
+                <span className="text-[10px] text-red-500 underline flex-shrink-0">View full error</span>
+              </button>
             )}
 
             {/* Code editor */}
@@ -1345,6 +1379,13 @@ export default function Studio() {
           file={activeTab.label || activeTab.name}
           onClose={() => setShowDelete(false)}
           onConfirm={handleDelete}
+        />
+      )}
+      {showValidateModal && activeTab?.validation && (
+        <ValidationModal
+          type={activeTab.type}
+          validation={activeTab.validation}
+          onClose={() => setShowValidateModal(false)}
         />
       )}
     </div>

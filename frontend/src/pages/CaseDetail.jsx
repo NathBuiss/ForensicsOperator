@@ -6,6 +6,7 @@ import Timeline from './Timeline'
 import Search from './Search'
 import Ingest from './Ingest'
 import AlertRules from './AlertRules'
+import CaseFiles from './CaseFiles'
 
 export default function CaseDetail() {
   const { caseId } = useParams()
@@ -25,9 +26,10 @@ export default function CaseDetail() {
 
   const tabs = [
     { path: 'timeline', label: 'Timeline' },
-    { path: 'search', label: 'Search' },
-    { path: 'ingest', label: 'Ingest' },
-    { path: 'alerts', label: 'Alerts', icon: AlertTriangle },
+    { path: 'search',   label: 'Search' },
+    { path: 'files',    label: 'Files' },
+    { path: 'ingest',   label: 'Ingest' },
+    { path: 'alerts',   label: 'Alerts', icon: AlertTriangle },
   ]
 
   return (
@@ -82,6 +84,7 @@ export default function CaseDetail() {
           <Route index element={<Navigate to="timeline" replace />} />
           <Route path="timeline" element={<Timeline caseId={caseId} artifactTypes={caseData.artifact_types || []} />} />
           <Route path="search" element={<Search caseId={caseId} />} />
+          <Route path="files"  element={<CaseFiles caseId={caseId} />} />
           <Route path="ingest" element={<Ingest caseId={caseId} onComplete={() =>
             api.cases.get(caseId).then(setCaseData)} />} />
           <Route path="alerts" element={<AlertRules caseId={caseId} />} />
