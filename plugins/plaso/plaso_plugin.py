@@ -38,7 +38,7 @@ class PlasoPlugin(BasePlugin):
     PLUGIN_VERSION = "1.0.0"
     DEFAULT_ARTIFACT_TYPE = "timeline"
     SUPPORTED_EXTENSIONS = [".plaso"]
-    SUPPORTED_MIME_TYPES = ["application/x-sqlite3", "application/octet-stream"]
+    SUPPORTED_MIME_TYPES = ["application/x-sqlite3"]
 
     def __init__(self, context: PluginContext) -> None:
         super().__init__(context)

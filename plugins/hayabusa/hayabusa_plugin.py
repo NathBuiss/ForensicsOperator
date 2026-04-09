@@ -39,10 +39,7 @@ class HayabusaPlugin(BasePlugin):
     PLUGIN_VERSION = "1.0.0"
     DEFAULT_ARTIFACT_TYPE = "hayabusa"
     SUPPORTED_EXTENSIONS = [".jsonl", ".csv"]
-    SUPPORTED_MIME_TYPES = [
-        "text/plain", "application/json", "text/csv",
-        "application/x-ndjson", "application/octet-stream",
-    ]
+    SUPPORTED_MIME_TYPES = ["text/plain", "application/json", "text/csv", "application/x-ndjson"]
 
     def __init__(self, context: PluginContext) -> None:
         super().__init__(context)

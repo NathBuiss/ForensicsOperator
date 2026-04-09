@@ -23,10 +23,7 @@ class LnkPlugin(BasePlugin):
     PLUGIN_VERSION = "1.0.0"
     DEFAULT_ARTIFACT_TYPE = "lnk"
     SUPPORTED_EXTENSIONS = [".lnk"]
-    SUPPORTED_MIME_TYPES = [
-        "application/x-ms-shortcut",
-        "application/octet-stream",
-    ]
+    SUPPORTED_MIME_TYPES = ["application/x-ms-shortcut"]
 
     def __init__(self, context: PluginContext) -> None:
         super().__init__(context)

@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import tempfile
 import uuid
 import zipfile
+from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from typing import List
 
 from services import storage, jobs as job_svc
@@ -29,6 +31,10 @@ from services.cases import get_case
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["ingest"])
+
+# Temp directory for in-progress chunked uploads
+_CHUNK_DIR = Path(tempfile.gettempdir()) / "fo_chunks"
+_CHUNK_DIR.mkdir(exist_ok=True)
 
 
 # ── Celery dispatch ────────────────────────────────────────────────────────────
@@ -191,6 +197,75 @@ def _handle_zip_async(
             "filename": zip_name,
             "error": "Zip archive contained no processable files",
         })
+
+
+# ── Chunked upload endpoint ────────────────────────────────────────────────────
+
+@router.post("/cases/{case_id}/ingest/chunk")
+async def ingest_chunk(
+    case_id: str,
+    upload_id: str = Form(...),
+    filename: str = Form(...),
+    chunk_index: int = Form(...),
+    total_chunks: int = Form(...),
+    chunk: UploadFile = File(...),
+    background_tasks: BackgroundTasks = None,
+):
+    """
+    Receive one chunk of a large file upload.
+
+    The client splits a file into fixed-size pieces and POSTs them sequentially.
+    Each piece is appended to a per-upload temp file. When the final chunk arrives
+    the assembled file is handed off to the normal ingest pipeline.
+
+    This avoids proxy body-size limits and read timeouts entirely — each chunk
+    is a small request (typically 50 MB) that completes in a few seconds.
+    """
+    case = get_case(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    # Sanitise upload_id so it's safe to use as a filename component
+    if not re.fullmatch(r'[0-9a-f\-]{8,64}', upload_id):
+        raise HTTPException(status_code=400, detail="Invalid upload_id")
+
+    safe_name = re.sub(r'[^\w.\-]', '_', filename)[:200]
+    tmp_path = str(_CHUNK_DIR / f"{upload_id}_{safe_name}")
+
+    try:
+        data = await chunk.read()
+        # Append mode so chunks accumulate in order
+        with open(tmp_path, "ab") as f:
+            f.write(data)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to store chunk: {exc}")
+
+    # Not the last chunk — acknowledge and wait for more
+    if chunk_index < total_chunks - 1:
+        return {"status": "partial", "chunk": chunk_index, "received": chunk_index + 1}
+
+    # Final chunk — hand off to normal ingest pipeline
+    size = os.path.getsize(tmp_path)
+    dispatched: list = []
+    errors: list = []
+
+    try:
+        if filename.lower().endswith(".zip"):
+            _handle_zip_async(case_id, filename, tmp_path, dispatched, errors, background_tasks)
+        else:
+            _ingest_one_async(case_id, filename, tmp_path, size, dispatched, errors, background_tasks)
+    except Exception as exc:
+        logger.error("Failed to register chunked ingest for '%s': %s", filename, exc)
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise HTTPException(status_code=500, detail=f"Server error: {exc}")
+
+    if errors:
+        raise HTTPException(status_code=400, detail=errors[0]["error"])
+
+    return {"case_id": case_id, "jobs": dispatched}
 
 
 # ── Endpoint ───────────────────────────────────────────────────────────────────

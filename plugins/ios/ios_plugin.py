@@ -81,41 +81,24 @@ class IOSPlugin(BasePlugin):
     PLUGIN_NAME = "ios"
     PLUGIN_VERSION = "1.0.0"
     DEFAULT_ARTIFACT_TYPE = "ios"
-    SUPPORTED_EXTENSIONS = [".db", ".sqlite", ".sqlitedb", ".plist"]
+    SUPPORTED_EXTENSIONS = []
     SUPPORTED_MIME_TYPES: list[str] = []
+
+    _KNOWN_FILES = {
+        "SMS.DB", "CALL_HISTORY.DB", "ADDRESSBOOK.SQLITEDB",
+        "CONSOLIDATED.DB", "MANIFEST.DB", "INFO.PLIST",
+        "HISTORY.DB", "BOOKMARKS.DB",
+        "COM.APPLE.WIFI.KNOWN-NETWORKS.PLIST", "COM.APPLE.WIFI.PLIST",
+    }
 
     @classmethod
     def get_handled_filenames(cls) -> list[str]:
-        return [
-            "SMS.DB",
-            "CALL_HISTORY.DB",
-            "ADDRESSBOOK.SQLITEDB",
-            "CONSOLIDATED.DB",
-            "MANIFEST.DB",
-            "INFO.PLIST",
-        ]
+        return list(cls._KNOWN_FILES)
 
     @classmethod
     def can_handle(cls, file_path: Path, mime_type: str) -> bool:
-        """Extended matching for Safari databases and WiFi plists."""
-        name_upper = file_path.name.upper()
-
-        # Standard base matching
-        if super().can_handle(file_path, mime_type):
-            return True
-
-        # Safari databases (may be in a Safari/ subdirectory)
-        if name_upper in ("HISTORY.DB", "BOOKMARKS.DB"):
-            return True
-
-        # WiFi plists
-        if name_upper in (
-            "COM.APPLE.WIFI.KNOWN-NETWORKS.PLIST",
-            "COM.APPLE.WIFI.PLIST",
-        ):
-            return True
-
-        return False
+        """Only match specific known iOS artifact filenames."""
+        return file_path.name.upper() in cls._KNOWN_FILES
 
     def __init__(self, context: PluginContext) -> None:
         super().__init__(context)

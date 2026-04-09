@@ -56,6 +56,12 @@ RUN pip3 install --no-cache-dir \
     "git+https://github.com/cclgroupltd/ccl_chromium_reader.git" \
     && python3 -c "import ccl_chromium_reader; print('ccl_chromium_reader installed OK')"
 
+# Patch pyhindsight for Python < 3.11 compatibility.
+# datetime.UTC was introduced in Python 3.11; replace with datetime.timezone.utc.
+RUN python3 -c "import datetime; datetime.UTC" 2>/dev/null || \
+    find /usr/local/lib /usr/lib -name "*.py" -path "*/pyhindsight/*" -exec \
+    sed -i 's/datetime\.UTC/datetime.timezone.utc/g' {} \;
+
 # ── Processor source code ─────────────────────────────────────────────────────
 COPY processor/ .
 RUN touch tasks/__init__.py utils/__init__.py

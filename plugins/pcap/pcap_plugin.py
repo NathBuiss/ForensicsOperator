@@ -114,7 +114,7 @@ class PcapPlugin(BasePlugin):
     PLUGIN_VERSION = "1.0.0"
     DEFAULT_ARTIFACT_TYPE = "network"
     SUPPORTED_EXTENSIONS = [".pcap", ".pcapng", ".cap"]
-    SUPPORTED_MIME_TYPES = ["application/vnd.tcpdump.pcap", "application/octet-stream"]
+    SUPPORTED_MIME_TYPES = ["application/vnd.tcpdump.pcap"]
 
     def __init__(self, context: PluginContext) -> None:
         super().__init__(context)

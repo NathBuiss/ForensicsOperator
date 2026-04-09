@@ -241,68 +241,83 @@ export default function Ingest({ caseId, onComplete }) {
     })
   }, [])
 
-  function handleFiles(files) {
+  async function handleFiles(files) {
     if (!files.length) return
     setError('')
     setUploading(true)
     setUploadPct(0)
 
-    const formData = new FormData()
-    for (const f of files) formData.append('files', f)
+    const CHUNK_SIZE = 50 * 1024 * 1024  // 50 MB per chunk
+    const token = localStorage.getItem('fo_token') || ''
+    const base = window.location.origin
+    const allJobIds = []
 
-    // Register with global upload context so the sidebar indicator fires
     const uploadId = `${caseId}-${Date.now()}`
     const label = files.length === 1 ? files[0].name : `${files.length} files`
     startUpload(uploadId, label)
 
-    // Use XHR so we get upload progress events (fetch doesn't expose them)
-    const token = localStorage.getItem('fo_token') || ''
-    const xhr = new XMLHttpRequest()
+    // Total bytes across all files for overall progress
+    const totalBytes = Array.from(files).reduce((s, f) => s + f.size, 0)
+    let sentBytes = 0
 
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        const pct = Math.round((e.loaded / e.total) * 100)
-        setUploadPct(pct)
-        updateUpload(uploadId, pct)
+    try {
+      for (const file of files) {
+        const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE))
+        // Per-file upload_id keeps concurrent uploads isolated
+        const fileUploadId = crypto.randomUUID()
+        let jobIds = []
+
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * CHUNK_SIZE
+          const slice = file.slice(start, start + CHUNK_SIZE)
+
+          const fd = new FormData()
+          fd.append('upload_id', fileUploadId)
+          fd.append('filename', file.name)
+          fd.append('chunk_index', i)
+          fd.append('total_chunks', totalChunks)
+          fd.append('chunk', slice)
+
+          const res = await fetch(`${base}/api/v1/cases/${caseId}/ingest/chunk`, {
+            method: 'POST',
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+            body: fd,
+          })
+
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}))
+            throw new Error(body.detail || `HTTP ${res.status}`)
+          }
+
+          sentBytes += slice.size
+          const pct = Math.round((sentBytes / totalBytes) * 100)
+          setUploadPct(pct)
+          updateUpload(uploadId, pct)
+
+          // Last chunk response contains job IDs
+          if (i === totalChunks - 1) {
+            const r = await res.json()
+            jobIds = (r.jobs || []).map(j => j.job_id)
+          }
+        }
+
+        allJobIds.push(...jobIds)
       }
-    }
 
-    xhr.onload = () => {
+      setJobs(prev => [...allJobIds, ...prev])
+      setJobStatuses(prev => {
+        const next = { ...prev }
+        allJobIds.forEach(id => { next[id] = 'PENDING' })
+        return next
+      })
+      onComplete?.()
+    } catch (err) {
+      setError(`Upload failed: ${err.message}`)
+    } finally {
       setUploading(false)
       setUploadPct(0)
       finishUpload(uploadId)
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          const r = JSON.parse(xhr.responseText)
-          const newJobIds = (r.jobs || []).map(j => j.job_id)
-          // New jobs start as PENDING — prepend them before existing jobs
-          setJobs(prev => [...newJobIds, ...prev])
-          setJobStatuses(prev => {
-            const next = { ...prev }
-            newJobIds.forEach(id => { next[id] = 'PENDING' })
-            return next
-          })
-          onComplete?.()
-        } catch {
-          setError('Unexpected response from server')
-        }
-      } else {
-        try {
-          const r = JSON.parse(xhr.responseText)
-          setError(r.detail || `Upload failed (HTTP ${xhr.status})`)
-        } catch {
-          setError(`Upload failed (HTTP ${xhr.status})`)
-        }
-      }
     }
-
-    xhr.onerror = () => { setUploading(false); setUploadPct(0); finishUpload(uploadId); setError('Network error during upload') }
-    xhr.ontimeout = () => { setUploading(false); setUploadPct(0); finishUpload(uploadId); setError('Upload timed out') }
-
-    const base = window.location.origin
-    xhr.open('POST', `${base}/api/v1/cases/${caseId}/ingest`)
-    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
-    xhr.send(formData)
   }
 
   function onDrop(e) {
