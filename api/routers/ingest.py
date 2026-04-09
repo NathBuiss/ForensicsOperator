@@ -32,8 +32,10 @@ from services.cases import get_case
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["ingest"])
 
-# Temp directory for in-progress chunked uploads
-_CHUNK_DIR = Path(tempfile.gettempdir()) / "fo_chunks"
+# Temp directory for in-progress chunked uploads.
+# Must be on the shared plugins PVC (/app/plugins) so that chunks written by
+# one API replica are visible to whichever replica receives the final chunk.
+_CHUNK_DIR = Path("/app/plugins/_chunks")
 _CHUNK_DIR.mkdir(exist_ok=True)
 
 
