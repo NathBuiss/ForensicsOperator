@@ -162,7 +162,7 @@ function JobCard({ jobId, onStatusChange }) {
       {(job.status === 'UPLOADING' || job.status === 'PENDING') && elapsed > STUCK_THRESHOLD_MS && (
         <p className="text-[10px] text-amber-500 mt-0.5 flex items-center gap-1">
           <AlertTriangle size={10} />
-          Waiting {Math.floor(elapsed / 60000)} min — processor may be busy or unavailable
+          In queue {Math.floor(elapsed / 60000)} min — processor is busy, job will run when a worker is free
         </p>
       )}
 

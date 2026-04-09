@@ -39,6 +39,24 @@ _CHUNK_DIR = Path("/app/plugins/_chunks")
 _CHUNK_DIR.mkdir(exist_ok=True)
 
 
+# ── Known auxiliary / empty-by-design file types ──────────────────────────────
+# These are always 0 bytes and have no forensic value; skip silently.
+_AUXILIARY_SUFFIXES = frozenset([
+    ".sqlite-wal", ".sqlite-shm",
+    ".db-wal",     ".db-shm",
+    "-wal",        "-shm",
+])
+_AUXILIARY_NAMES = frozenset(["context_open.marker"])
+
+
+def _is_auxiliary(name: str) -> bool:
+    n = name.lower()
+    for s in _AUXILIARY_SUFFIXES:
+        if n.endswith(s):
+            return True
+    return n in _AUXILIARY_NAMES
+
+
 # ── Celery dispatch ────────────────────────────────────────────────────────────
 
 def _dispatch_celery_task(job_id: str, case_id: str, minio_key: str, filename: str) -> None:
@@ -104,7 +122,10 @@ def _ingest_one_async(
 ) -> None:
     """Create job record, register background upload, append to dispatched."""
     if size == 0:
-        logger.warning("Skipping empty file: %s", filename)
+        if _is_auxiliary(filename):
+            logger.debug("Skipping empty auxiliary file: %s", filename)
+        else:
+            logger.warning("Skipping empty file: %s", filename)
         try:
             os.unlink(tmp_path)
         except OSError:
@@ -134,6 +155,75 @@ def _ingest_one_async(
 
 # ── ZIP extraction ─────────────────────────────────────────────────────────────
 
+def _extract_and_dispatch_bg(
+    case_id: str,
+    zip_name: str,
+    zip_tmp_path: str,
+    entries: list,  # list of (zip_entry_path, entry_name, job_id, minio_key)
+) -> None:
+    """
+    BackgroundTask: extract each ZIP entry, upload to MinIO, dispatch Celery.
+
+    Runs after the HTTP response has been sent.  Each job transitions:
+      UPLOADING → PENDING → (Celery) RUNNING → COMPLETED | FAILED
+    """
+    try:
+        zf = zipfile.ZipFile(zip_tmp_path, "r")
+    except Exception as exc:
+        logger.error("Cannot open zip '%s' in background: %s", zip_name, exc)
+        for _, _, job_id, _ in entries:
+            try:
+                job_svc.update_job(job_id, status="FAILED", error=f"ZIP open failed: {exc}")
+            except Exception:
+                pass
+        try:
+            os.unlink(zip_tmp_path)
+        except OSError:
+            pass
+        return
+
+    with zf:
+        for zip_entry, entry_name, job_id, minio_key in entries:
+            tmp_path = None
+            try:
+                tmp_fd, tmp_path = tempfile.mkstemp(prefix="fo_zip_", suffix=f"_{entry_name}")
+                os.close(tmp_fd)
+                with zf.open(zip_entry) as src, open(tmp_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+
+                size = os.path.getsize(tmp_path)
+                job_svc.update_job(job_id, size_bytes=size)
+
+                with open(tmp_path, "rb") as f:
+                    storage.upload_fileobj(minio_key, f, size)
+
+                job_svc.update_job(job_id, minio_object_key=minio_key, status="PENDING")
+
+                try:
+                    _dispatch_celery_task(job_id, case_id, minio_key, entry_name)
+                except Exception as exc:
+                    logger.error("Celery dispatch failed for '%s': %s", entry_name, exc)
+                    job_svc.update_job(job_id, status="FAILED", error=f"Task dispatch failed: {exc}")
+
+            except Exception as exc:
+                logger.error("Background extraction failed for '%s': %s", entry_name, exc)
+                try:
+                    job_svc.update_job(job_id, status="FAILED", error=f"Extraction failed: {exc}")
+                except Exception:
+                    pass
+            finally:
+                if tmp_path:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+
+    try:
+        os.unlink(zip_tmp_path)
+    except OSError:
+        pass
+
+
 def _handle_zip_async(
     case_id: str,
     zip_name: str,
@@ -143,9 +233,12 @@ def _handle_zip_async(
     background_tasks: BackgroundTasks,
 ) -> None:
     """
-    Extract a zip archive to a temp dir, create one async ingest job per file.
+    Phase 1 (sync, fast): read ZIP central directory, create job stubs, return immediately.
+    Phase 2 (background): extract files, upload to MinIO, dispatch Celery tasks.
 
-    The zip temp file is cleaned up once all members have been staged.
+    Reading the central directory is O(1) — it never decompresses anything, so this
+    completes in < 1s even for a 1.5 GB archive.  The HTTP response is sent before
+    any extraction begins, preventing proxy 502 timeouts.
     """
     try:
         zf = zipfile.ZipFile(zip_tmp_path, "r")
@@ -158,47 +251,52 @@ def _handle_zip_async(
         return
 
     pre_count = len(dispatched)
+    bg_entries: list = []  # entries to hand to the background task
+
     with zf:
-        for entry in zf.namelist():
+        for info in zf.infolist():
+            entry = info.filename
             entry_name = os.path.basename(entry)
             if not entry_name or entry.endswith("/") or entry_name.startswith("."):
                 continue
             if entry_name.lower().endswith(".zip"):
                 logger.info("Skipping nested zip '%s' inside '%s'", entry_name, zip_name)
                 continue
-
-            # Extract to a per-file temp file
-            try:
-                tmp_fd, extracted_path = tempfile.mkstemp(prefix="fo_zip_", suffix=f"_{entry_name}")
-                os.close(tmp_fd)
-                with zf.open(entry) as src, open(extracted_path, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-            except Exception as exc:
-                logger.warning("Could not extract '%s' from '%s': %s", entry, zip_name, exc)
-                errors.append({
-                    "filename": entry_name,
-                    "source_zip": zip_name,
-                    "error": f"Extraction failed: {exc}",
-                })
+            if _is_auxiliary(entry_name):
+                logger.debug("Skipping auxiliary file '%s' in '%s'", entry_name, zip_name)
                 continue
 
-            file_size = os.path.getsize(extracted_path)
-            _ingest_one_async(
-                case_id, entry_name, extracted_path, file_size,
-                dispatched, errors, background_tasks, source_zip=zip_name,
-            )
+            # Use the compressed size as a placeholder so the UI shows something
+            # immediately; the real size is updated in the background task.
+            placeholder_size = info.file_size or info.compress_size or 1
 
-    # Clean up the zip itself
-    try:
-        os.unlink(zip_tmp_path)
-    except OSError:
-        pass
+            job_id    = uuid.uuid4().hex
+            minio_key = f"cases/{case_id}/{job_id}/{entry_name}"
 
-    if len(dispatched) == pre_count and not errors:
-        errors.append({
-            "filename": zip_name,
-            "error": "Zip archive contained no processable files",
-        })
+            job_svc.create_job(job_id, case_id, entry_name, "", source_zip=zip_name)
+            job_svc.update_job(job_id, status="UPLOADING", size_bytes=placeholder_size)
+
+            bg_entries.append((entry, entry_name, job_id, minio_key))
+
+            entry_rec: dict = {
+                "job_id":     job_id,
+                "filename":   entry_name,
+                "status":     "UPLOADING",
+                "size_bytes": placeholder_size,
+                "source_zip": zip_name,
+            }
+            dispatched.append(entry_rec)
+
+    if len(dispatched) == pre_count:
+        errors.append({"filename": zip_name, "error": "Zip archive contained no processable files"})
+        try:
+            os.unlink(zip_tmp_path)
+        except OSError:
+            pass
+        return
+
+    # Schedule extraction + upload as a background task so it runs after the response
+    background_tasks.add_task(_extract_and_dispatch_bg, case_id, zip_name, zip_tmp_path, bg_entries)
 
 
 # ── Chunked upload endpoint ────────────────────────────────────────────────────

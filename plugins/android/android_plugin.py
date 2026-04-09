@@ -102,8 +102,11 @@ class AndroidPlugin(BasePlugin):
         if super().can_handle(file_path, mime_type):
             return True
 
-        # WiFi config files
-        if name_upper in ("WPA_SUPPLICANT.CONF",) or "wifi" in name_upper.lower():
+        # WiFi config files — only match known Android WiFi config formats,
+        # not arbitrary files that happen to contain "wifi" in the name (e.g. Apple .plist)
+        if name_upper == "WPA_SUPPLICANT.CONF":
+            return True
+        if "wifi" in name_upper.lower() and file_path.suffix.lower() in (".conf", ".xml"):
             return True
 
         # Bug report files

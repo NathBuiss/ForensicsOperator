@@ -309,9 +309,12 @@ def run_module(
         }
         runner = RUNNERS.get(module_id)
 
-        if module_id == "cti_match":
-            # Special runner: queries ES events directly — needs case_id
-            results = _run_cti_match(run_id, case_id, work_dir, sources_dir, params, tool_meta)
+        if module_id in ("cti_match", "browser_report"):
+            # Special runners: query ES events directly — need case_id
+            if module_id == "cti_match":
+                results = _run_cti_match(run_id, case_id, work_dir, sources_dir, params, tool_meta)
+            else:
+                results = _run_browser_report(run_id, case_id, work_dir, sources_dir, params, tool_meta)
         elif runner is not None:
             # Built-in module — run directly in this process
             results = runner(run_id, work_dir, sources_dir, params, tool_meta)
@@ -3898,4 +3901,322 @@ def _run_cti_match(
         f"IOCs checked   : {total_iocs}\n"
         f"Matches found  : {len(results)}\n"
     )
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Browser History Report
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Search engine query parameter patterns: (domain_fragment, query_param)
+_SEARCH_ENGINES = [
+    ("google.",     "q"),
+    ("bing.com",    "q"),
+    ("duckduckgo.", "q"),
+    ("yahoo.com",   "p"),
+    ("ecosia.org",  "q"),
+    ("baidu.com",   "wd"),
+    ("yandex.",     "text"),
+    ("search.brave","q"),
+    ("startpage.",  "query"),
+]
+
+_BROWSER_BATCH = 500
+
+
+def _extract_domain(url: str) -> str:
+    """Return the bare domain (no scheme/www/path) from a URL string."""
+    try:
+        # Strip scheme
+        s = url.split("://", 1)[-1]
+        # Strip path/query/fragment
+        domain = s.split("/")[0].split("?")[0].split("#")[0]
+        # Strip port
+        domain = domain.rsplit(":", 1)[0]
+        # Strip leading www.
+        if domain.startswith("www."):
+            domain = domain[4:]
+        return domain.lower() or url
+    except Exception:
+        return url
+
+
+def _extract_search_query(url: str) -> str | None:
+    """Extract the search query string from a known search engine URL, or None."""
+    url_lower = url.lower()
+    for engine_frag, param in _SEARCH_ENGINES:
+        if engine_frag in url_lower:
+            # Parse query string manually (no urllib in safe env)
+            try:
+                qs = url.split("?", 1)[1] if "?" in url else ""
+                for kv in qs.split("&"):
+                    if "=" in kv:
+                        k, v = kv.split("=", 1)
+                        if k.lower() == param:
+                            # URL-decode + signs and percent-encoding (basic)
+                            query = v.replace("+", " ")
+                            # Simple percent-decode for common chars
+                            import urllib.parse
+                            query = urllib.parse.unquote(query)
+                            return query.strip() if query.strip() else None
+            except Exception:
+                pass
+    return None
+
+
+def _run_browser_report(
+    run_id: str,
+    case_id: str,
+    work_dir: Path,
+    sources_dir: Path,
+    params: dict,
+    tool_meta: dict,
+) -> list[dict]:
+    """
+    Generate a browser history report by aggregating all browser events
+    already indexed in Elasticsearch for this case.
+
+    Produces hits grouped into:
+      1. Summary statistics (one hit)
+      2. Top visited domains sorted by visit count
+      3. Full URL visit log (sorted by timestamp)
+      4. Downloads
+      5. Search queries extracted from search engine URLs
+      6. Saved login/credential sites
+    """
+    index = f"fo-case-{case_id}-*"
+    query_body: dict = {
+        "query": {
+            "term": {"artifact_type": "browser"}
+        },
+        "size": _BROWSER_BATCH,
+        "sort": [{"_doc": "asc"}],
+        "_source": True,
+    }
+
+    # Accumulators
+    visits:    list[dict] = []   # {timestamp, url, title, domain, browser_type, data_type, transition, visit_count}
+    downloads: list[dict] = []   # {timestamp, url, filename, size_bytes, mime_type, state}
+    searches:  list[dict] = []   # {timestamp, query, engine, url}
+    logins:    list[dict] = []   # {timestamp, url, username}
+    cookies_count = 0
+    events_scanned = 0
+    search_after = None
+    browsers_seen: set[str] = set()
+
+    while True:
+        body = dict(query_body)
+        body["sort"] = [{"_doc": "asc"}]
+        if search_after:
+            body["search_after"] = search_after
+
+        try:
+            url_es = f"{ELASTICSEARCH_URL.rstrip('/')}/{index}/_search"
+            data   = json.dumps(body).encode("utf-8")
+            req    = urllib.request.Request(
+                url_es, data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                es_resp = json.loads(resp.read())
+        except Exception as exc:
+            logger.error("[%s] browser_report ES query failed: %s", run_id, exc)
+            tool_meta["stderr"] += f"ES query failed: {exc}\n"
+            break
+
+        hits = es_resp.get("hits", {}).get("hits", [])
+        if not hits:
+            break
+
+        for hit in hits:
+            src          = hit.get("_source", {})
+            browser_dict = src.get("browser", {})
+            if not isinstance(browser_dict, dict):
+                events_scanned += 1
+                continue
+
+            data_type    = browser_dict.get("data_type", "")
+            browser_type = browser_dict.get("browser_type", "unknown")
+            ts           = src.get("timestamp", "")
+            browsers_seen.add(browser_type)
+            events_scanned += 1
+
+            if data_type == "history":
+                raw_url      = browser_dict.get("url", "")
+                title        = browser_dict.get("title", "")
+                transition   = browser_dict.get("transition", "")
+                visit_count  = browser_dict.get("visit_count", 1)
+                domain       = _extract_domain(raw_url)
+                query        = _extract_search_query(raw_url)
+                visits.append({
+                    "timestamp":    ts,
+                    "url":          raw_url,
+                    "title":        title,
+                    "domain":       domain,
+                    "browser_type": browser_type,
+                    "transition":   transition,
+                    "visit_count":  visit_count,
+                })
+                if query:
+                    # Try to identify engine name from URL
+                    engine = "unknown"
+                    url_lower = raw_url.lower()
+                    for eng_frag, _ in _SEARCH_ENGINES:
+                        if eng_frag in url_lower:
+                            engine = eng_frag.rstrip(".").replace("search.", "").capitalize()
+                            break
+                    searches.append({
+                        "timestamp": ts,
+                        "query":     query,
+                        "engine":    engine,
+                        "url":       raw_url,
+                    })
+
+            elif data_type == "download":
+                downloads.append({
+                    "timestamp":   ts,
+                    "url":         browser_dict.get("tab_url", "") or browser_dict.get("url", ""),
+                    "filename":    browser_dict.get("target_path", "") or browser_dict.get("current_path", ""),
+                    "size_bytes":  browser_dict.get("total_bytes", 0),
+                    "mime_type":   browser_dict.get("mime_type", ""),
+                    "state":       browser_dict.get("state", ""),
+                })
+
+            elif data_type == "login":
+                logins.append({
+                    "timestamp": ts,
+                    "url":       browser_dict.get("origin_url", "") or browser_dict.get("url", ""),
+                    "username":  browser_dict.get("username_value", ""),
+                })
+
+            elif data_type == "cookie":
+                cookies_count += 1
+
+        search_after = hits[-1].get("sort")
+        if not search_after:
+            break
+
+    # ── Aggregate domain counts ───────────────────────────────────────────────
+    domain_counts: dict[str, int] = {}
+    for v in visits:
+        d = v["domain"]
+        domain_counts[d] = domain_counts.get(d, 0) + 1
+
+    top_domains = sorted(domain_counts.items(), key=lambda x: x[1], reverse=True)
+
+    results: list[dict] = []
+
+    # ── Hit 1: Summary ────────────────────────────────────────────────────────
+    summary_lines = [
+        f"Browser(s) detected : {', '.join(sorted(browsers_seen)) or 'none'}",
+        f"URL visits          : {len(visits)}",
+        f"Unique domains      : {len(domain_counts)}",
+        f"Downloads           : {len(downloads)}",
+        f"Search queries      : {len(searches)}",
+        f"Saved logins found  : {len(logins)}",
+        f"Cookies indexed     : {cookies_count}",
+    ]
+    tool_meta["stdout"] += "\n".join(summary_lines) + "\n"
+    tool_meta["log"]    += (
+        f"Events scanned: {events_scanned} | visits: {len(visits)} | "
+        f"domains: {len(domain_counts)} | downloads: {len(downloads)} | "
+        f"searches: {len(searches)} | logins: {len(logins)}\n"
+    )
+
+    results.append({
+        "id":          str(uuid.uuid4()),
+        "timestamp":   "",
+        "level":       "informational",
+        "level_int":   LEVEL_INT["informational"],
+        "rule_title":  "Browser History Summary",
+        "details_raw": json.dumps({
+            "browsers":        sorted(browsers_seen),
+            "total_visits":    len(visits),
+            "unique_domains":  len(domain_counts),
+            "downloads":       len(downloads),
+            "search_queries":  len(searches),
+            "saved_logins":    len(logins),
+            "cookies_indexed": cookies_count,
+        }),
+        "summary": "\n".join(summary_lines),
+    })
+
+    # ── Hits 2+: Top domains ──────────────────────────────────────────────────
+    for rank, (domain, count) in enumerate(top_domains[:100], start=1):
+        results.append({
+            "id":          str(uuid.uuid4()),
+            "timestamp":   "",
+            "level":       "informational",
+            "level_int":   LEVEL_INT["informational"],
+            "rule_title":  f"Top Domain #{rank}: {domain} ({count} visit{'s' if count != 1 else ''})",
+            "details_raw": json.dumps({
+                "rank":   rank,
+                "domain": domain,
+                "visits": count,
+            }),
+            "domain":  domain,
+            "visits":  count,
+            "section": "top_domains",
+        })
+
+    # ── Hits: Search queries ──────────────────────────────────────────────────
+    for sq in searches:
+        results.append({
+            "id":          str(uuid.uuid4()),
+            "timestamp":   sq["timestamp"],
+            "level":       "informational",
+            "level_int":   LEVEL_INT["informational"],
+            "rule_title":  f"Search: {sq['query'][:120]} [{sq['engine']}]",
+            "details_raw": json.dumps(sq),
+            "query":       sq["query"],
+            "engine":      sq["engine"],
+            "section":     "searches",
+        })
+
+    # ── Hits: Downloads ───────────────────────────────────────────────────────
+    for dl in downloads:
+        fname = dl["filename"].split("/")[-1].split("\\")[-1] if dl["filename"] else dl["url"]
+        size_kb = f"{dl['size_bytes'] // 1024} KB" if dl["size_bytes"] else "unknown size"
+        results.append({
+            "id":          str(uuid.uuid4()),
+            "timestamp":   dl["timestamp"],
+            "level":       "low",
+            "level_int":   LEVEL_INT["low"],
+            "rule_title":  f"Download: {fname} ({size_kb})",
+            "details_raw": json.dumps(dl),
+            "filename":    fname,
+            "section":     "downloads",
+        })
+
+    # ── Hits: Saved logins ────────────────────────────────────────────────────
+    for lg in logins:
+        results.append({
+            "id":          str(uuid.uuid4()),
+            "timestamp":   lg["timestamp"],
+            "level":       "medium",
+            "level_int":   LEVEL_INT["medium"],
+            "rule_title":  f"Saved Login: {_extract_domain(lg['url'])} — user: {lg['username'] or '(blank)'}",
+            "details_raw": json.dumps(lg),
+            "url":         lg["url"],
+            "username":    lg["username"],
+            "section":     "logins",
+        })
+
+    # ── Hits: Full URL visit log (sorted by timestamp) ────────────────────────
+    visits_sorted = sorted(visits, key=lambda v: v["timestamp"] or "")
+    for v in visits_sorted:
+        results.append({
+            "id":          str(uuid.uuid4()),
+            "timestamp":   v["timestamp"],
+            "level":       "informational",
+            "level_int":   LEVEL_INT["informational"],
+            "rule_title":  f"Visit: {v['title'] or v['url'][:120]}",
+            "details_raw": json.dumps(v),
+            "url":         v["url"],
+            "domain":      v["domain"],
+            "section":     "visits",
+        })
+
+    logger.info("[%s] browser_report: %d result hits from %d events", run_id, len(results), events_scanned)
     return results

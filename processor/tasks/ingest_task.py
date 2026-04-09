@@ -122,33 +122,40 @@ def process_artifact(
         plugin.setup()
 
         indexer = ESBulkIndexer(ELASTICSEARCH_URL)
-        batch: list[dict] = []
-        events_indexed = 0
         ingested_at = datetime.now(timezone.utc).isoformat()
         source_url = f"minio://{MINIO_BUCKET}/{minio_object_key}"
 
-        from plugins.base_plugin import PluginParseError
-        for raw_event in plugin.parse():
-            # Merge base fields onto event
-            event = _merge_base_fields(
-                raw_event, case_id, job_id, source_url, ingested_at
+        try:
+            events_indexed = _run_plugin_and_index(
+                plugin, indexer, r, job_id, case_id, source_url, ingested_at
             )
-            batch.append(event)
-
-            if len(batch) >= BULK_SIZE:
-                indexer.bulk_index(case_id, batch)
-                events_indexed += len(batch)
-                batch = []
-                update_job_status(r, job_id,
-                                  events_indexed=str(events_indexed),
-                                  progress_pct="")
-
-        if batch:
-            indexer.bulk_index(case_id, batch)
-            events_indexed += len(batch)
-
-        plugin.teardown()
-        stats = plugin.get_stats()
+            stats = plugin.get_stats()
+        except Exception as plugin_exc:
+            plugin.teardown()
+            # ── Plaso fallback ───────────────────────────────────────────────
+            # Primary plugin failed — let log2timeline have a go.
+            # log2timeline auto-detects hundreds of file formats and will
+            # extract whatever events it can find in the file.
+            logger.warning(
+                "[%s] Plugin '%s' failed (%s) — trying log2timeline fallback",
+                job_id, plugin_class.PLUGIN_NAME, plugin_exc,
+            )
+            update_job_status(r, job_id, plugin_used="plaso (fallback)")
+            try:
+                from plugins.plaso.plaso_plugin import PlasoPlugin
+                fallback = PlasoPlugin.create_from_source(local_file, work_dir, ctx)
+                fallback.setup()
+                events_indexed = _run_plugin_and_index(
+                    fallback, indexer, r, job_id, case_id, source_url, ingested_at
+                )
+                fallback.teardown()
+                stats = fallback.get_stats()
+                stats["fallback_reason"] = str(plugin_exc)
+            except Exception as plaso_exc:
+                logger.error("[%s] Plaso fallback also failed: %s", job_id, plaso_exc)
+                raise plugin_exc  # surface the original error
+        else:
+            plugin.teardown()
 
         # ── 5. Mark complete ─────────────────────────────────────────────────
         result = {
@@ -178,6 +185,32 @@ def process_artifact(
     finally:
         if work_dir.exists():
             shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _run_plugin_and_index(
+    plugin,
+    indexer: ESBulkIndexer,
+    r: redis.Redis,
+    job_id: str,
+    case_id: str,
+    source_url: str,
+    ingested_at: str,
+) -> int:
+    """Drive a plugin's parse() generator and bulk-index all events. Returns event count."""
+    batch: list[dict] = []
+    events_indexed = 0
+    for raw_event in plugin.parse():
+        event = _merge_base_fields(raw_event, case_id, job_id, source_url, ingested_at)
+        batch.append(event)
+        if len(batch) >= BULK_SIZE:
+            indexer.bulk_index(case_id, batch)
+            events_indexed += len(batch)
+            batch = []
+            update_job_status(r, job_id, events_indexed=str(events_indexed), progress_pct="")
+    if batch:
+        indexer.bulk_index(case_id, batch)
+        events_indexed += len(batch)
+    return events_indexed
 
 
 def _merge_base_fields(

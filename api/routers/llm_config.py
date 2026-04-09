@@ -165,21 +165,25 @@ falsepositives:
   - Legitimate administrative automation"""
 
 
-_SYSTEM_PROMPT = """You are an expert digital forensic analyst reviewing the output of an automated analysis module.
-Analyze the provided detections and produce a structured forensic summary.
+_SYSTEM_PROMPT = """You are a digital forensic analyst documenting findings on an information system.
+Your job is to describe what the evidence shows — not to assume malice. Most activity on a real IS is routine.
 
 Your response MUST be a JSON object with exactly these keys:
 {
-  "summary": "2-4 sentence executive summary of what happened",
-  "severity": "critical | high | medium | low | informational",
-  "timeline": ["key event 1", "key event 2", ...],
-  "indicators": ["IOC or notable indicator 1", "IOC 2", ...],
-  "mitre_techniques": ["T1059.001 - PowerShell", ...],
-  "recommendations": ["Immediate action 1", "Action 2", ...],
-  "confidence": "high | medium | low"
+  "summary": "2-4 sentences describing what the data shows in plain terms. Describe actual observed behaviour, not speculation.",
+  "anomaly_level": "none | low | medium | high — only elevate if there is a concrete, specific reason: unknown binaries, unusual hours, known-bad indicators, lateral movement patterns. Default to 'none' or 'low' for typical system activity.",
+  "anomaly_reason": "One sentence explaining why you chose that anomaly_level. If 'none', state what makes this activity expected.",
+  "notable_findings": ["Specific, concrete finding 1 (e.g. 'User searched for salary data on 3 occasions')", "Finding 2", ...],
+  "context_needed": ["What additional evidence would help interpret this — e.g. 'Check if this process is part of standard software deployment'"],
+  "mitre_techniques": ["Only include if there is a clear, specific match — T1059.001 - PowerShell. Leave empty [] if uncertain."],
+  "confidence": "high | medium | low — reflects data quality and completeness, not threat level"
 }
 
-Be concise and actionable. Focus on what matters for incident response.
+Key principles:
+- Browser history, prefetch, MFT, and registry entries are normal system artefacts. Describe what was used/accessed, not whether it is suspicious.
+- Do not invent IOCs or threats not present in the data.
+- Be proportionate: a single unusual event is not an incident.
+- Use precise language: "the user accessed X" not "the attacker executed X".
 Do not include markdown, only return the raw JSON object."""
 
 
@@ -338,6 +342,25 @@ def _call_ollama(base_url: str, model: str, prompt: str) -> str:
     return data["message"]["content"]
 
 
+_MODULE_CONTEXT = {
+    "hindsight":        "Browser forensics — history, cookies, downloads, form data from Chrome/Firefox/Edge. This is routine user activity data.",
+    "browser_report":   "Browser history report — aggregated URL visits, searches, and downloads. This is routine user activity data.",
+    "exiftool":         "File metadata extraction — timestamps, GPS, author fields, camera make/model. Most metadata is benign.",
+    "strings":          "Printable string extraction from a binary or unknown file. Strings alone are not indicators of compromise.",
+    "strings_analysis": "Categorised string extraction with IOC pattern matching. A match is a candidate for further investigation, not a confirmed threat.",
+    "regripper":        "Windows Registry analysis — installed software, user activity, system configuration, autorun entries.",
+    "hayabusa":         "Sigma-based threat hunting against Windows Event Logs. Hayabusa assigns its own severity — treat 'informational' hits as background noise.",
+    "yara":             "YARA rule scan — pattern matching against file content. A YARA hit means the pattern was present, not that the file is malicious.",
+    "pe_analysis":      "PE executable analysis — imports, exports, sections, entropy. High entropy or unusual imports warrant further investigation.",
+    "oletools":         "Office document macro/OLE analysis. Macros are common in enterprise environments; evaluate in context.",
+    "volatility3":      "Memory forensics — running processes, network connections, loaded modules from a RAM image.",
+    "grep_search":      "Regex/keyword pattern search across evidence. A hit means the pattern appears, not that it is malicious.",
+    "cti_match":        "IOC matching against the CTI database. A match means the indicator was seen in threat intelligence feeds.",
+    "wintriage":        "Windows triage collection — system info, user accounts, network config, scheduled tasks, services.",
+    "access_log_analysis": "Web/proxy access log analysis — HTTP requests, status codes, user agents, source IPs.",
+}
+
+
 def _build_prompt(run: dict) -> str:
     """Build the analyst prompt from module run data."""
     module_id    = run.get("module_id", "unknown")
@@ -379,12 +402,16 @@ def _build_prompt(run: dict) -> str:
     if not level_summary:
         level_summary = "no breakdown available"
 
+    module_ctx = _MODULE_CONTEXT.get(module_id, "")
+    context_line = f"Module context: {module_ctx}\n" if module_ctx else ""
+
     return (
         f"Module: {module_id}\n"
-        f"Total detections: {total_hits}  ({level_summary})\n\n"
-        f"Top detections (up to 50 shown):\n"
+        f"{context_line}"
+        f"Total findings: {total_hits}  ({level_summary})\n\n"
+        f"Findings (up to 50 shown):\n"
         f"{hits_text or '(none)'}\n\n"
-        "Analyze the above forensic findings and respond with the JSON structure as instructed."
+        "Describe what these findings show about the system or user activity, and respond with the JSON structure as instructed."
     )
 
 
@@ -602,14 +629,15 @@ def analyze_module_run(run_id: str) -> Any:
 
 # ── Event / log explanation ───────────────────────────────────────────────────
 
-_EVENT_EXPLAIN_PROMPT = """You are an expert digital forensic analyst.
-Explain the following forensic event(s) in plain language for an incident responder.
-For each event state:
-  • What happened (the action/activity)
-  • Why it matters (threat relevance or expected behaviour)
-  • Key fields (highlight the most important values)
+_EVENT_EXPLAIN_PROMPT = """You are a digital forensic analyst explaining evidence found on an information system.
+Describe what these event(s) show in plain language. Most events represent normal system activity.
 
-Be concise (3-6 sentences total). If you detect MITRE ATT&CK techniques, list their IDs.
+For each event state:
+  • What happened — describe the actual action or activity recorded
+  • Whether this is expected or unusual for a typical IS — be specific about why
+  • The key fields that are most meaningful for understanding what occurred
+
+Be concise (3-6 sentences total). Only mention MITRE ATT&CK techniques if there is a clear, specific match — not as a reflexive annotation of every event.
 Respond in plain text — no JSON, no markdown headers."""
 
 
