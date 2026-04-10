@@ -111,9 +111,13 @@ services:
       - JWT_EXPIRE_HOURS=${JWT_EXPIRE_HOURS:-8}
       - AUTH_ENABLED=${AUTH_ENABLED:-true}
       - FO_PUBLIC_URL=${FO_PUBLIC_URL:-}
+      # Chunk assembly dir — on the shared uploads volume so all API replicas see the same chunks
+      - CHUNK_DIR=/app/uploads/_chunks
     volumes:
       # Plugins seeded by workers at startup; API reads them read-only
       - plugins_data:/app/plugins:ro
+      # Shared uploads volume for chunked upload assembly and triage archive staging
+      - uploads_data:/app/uploads
     depends_on:
       elasticsearch:
         condition: service_healthy
@@ -144,6 +148,7 @@ services:
     volumes:
       # cp -rn: copy built-in plugins into the volume on first boot, skip if already present
       - plugins_data:/app/plugins
+      - uploads_data:/app/uploads
     depends_on:
       - redis
       - elasticsearch
@@ -178,6 +183,7 @@ services:
       - WORKER_MAX_TASKS=${WORKER_MAX_TASKS:-50}
     volumes:
       - plugins_data:/app/plugins
+      - uploads_data:/app/uploads
     depends_on:
       - redis
       - elasticsearch
@@ -224,3 +230,6 @@ volumes:
   # Shared plugin directory: populated once by the first worker that boots,
   # then read-only by the API and subsequent workers.
   plugins_data:
+  # Shared uploads volume: chunked upload assembly + triage archive staging.
+  # Size is unbounded on Docker (uses host disk); use CHUNK_DIR for routing.
+  uploads_data:

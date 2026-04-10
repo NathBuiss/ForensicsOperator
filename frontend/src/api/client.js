@@ -193,6 +193,16 @@ export const api = {
     importToCase: (caseId, data) => request('POST',   `/cases/${caseId}/s3-import`, data),
   },
 
+  s3Triage: {
+    getConfig:    ()             => request('GET',    '/admin/s3-triage-config'),
+    setConfig:    (data)         => request('PUT',    '/admin/s3-triage-config', data),
+    clearConfig:  ()             => request('DELETE', '/admin/s3-triage-config'),
+    testConfig:   ()             => request('POST',   '/admin/s3-triage-config/test'),
+    browse:       (prefix = '', delimiter = '/') => request('GET', `/s3-triage/browse?prefix=${encodeURIComponent(prefix)}&delimiter=${encodeURIComponent(delimiter)}`),
+    pullToCase:   (caseId, data) => request('POST',   `/cases/${caseId}/s3-triage-pull`, data),
+    scwRegions:   ()             => request('GET',    '/s3/scaleway-regions'),
+  },
+
   metrics: {
     dashboard: ()              => request('GET', '/metrics/dashboard'),
     history:   (limit = 480)   => request('GET', `/metrics/history?limit=${limit}`),

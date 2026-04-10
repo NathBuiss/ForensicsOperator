@@ -129,6 +129,7 @@ def build_substitutions(cfg, pull_policy):
         "__FO_ES_STORAGE__":       f"{cfg['resources']['elasticsearch_storage_gi']}Gi",
         "__FO_MINIO_STORAGE__":    f"{cfg['resources']['minio_storage_gi']}Gi",
         "__FO_REDIS_STORAGE__":    f"{cfg['resources']['redis_storage_gi']}Gi",
+        "__FO_UPLOADS_STORAGE__":  f"{res.get('uploads_storage_gi', 500)}Gi",
         "__FO_HOSTNAME__":         cfg["access"]["hostname"],
         # API resources
         "__FO_API_MEMORY_REQUEST__":  res.get("api_memory_request", "512Mi"),

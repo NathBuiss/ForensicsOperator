@@ -33,10 +33,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["ingest"])
 
 # Temp directory for in-progress chunked uploads.
-# Must be on the shared plugins PVC (/app/plugins) so that chunks written by
-# one API replica are visible to whichever replica receives the final chunk.
-_CHUNK_DIR = Path("/app/plugins/_chunks")
-_CHUNK_DIR.mkdir(exist_ok=True)
+# Must be on a shared PVC so that chunks written by one API replica are visible
+# to whichever replica receives the final chunk.
+# In K8s: set CHUNK_DIR=/app/uploads/_chunks (uploads-pvc, 500Gi).
+# In Docker: defaults to /app/plugins/_chunks (plugins named volume).
+import os as _os
+_CHUNK_DIR = Path(_os.environ.get("CHUNK_DIR", "/app/plugins/_chunks"))
+_CHUNK_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ── Known auxiliary / empty-by-design file types ──────────────────────────────
