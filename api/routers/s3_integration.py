@@ -219,6 +219,11 @@ def _make_config_routes(redis_key: str, path_prefix: str, label: str):
 _imp_get, _imp_put, _imp_del, _imp_test = _make_config_routes(
     _S3_IMPORT_KEY, "/admin/s3-config", "import"
 )
+# Give each closure a unique __name__ so FastAPI generates distinct operation IDs.
+_imp_get.__name__  = "get_s3_import_config"
+_imp_put.__name__  = "put_s3_import_config"
+_imp_del.__name__  = "delete_s3_import_config"
+_imp_test.__name__ = "test_s3_import_config"
 
 router.get("/admin/s3-config",        response_model=S3ConfigOut)(_imp_get)
 router.put("/admin/s3-config",        response_model=S3ConfigOut)(_imp_put)
@@ -231,6 +236,10 @@ router.post("/admin/s3-config/test")(_imp_test)
 _tri_get, _tri_put, _tri_del, _tri_test = _make_config_routes(
     _S3_TRIAGE_KEY, "/admin/s3-triage-config", "triage"
 )
+_tri_get.__name__  = "get_s3_triage_config"
+_tri_put.__name__  = "put_s3_triage_config"
+_tri_del.__name__  = "delete_s3_triage_config"
+_tri_test.__name__ = "test_s3_triage_config"
 
 router.get("/admin/s3-triage-config",        response_model=S3ConfigOut)(_tri_get)
 router.put("/admin/s3-triage-config",        response_model=S3ConfigOut)(_tri_put)
