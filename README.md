@@ -727,4 +727,3 @@ Template: `elasticsearch/index_templates/fo-cases-template.json`
 
 ---
 
-*Documentation for specific features: [`docs/DETECTION_RULES.md`](docs/DETECTION_RULES.md) · [`docs/SIGMA_HQ_INTEGRATION.md`](docs/SIGMA_HQ_INTEGRATION.md) · [`docs/APPLICATION_BEHAVIOR_MODULE.md`](docs/APPLICATION_BEHAVIOR_MODULE.md) · [`docs/APPLICATION_LOGS_GUIDE.md`](docs/APPLICATION_LOGS_GUIDE.md)*

@@ -765,13 +765,13 @@ def print_summary(cfg):
 
   Useful commands:
 
-       python3 deploy.py --status          # pod health
-       python3 deploy.py --logs api        # stream API logs
-       python3 deploy.py --logs processor  # stream processor logs
-       python3 deploy.py --restart         # re-apply + restart pods (no rebuild)
-       python3 deploy.py --no-build        # re-apply config without rebuilding
-       python3 deploy.py --no-cache        # full rebuild ignoring Docker cache
-       python3 deploy.py --destroy         # remove everything
+       ./foctl status k8s                  # pod / service health
+       ./foctl logs api k8s               # stream API logs
+       ./foctl logs processor k8s         # stream processor logs
+       ./foctl deploy k8s --restart       # re-apply + restart pods (skip rebuild)
+       ./foctl deploy k8s --no-build      # re-apply manifests without rebuilding images
+       ./foctl deploy k8s --no-cache      # force full Docker rebuild (ignore cache)
+       ./foctl destroy k8s                # remove all cluster resources
 """)
 
 

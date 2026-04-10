@@ -241,15 +241,19 @@ deploy_docker() {
 }
 
 deploy_k8s() {
+  # Any extra args (--no-build, --no-cache, --restart, --setup-traefik) are
+  # forwarded verbatim to deploy.py
+  local extra_args=("$@")
   check_python3
   check_config_json
   check_kubectl
   check_cluster
   step "Deploying to Kubernetes"
-  python3 deploy.py
+  python3 deploy.py "${extra_args[@]}"
 }
 
 deploy_k8s_new() {
+  local extra_args=("$@")
   check_docker
   check_python3
   check_config_json
@@ -257,7 +261,7 @@ deploy_k8s_new() {
   create_k3d_cluster
   # Cluster is now reachable — deploy.py will detect it and proceed normally
   step "Deploying TraceX to the k3d cluster"
-  python3 deploy.py
+  python3 deploy.py "${extra_args[@]}"
 }
 
 # ── Status ────────────────────────────────────────────────────────────────────
@@ -528,23 +532,27 @@ _menu() {
 
 _usage() {
   echo
-  echo "  TraceX deployment script"
+  echo "  TraceX — deployment CLI"
   echo
   echo "  Usage:  ./foctl <command> [args]"
   echo
-  echo "  Commands:"
-  echo "    (no args)                   Interactive menu"
-  echo "    deploy docker               Docker Compose deployment"
-  echo "    deploy k8s                  Deploy to existing Kubernetes cluster"
-  echo "    deploy k8s-new              Create k3d cluster + deploy"
+  echo "  DEPLOY"
+  echo "    deploy docker               Docker Compose — builds images, starts all services"
+  echo "    deploy k8s   [flags]        Deploy to the current kubectl context"
+  echo "    deploy k8s-new [flags]      Create a local k3d cluster then deploy"
   echo
-  echo "    status  [docker|k8s]        Service health check"
-  echo "    logs    <svc> [docker|k8s]  Stream logs (api|processor|frontend|all)"
+  echo "  Kubernetes deploy flags (passed directly to deploy.py):"
+  echo "    --no-build                  Skip Docker image rebuild (re-apply manifests only)"
+  echo "    --no-cache                  Force full Docker rebuild (ignore layer cache)"
+  echo "    --restart                   Re-apply manifests + restart pods, skip build + load"
+  echo "    --setup-traefik             Also apply kube-system Traefik config (first deploy only)"
+  echo
+  echo "  OPERATIONS  (mode auto-detected if omitted)"
+  echo "    status  [docker|k8s]        Service / pod health overview"
+  echo "    logs    <svc> [mode]        Stream logs — api | worker-ingest | worker-modules | all"
   echo "    update  [docker|k8s]        Rebuild images + redeploy"
-  echo "    destroy [docker|k8s]        Remove everything (confirms first)"
-  echo "    config                      Show current configuration"
-  echo
-  echo "  If [docker|k8s] is omitted the active deployment is auto-detected."
+  echo "    destroy [docker|k8s]        Remove all services and data (confirms first)"
+  echo "    config                      Show parsed config.json + redacted .env"
   echo
 }
 
@@ -561,8 +569,8 @@ main() {
       local mode="${1:-}"; shift 2>/dev/null || true
       case "${mode}" in
         docker)  deploy_docker    ;;
-        k8s)     deploy_k8s       ;;
-        k8s-new) deploy_k8s_new   ;;
+        k8s)     deploy_k8s    "$@" ;;
+        k8s-new) deploy_k8s_new "$@" ;;
         "")      die "Usage: ./foctl deploy <docker|k8s|k8s-new>" ;;
         *)       die "Unknown deploy mode '${mode}'.\n  Choose one of: docker, k8s, k8s-new" ;;
       esac
