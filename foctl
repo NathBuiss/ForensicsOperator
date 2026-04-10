@@ -1,0 +1,580 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# foctl — TraceX unified deployment script
+#
+# THREE DEPLOYMENT MODES:
+#
+#   docker      Docker Compose on this machine — no Kubernetes needed.
+#               Single port (80) via nginx reverse proxy.
+#               Best for: laptop, single-server, quick evaluation, air-gapped.
+#
+#   k8s         Deploy to a Kubernetes cluster that already exists and is
+#               reachable via kubectl.
+#               Best for: staging / production clusters (GKE, EKS, AKS,
+#               k3s bare-metal, Rancher, OpenShift …).
+#
+#   k8s-new     Create a local k3d cluster (runs inside Docker), then deploy.
+#               Best for: development machines, CI pipelines, offline labs.
+#               Requires Docker — k3d runs K8s nodes as Docker containers.
+#
+# USAGE:
+#   ./foctl                          Interactive menu
+#   ./foctl deploy docker            Docker Compose deployment
+#   ./foctl deploy k8s               Deploy to the current kubectl context
+#   ./foctl deploy k8s-new           Create k3d cluster then deploy
+#
+#   ./foctl status  [docker|k8s]     Health check all services
+#   ./foctl logs    <svc> [mode]     Stream logs: api | processor | frontend | all
+#   ./foctl update  [docker|k8s]     Rebuild images + redeploy
+#   ./foctl destroy [docker|k8s]     Tear everything down (confirms first)
+#   ./foctl config                   Show parsed configuration
+#
+# CONFIGURATION:
+#   Kubernetes → config.json   (registry, hostname, resources, secrets)
+#   Docker     → .env          (created from .env.example on first run)
+#
+# All Kubernetes deployment logic lives in deploy.py — this script wraps it.
+# ==============================================================================
+set -euo pipefail
+IFS=$'\n\t'
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
+
+# ── Terminal colours ──────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+  RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+  CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
+else
+  RED=''; GREEN=''; YELLOW=''; CYAN=''; BOLD=''; RESET=''
+fi
+
+step() { echo -e "\n${CYAN}→${RESET} ${BOLD}${*}${RESET}"; }
+ok()   { echo -e "  ${GREEN}✓${RESET}  ${*}"; }
+warn() { echo -e "  ${YELLOW}⚠${RESET}   ${*}"; }
+info() { echo -e "     ${*}"; }
+die()  { echo -e "\n  ${RED}✗  ERROR:${RESET} ${*}\n" >&2; exit 1; }
+ask()  { echo -e "\n  ${BOLD}${*}${RESET}"; }
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.prod.yml"
+ENV_FILE="${SCRIPT_DIR}/.env"
+
+# ── Utility ───────────────────────────────────────────────────────────────────
+has() { command -v "$1" &>/dev/null; }
+
+# Resolve docker compose command (v2 plugin preferred over v1 standalone)
+_dc_cmd() {
+  if docker compose version &>/dev/null 2>&1; then
+    echo "docker compose"
+  elif has docker-compose; then
+    echo "docker-compose"
+  else
+    die "Neither 'docker compose' (v2) nor 'docker-compose' (v1) found.\nInstall Docker Desktop or the Docker Compose plugin."
+  fi
+}
+
+# Read a dotted key from config.json (requires python3)
+cfg() {
+  python3 - "$1" 2>/dev/null <<'PYEOF'
+import json, sys
+def get(d, path):
+    for k in path.split('.'):
+        d = d.get(k) if isinstance(d, dict) else None
+    return '' if d is None else str(d)
+try:
+    raw = json.load(open('config.json'))
+    def clean(x):
+        if isinstance(x, dict): return {k: clean(v) for k,v in x.items() if not k.startswith('_')}
+        return x
+    print(get(clean(raw), sys.argv[1]))
+except Exception:
+    print('')
+PYEOF
+}
+
+# Kubernetes namespace (read once, falls back to safe default)
+K8S_NS="$(cfg namespace 2>/dev/null || echo '')"
+K8S_NS="${K8S_NS:-tracex-dev}"
+
+# ── Pre-flight checks ─────────────────────────────────────────────────────────
+
+check_docker() {
+  step "Checking Docker"
+  has docker || die "Docker not found.\n  Install from: https://docs.docker.com/get-docker/"
+  docker info &>/dev/null 2>&1 || die \
+"Docker daemon is not running.
+  macOS  : open Docker Desktop
+  Linux  : sudo systemctl start docker"
+  ok "Docker $(docker --version | awk '{print $3}' | tr -d ',')"
+  local dc; dc="$(_dc_cmd)"
+  ok "${dc} found"
+}
+
+check_kubectl() {
+  step "Checking kubectl"
+  has kubectl || die "kubectl not found.\n  Install: https://kubernetes.io/docs/tasks/tools/"
+  ok "kubectl found ($(kubectl version --client 2>/dev/null | grep -i 'client' | head -1 | grep -oE 'v[0-9.]+' | head -1))"
+}
+
+check_cluster() {
+  step "Checking cluster connectivity"
+  kubectl cluster-info &>/dev/null 2>&1 || die \
+"kubectl cannot reach any cluster.
+
+  Fix options:
+    1. Start your cluster  (k3s, minikube, Docker Desktop Kubernetes …)
+    2. Switch context:     kubectl config use-context <name>
+    3. For k3s:            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+    4. No cluster yet?     ./foctl deploy k8s-new  (creates one with k3d)"
+  ok "Connected — context: $(kubectl config current-context)"
+}
+
+check_python3() {
+  step "Checking python3"
+  has python3 || die "python3 not found. It is required for deploy.py."
+  ok "python3 $(python3 --version 2>&1 | awk '{print $2}')"
+}
+
+check_config_json() {
+  [[ -f config.json ]] || die "config.json not found.\n  Run this script from the tracex directory."
+  ok "config.json found"
+  local jwt; jwt="$(cfg secrets.jwt_secret)"
+  if [[ "${jwt}" == "CHANGE_ME_IN_PRODUCTION" || -z "${jwt}" ]]; then
+    warn "jwt_secret in config.json is still the default placeholder."
+    warn "Generate one:  python3 -c \"import secrets; print(secrets.token_hex(32))\""
+  fi
+}
+
+ensure_env_file() {
+  if [[ -f "${ENV_FILE}" ]]; then
+    ok ".env found"
+  elif [[ -f "${SCRIPT_DIR}/.env.example" ]]; then
+    cp "${SCRIPT_DIR}/.env.example" "${ENV_FILE}"
+    echo
+    warn ".env was not found — created from .env.example"
+    warn "Review the settings below and update secrets before production use."
+    echo
+    grep -v '^#' "${ENV_FILE}" | grep -v '^$' | sed 's/^/     /'
+    echo
+    ask "Press Enter to continue with defaults, or Ctrl-C to edit .env first..."
+    read -r
+  else
+    die ".env not found and .env.example is missing.\n  Create .env manually (see README)."
+  fi
+  local jwt; jwt="$(grep '^JWT_SECRET=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '"'"'"' ')"
+  if [[ "${jwt}" == "CHANGE_ME_IN_PRODUCTION" || -z "${jwt}" ]]; then
+    warn "JWT_SECRET in .env is not set — update it before exposing to the network."
+    warn "Generate:  python3 -c \"import secrets; print(secrets.token_hex(32))\""
+  fi
+}
+
+# ── k3d cluster provisioning (k8s-new only) ───────────────────────────────────
+
+ensure_k3d() {
+  step "Checking k3d"
+  if has k3d; then
+    ok "k3d $(k3d version 2>/dev/null | grep 'k3d version' | awk '{print $3}')"
+    return
+  fi
+  warn "k3d not found — installing..."
+  if has brew; then
+    brew install k3d
+  else
+    curl -sf https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+  fi
+  has k3d || die "k3d install failed.\n  Install manually: https://k3d.io/#installation"
+  ok "k3d installed"
+}
+
+create_k3d_cluster() {
+  local name port
+  name="$(cfg cluster.name)"; name="${name:-tracex}"
+  port="$(cfg access.http_port)"; port="${port:-80}"
+
+  step "Provisioning k3d cluster '${name}'"
+
+  if k3d cluster list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "${name}"; then
+    ok "Cluster '${name}' already exists — reusing"
+  else
+    k3d cluster create "${name}" \
+      --port "${port}:${port}@loadbalancer" \
+      --port "443:443@loadbalancer" \
+      --agents 0
+    ok "Cluster '${name}' created"
+  fi
+
+  k3d kubeconfig merge "${name}" --kubeconfig-merge-default &>/dev/null
+  kubectl config use-context "k3d-${name}"
+  ok "kubectl context set → k3d-${name}"
+}
+
+# ── Deploy ────────────────────────────────────────────────────────────────────
+
+deploy_docker() {
+  check_docker
+  ensure_env_file
+
+  [[ -f "${COMPOSE_FILE}" ]] || die "docker-compose.prod.yml not found in ${SCRIPT_DIR}"
+  [[ -d nginx ]] && [[ -f nginx/nginx.prod.conf ]] || \
+    die "nginx/nginx.prod.conf not found. The nginx/ directory must exist alongside this script."
+
+  step "Building and starting all services (first build may take several minutes)"
+  local dc; dc="$(_dc_cmd)"
+  ${dc} -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d --build
+
+  step "Waiting for API to be healthy (up to 120 s)"
+  local i=0
+  while (( i < 24 )); do
+    if curl -sf http://localhost/api/v1/health &>/dev/null 2>&1; then
+      ok "API is healthy"
+      break
+    fi
+    printf "\r     Waiting %s   " "$(python3 -c "print('.' * ($i % 4 + 1))" 2>/dev/null || echo '...')"
+    sleep 5
+    (( i++ ))
+  done
+  echo
+  (( i < 24 )) || warn "API did not respond in 120 s. Check: ./foctl logs api docker"
+
+  _summary_docker
+}
+
+deploy_k8s() {
+  check_python3
+  check_config_json
+  check_kubectl
+  check_cluster
+  step "Deploying to Kubernetes"
+  python3 deploy.py
+}
+
+deploy_k8s_new() {
+  check_docker
+  check_python3
+  check_config_json
+  ensure_k3d
+  create_k3d_cluster
+  # Cluster is now reachable — deploy.py will detect it and proceed normally
+  step "Deploying TraceX to the k3d cluster"
+  python3 deploy.py
+}
+
+# ── Status ────────────────────────────────────────────────────────────────────
+
+cmd_status() {
+  local mode="${1:-}"; [[ -z "${mode}" ]] && mode="$(_detect_mode)"
+
+  case "${mode}" in
+    docker)
+      step "Docker Compose — service health"
+      local dc; dc="$(_dc_cmd)"
+      ${dc} -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" ps 2>/dev/null \
+        || warn "No services appear to be running."
+      ;;
+    k8s)
+      step "Kubernetes — pods (namespace: ${K8S_NS})"
+      kubectl get pods    -n "${K8S_NS}" -o wide 2>/dev/null || true
+      echo
+      step "Kubernetes — services"
+      kubectl get svc     -n "${K8S_NS}"          2>/dev/null || true
+      echo
+      step "Kubernetes — ingress + HPA"
+      kubectl get ingress -n "${K8S_NS}"          2>/dev/null || true
+      kubectl get hpa     -n "${K8S_NS}"          2>/dev/null || true
+      ;;
+    *)
+      die "No active deployment detected.\n  Pass 'docker' or 'k8s' explicitly: ./foctl status docker"
+      ;;
+  esac
+}
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+
+cmd_logs() {
+  local svc="${1:-api}"
+  local mode="${2:-}"; [[ -z "${mode}" ]] && mode="$(_detect_mode)"
+
+  case "${mode}" in
+    docker)
+      local dc; dc="$(_dc_cmd)"
+      if [[ "${svc}" == "all" ]]; then
+        ${dc} -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" logs -f --tail=100
+      else
+        ${dc} -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" logs -f --tail=100 "${svc}"
+      fi
+      ;;
+    k8s)
+      if [[ "${svc}" == "all" ]]; then
+        kubectl logs -n "${K8S_NS}" -l app=api       -f --tail=50 &
+        kubectl logs -n "${K8S_NS}" -l app=processor -f --tail=50 &
+        wait
+      else
+        python3 deploy.py --logs "${svc}"
+      fi
+      ;;
+    *)
+      die "No active deployment detected.\n  Pass mode explicitly: ./foctl logs api docker"
+      ;;
+  esac
+}
+
+# ── Update (rebuild + redeploy) ───────────────────────────────────────────────
+
+cmd_update() {
+  local mode="${1:-}"; [[ -z "${mode}" ]] && mode="$(_detect_mode)"
+
+  case "${mode}" in
+    docker)
+      check_docker
+      ensure_env_file
+      step "Rebuilding and redeploying (Docker Compose)"
+      local dc; dc="$(_dc_cmd)"
+      ${dc} -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d --build
+      ok "Update complete."
+      ;;
+    k8s)
+      step "Redeploying to Kubernetes"
+      python3 deploy.py
+      ;;
+    *)
+      die "No active deployment detected.\n  Pass mode explicitly: ./foctl update docker"
+      ;;
+  esac
+}
+
+# ── Destroy ───────────────────────────────────────────────────────────────────
+
+cmd_destroy() {
+  local mode="${1:-}"; [[ -z "${mode}" ]] && mode="$(_detect_mode)"
+
+  case "${mode}" in
+    docker)
+      echo
+      echo -e "  ${RED}${BOLD}WARNING:${RESET} This stops all containers and DELETES all volumes."
+      echo "  All case data, uploaded files, and indices will be permanently lost."
+      echo
+      ask "  Type 'yes' to confirm:"
+      local ans; read -r ans
+      [[ "${ans}" == "yes" ]] || { echo "  Aborted."; return; }
+      local dc; dc="$(_dc_cmd)"
+      ${dc} -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" down -v
+      ok "All containers and volumes removed."
+      ;;
+    k8s)
+      # deploy.py handles its own confirmation prompt
+      python3 deploy.py --destroy
+      ;;
+    *)
+      die "No active deployment detected.\n  Pass mode explicitly: ./foctl destroy docker"
+      ;;
+  esac
+}
+
+# ── Config ────────────────────────────────────────────────────────────────────
+
+cmd_config() {
+  step "Configuration"
+  has python3 || die "python3 required"
+
+  if [[ -f config.json ]]; then
+    python3 - <<'PYEOF'
+import json
+
+def clean(d):
+    if isinstance(d, dict): return {k: clean(v) for k,v in d.items() if not k.startswith('_')}
+    return d
+
+cfg = clean(json.load(open('config.json')))
+sec = cfg.get('secrets', {})
+res = cfg.get('resources', {})
+acc = cfg.get('access', {})
+img = cfg.get('images', {})
+
+print()
+print('  ── Kubernetes deployment ─────────────────────────────────────')
+print('  namespace   :', cfg.get('namespace', '(not set)'))
+print('  hostname    :', acc.get('hostname', '(not set)'))
+print('  context     :', cfg.get('cluster', {}).get('context') or '(current kubectl context)')
+print('  registry    :', img.get('registry') or '(none — direct load into cluster)')
+print('  image tag   :', img.get('tag', 'latest'))
+print()
+print('  ── Resources ─────────────────────────────────────────────────')
+print(f"  API         : CPU {res.get('api_cpu_request','?')}–{res.get('api_cpu_limit','?')}  "
+      f"RAM {res.get('api_memory_request','?')}–{res.get('api_memory_limit','?')}")
+print(f"  Processor   : CPU {res.get('processor_cpu_request','?')}–{res.get('processor_cpu_limit','?')}  "
+      f"RAM {res.get('processor_memory_request','?')}–{res.get('processor_memory_limit','?')}")
+print(f"  ES heap     : {res.get('elasticsearch_heap_mb','?')} MB   "
+      f"storage: {res.get('elasticsearch_storage_gi','?')} Gi")
+print(f"  MinIO       : {res.get('minio_storage_gi','?')} Gi")
+print()
+print('  ── Secrets ───────────────────────────────────────────────────')
+jwt = sec.get('jwt_secret', '')
+if not jwt or jwt == 'CHANGE_ME_IN_PRODUCTION':
+    print('  jwt_secret  : ⚠  CHANGE_ME_IN_PRODUCTION  ← update config.json')
+else:
+    print('  jwt_secret  : ● (set)')
+print('  admin user  :', sec.get('admin_username', 'admin'))
+ap = sec.get('admin_password', '')
+if not ap or ap == 'TracexAdmin1!':
+    print('  admin pass  : ⚠  default  ← change after first login')
+else:
+    print('  admin pass  : ● (changed)')
+print()
+PYEOF
+  else
+    warn "config.json not found — Kubernetes deployment not configured"
+  fi
+
+  if [[ -f "${ENV_FILE}" ]]; then
+    step "Docker .env (secrets redacted)"
+    grep -v '^#' "${ENV_FILE}" | grep -v '^$' \
+      | sed 's/\(SECRET\|PASSWORD\|KEY\)=.*/\1=●●●●●●●●/' \
+      | sed 's/^/     /' || true
+  else
+    warn ".env not found — Docker deployment not configured"
+    info "Run './foctl deploy docker' to create it from .env.example"
+  fi
+  echo
+}
+
+# ── Mode auto-detection ───────────────────────────────────────────────────────
+
+_detect_mode() {
+  # Check Docker: does our compose project have running containers?
+  if has docker && docker info &>/dev/null 2>&1 \
+     && [[ -f "${COMPOSE_FILE}" ]] && [[ -f "${ENV_FILE}" ]]; then
+    local dc n; dc="$(_dc_cmd)"
+    n="$( ${dc} -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" ps -q 2>/dev/null \
+          | grep -c . 2>/dev/null || echo 0 )"
+    (( n > 0 )) && { echo "docker"; return; }
+  fi
+  # Check K8s: does our namespace exist?
+  if has kubectl && kubectl get namespace "${K8S_NS}" &>/dev/null 2>&1; then
+    echo "k8s"; return
+  fi
+  echo ""
+}
+
+# ── Deployment summary ────────────────────────────────────────────────────────
+
+_summary_docker() {
+  echo
+  echo "┌────────────────────────────────────────────────────────────────────┐"
+  echo "│  TraceX — running via Docker Compose                    │"
+  echo "└────────────────────────────────────────────────────────────────────┘"
+  echo
+  echo "  Web UI:      http://localhost/"
+  echo "  API docs:    http://localhost/api/v1/docs"
+  echo "  Kibana:      http://localhost:5601/"
+  echo "  MinIO UI:    http://localhost:9001/"
+  echo
+  echo "  Default credentials:  admin / TracexAdmin1!"
+  echo "  ⚠  Change the admin password on first login."
+  echo
+  echo "  Commands:"
+  echo "    ./foctl status                  — service health"
+  echo "    ./foctl logs api                — API logs"
+  echo "    ./foctl logs worker-ingest      — ingest worker logs"
+  echo "    ./foctl logs worker-modules     — module worker logs"
+  echo "    ./foctl logs all                — all logs"
+  echo "    ./foctl update                  — rebuild + restart"
+  echo "    ./foctl destroy                 — remove containers and all data"
+  echo
+}
+
+# ── Interactive menu ──────────────────────────────────────────────────────────
+
+_menu() {
+  echo
+  echo -e "${BOLD}╔══════════════════════════════════════════════════════════════╗${RESET}"
+  echo -e "${BOLD}║         TraceX — Deployment                       ║${RESET}"
+  echo -e "${BOLD}╚══════════════════════════════════════════════════════════════╝${RESET}"
+  echo
+  echo "  Choose a deployment mode:"
+  echo
+  echo -e "  ${BOLD}[1]${RESET} Docker Compose"
+  echo "      All services run in containers on this machine."
+  echo "      Single port (80) • no Kubernetes required"
+  echo "      Best for: laptop, single-server, quick evaluation"
+  echo
+  echo -e "  ${BOLD}[2]${RESET} Kubernetes — existing cluster"
+  echo "      Deploy to whichever cluster kubectl is currently pointing at."
+  echo "      Best for: staging / production (GKE, EKS, AKS, k3s …)"
+  echo
+  echo -e "  ${BOLD}[3]${RESET} Kubernetes — new local cluster (k3d)"
+  echo "      Creates a k3d cluster inside Docker, then deploys automatically."
+  echo "      Best for: development, CI pipelines, offline labs"
+  echo "      Requires: Docker"
+  echo
+  echo -e "  ${BOLD}[s]${RESET}  Status    — check what is currently running"
+  echo -e "  ${BOLD}[c]${RESET}  Config    — show current configuration"
+  echo -e "  ${BOLD}[q]${RESET}  Quit"
+  echo
+  ask "  Choice [1/2/3/s/c/q]:"
+  local choice; read -r choice
+  case "${choice}" in
+    1)     deploy_docker  ;;
+    2)     deploy_k8s     ;;
+    3)     deploy_k8s_new ;;
+    s|S)   cmd_status     ;;
+    c|C)   cmd_config     ;;
+    q|Q)   echo "  Exiting."; exit 0 ;;
+    *)     die "Invalid choice: '${choice}'" ;;
+  esac
+}
+
+# ── Usage ─────────────────────────────────────────────────────────────────────
+
+_usage() {
+  echo
+  echo "  TraceX deployment script"
+  echo
+  echo "  Usage:  ./foctl <command> [args]"
+  echo
+  echo "  Commands:"
+  echo "    (no args)                   Interactive menu"
+  echo "    deploy docker               Docker Compose deployment"
+  echo "    deploy k8s                  Deploy to existing Kubernetes cluster"
+  echo "    deploy k8s-new              Create k3d cluster + deploy"
+  echo
+  echo "    status  [docker|k8s]        Service health check"
+  echo "    logs    <svc> [docker|k8s]  Stream logs (api|processor|frontend|all)"
+  echo "    update  [docker|k8s]        Rebuild images + redeploy"
+  echo "    destroy [docker|k8s]        Remove everything (confirms first)"
+  echo "    config                      Show current configuration"
+  echo
+  echo "  If [docker|k8s] is omitted the active deployment is auto-detected."
+  echo
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+main() {
+  local cmd="${1:-}"; shift 2>/dev/null || true
+
+  case "${cmd}" in
+    "")
+      _menu
+      ;;
+    deploy)
+      local mode="${1:-}"; shift 2>/dev/null || true
+      case "${mode}" in
+        docker)  deploy_docker    ;;
+        k8s)     deploy_k8s       ;;
+        k8s-new) deploy_k8s_new   ;;
+        "")      die "Usage: ./foctl deploy <docker|k8s|k8s-new>" ;;
+        *)       die "Unknown deploy mode '${mode}'.\n  Choose one of: docker, k8s, k8s-new" ;;
+      esac
+      ;;
+    status)   cmd_status  "${@:-}" ;;
+    logs)     cmd_logs    "${@:-}" ;;
+    update)   cmd_update  "${@:-}" ;;
+    destroy)  cmd_destroy "${@:-}" ;;
+    config)   cmd_config           ;;
+    help|-h|--help) _usage         ;;
+    *)        die "Unknown command '${cmd}'.\n  Run ./foctl --help for usage." ;;
+  esac
+}
+
+main "$@"
