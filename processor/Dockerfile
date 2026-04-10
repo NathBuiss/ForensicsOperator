@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libimage-exiftool-perl \
     libtsk-dev \
     libewf-dev \
+    testdisk \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Hayabusa DFIR binary + rules (Sigma-based EVTX threat hunting) ───────────

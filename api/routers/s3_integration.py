@@ -14,6 +14,7 @@ All file transfers stream directly: external S3 → internal MinIO, no full RAM 
 """
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import uuid
@@ -197,7 +198,7 @@ def _make_config_routes(redis_key: str, path_prefix: str, label: str):
             raise HTTPException(status_code=400, detail=f"No {label} S3 config saved yet.")
         try:
             client = _build_client(cfg)
-            objects = list(client.list_objects(cfg["bucket"], max_keys=5))
+            objects = list(itertools.islice(client.list_objects(cfg["bucket"]), 5))
             return {
                 "ok": True,
                 "bucket": cfg["bucket"],
