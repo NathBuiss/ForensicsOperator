@@ -18,8 +18,8 @@ def _check_es() -> bool:
 
 def _check_redis() -> bool:
     try:
-        import redis
-        r = redis.Redis.from_url(settings.REDIS_URL, socket_timeout=3)
+        from config import get_redis_with_timeout
+        r = get_redis_with_timeout()
         return r.ping()
     except Exception:
         return False

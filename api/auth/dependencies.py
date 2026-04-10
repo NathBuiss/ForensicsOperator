@@ -50,11 +50,10 @@ async def get_current_user(
         # Defensive: backfill role for pre-RBAC accounts still in Redis.
         # The startup migration normally handles this; this guard covers edge cases.
         if not user.get("role"):
-            import redis as _redis_lib
-            from config import settings as _settings
             from auth.service import _USER_KEY, user_count
             try:
-                r = _redis_lib.Redis.from_url(_settings.REDIS_URL, decode_responses=True)
+                from config import get_redis as _get_redis
+                r = _get_redis()
                 r.hset(_USER_KEY.format(username=username), "role", "admin")
                 user["role"] = "admin"
             except Exception:

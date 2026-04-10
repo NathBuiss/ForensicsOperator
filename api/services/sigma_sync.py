@@ -6,8 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Optional
 
-import redis as redis_lib
-from config import settings
+from config import settings, get_redis
 
 try:
     from sigma.collection import SigmaCollection
@@ -25,7 +24,7 @@ class SigmaSyncService:
     """Service for syncing Sigma HQ rules."""
     
     def __init__(self):
-        self.redis = redis_lib.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+        self.redis = get_redis()
         self.backend = LuceneBackend() if _SIGMA_AVAILABLE else None
         self.rules_key = "fo:alert_rules:_global:sigma"
         self.last_sync_key = "fo:alert_rules:_global:sigma:last_sync"

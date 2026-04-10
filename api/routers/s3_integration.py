@@ -14,12 +14,12 @@ import logging
 import uuid
 from typing import Optional
 
-import redis as redis_lib
+import redis
 from fastapi import APIRouter, HTTPException, Query
 from minio import Minio
 from pydantic import BaseModel
 
-from config import settings
+from config import settings, get_redis as _redis
 from services import storage, jobs as job_svc
 from services.cases import get_case
 
@@ -34,11 +34,7 @@ _PUBLIC_FIELDS = ("endpoint", "access_key", "bucket", "region", "vendor", "use_s
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _redis() -> redis_lib.Redis:
-    return redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
-
-
-def _get_config(r: redis_lib.Redis) -> dict:
+def _get_config(r: redis.Redis) -> dict:
     """Load the external S3 config from Redis."""
     raw = r.get(_S3_CONFIG_KEY)
     return json.loads(raw) if raw else {}

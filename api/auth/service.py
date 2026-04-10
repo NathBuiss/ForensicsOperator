@@ -5,11 +5,10 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-import redis as redis_lib
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
-from config import settings
+from config import settings, get_redis as _redis
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +16,6 @@ _pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 _USERS_SET  = "fo:users"
 _USER_KEY   = "fo:user:{username}"
-
-
-def _redis() -> redis_lib.Redis:
-    return redis_lib.Redis.from_url(settings.REDIS_URL, decode_responses=True)
 
 
 # ── Password helpers ──────────────────────────────────────────────────────────

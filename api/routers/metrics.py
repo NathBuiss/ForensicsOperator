@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter
 
-from config import settings
+from config import settings, get_redis_with_timeout as _get_redis
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
@@ -187,9 +187,7 @@ def _get_redis_metrics() -> dict:
         "uptime_seconds": 0,
     }
     try:
-        import redis as _redis
-
-        r    = _redis.Redis.from_url(settings.REDIS_URL, socket_timeout=3, socket_connect_timeout=3)
+        r    = _get_redis()
         info = r.info()
         result["used_memory_mb"]    = round(info.get("used_memory", 0) / (1024 * 1024), 2)
         result["connected_clients"] = info.get("connected_clients", 0)
@@ -266,9 +264,7 @@ def _get_celery_metrics() -> dict:
 
     # Queue depths via Redis LLEN (fast)
     try:
-        import redis as _redis
-
-        r = _redis.Redis.from_url(settings.REDIS_URL, socket_timeout=3, socket_connect_timeout=3)
+        r = _get_redis()
         for q in ("ingest", "modules", "default"):
             try:
                 result["queue_lengths"][q] = r.llen(q) or 0
@@ -288,9 +284,7 @@ def _get_cases_metrics() -> dict:
         "failed_jobs": 0,
     }
     try:
-        import redis as _redis
-
-        r = _redis.Redis.from_url(settings.REDIS_URL, socket_timeout=3, socket_connect_timeout=3)
+        r = _get_redis()
         result["total_cases"] = r.scard("cases:all") or 0
 
         total_jobs = active_jobs = failed_jobs = 0
@@ -475,8 +469,7 @@ def _slim_snapshot() -> dict:
 def store_metrics_snapshot() -> None:
     """Write one slim snapshot to the Redis circular buffer. Called by the background task."""
     try:
-        import redis as _redis
-        r    = _redis.Redis.from_url(settings.REDIS_URL, socket_timeout=3, socket_connect_timeout=3)
+        r    = _get_redis()
         snap = _slim_snapshot()
         r.rpush(_HISTORY_KEY, json.dumps(snap))
         r.ltrim(_HISTORY_KEY, -_HISTORY_MAX, -1)   # keep only the last _HISTORY_MAX entries
@@ -492,8 +485,7 @@ def metrics_history(limit: int = 480):
     """
     limit = max(1, min(limit, _HISTORY_MAX))
     try:
-        import redis as _redis
-        r   = _redis.Redis.from_url(settings.REDIS_URL, socket_timeout=3, socket_connect_timeout=3)
+        r   = _get_redis()
         raw = r.lrange(_HISTORY_KEY, -limit, -1)
         snapshots = []
         for item in raw:

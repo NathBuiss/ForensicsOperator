@@ -7,16 +7,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-import redis as redis_lib
-
-from config import settings
+from config import settings, get_redis
 
 logger = logging.getLogger(__name__)
 CASE_TTL = 0  # Cases don't expire by default
-
-
-def get_redis() -> redis_lib.Redis:
-    return redis_lib.Redis.from_url(settings.REDIS_URL, decode_responses=True)
 
 
 def create_case(name: str, description: str = "", analyst: str = "") -> dict:

@@ -57,8 +57,9 @@ export const api = {
   ingest: {
     upload:   (caseId, formData) => request('POST', `/cases/${caseId}/ingest`, formData),
     listJobs: (caseId)           => request('GET',  `/cases/${caseId}/jobs`),
-    getJob:   (jobId)            => request('GET',  `/jobs/${jobId}`),
-    retryJob: (jobId)            => request('POST', `/jobs/${jobId}/retry`),
+    getJob:    (jobId)            => request('GET',  `/jobs/${jobId}`),
+    batchJobs: (jobIds)          => request('POST', '/jobs/batch', { job_ids: jobIds }),
+    retryJob:  (jobId)           => request('POST', `/jobs/${jobId}/retry`),
   },
 
   search: {

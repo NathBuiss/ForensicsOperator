@@ -3,18 +3,13 @@ import json, uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-import redis as redis_lib
-from config import settings
+from config import settings, get_redis as _r
 from services.elasticsearch import _request as es_req
 
 router = APIRouter(tags=["alert-rules"])
 
 _RUN_KEY = "fo:alert_run:{case_id}"
 _RUN_TTL = 7 * 86400   # keep last run for 7 days
-
-
-def _r():
-    return redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
 
 
 def _load_run(r: redis_lib.Redis, case_id: str) -> dict:

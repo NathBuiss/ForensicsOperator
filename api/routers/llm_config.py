@@ -21,12 +21,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-import redis as redis_lib
+import redis
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from auth.dependencies import require_admin
-from config import settings
+from config import settings, get_redis as _redis
 from services import module_runs as run_svc
 
 logger = logging.getLogger(__name__)
@@ -42,11 +42,7 @@ _LLM_CONFIG_KEY = "fo:llm_config"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _redis() -> redis_lib.Redis:
-    return redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
-
-
-def _get_config(r: redis_lib.Redis) -> dict:
+def _get_config(r: redis.Redis) -> dict:
     raw = r.get(_LLM_CONFIG_KEY)
     return json.loads(raw) if raw else {}
 

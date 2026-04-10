@@ -76,41 +76,16 @@ function useElapsed(isoTimestamp) {
   return elapsed
 }
 
-function JobCard({ jobId, onStatusChange }) {
-  const [job, setJob] = useState(null)
+function JobCard({ jobId, jobData, onRetry }) {
   const [retrying, setRetrying] = useState(false)
-  const intervalRef = useRef(null)
-  const elapsed = useElapsed(job?.created_at)
-
-  function startPolling() {
-    const poll = () => {
-      api.ingest.getJob(jobId).then(j => {
-        setJob(j)
-        onStatusChange?.(jobId, j?.status)
-      }).catch(() => {})
-    }
-    poll()
-    intervalRef.current = setInterval(poll, 3000)
-  }
-
-  useEffect(() => {
-    startPolling()
-    return () => clearInterval(intervalRef.current)
-  }, [jobId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (job?.status === 'COMPLETED' || job?.status === 'FAILED' || job?.status === 'SKIPPED') {
-      clearInterval(intervalRef.current)
-    }
-  }, [job?.status])
+  const elapsed = useElapsed(jobData?.created_at)
+  const job = jobData
 
   async function retryJob() {
     setRetrying(true)
     try {
       await api.ingest.retryJob(jobId)
-      // Restart polling after retry
-      clearInterval(intervalRef.current)
-      startPolling()
+      onRetry?.(jobId)
     } catch (err) {
       alert('Retry failed: ' + err.message)
     } finally {
@@ -118,7 +93,7 @@ function JobCard({ jobId, onStatusChange }) {
     }
   }
 
-  if (!job) return <div className="text-gray-400 text-xs p-2">Loading job {jobId}...</div>
+  if (!job) return <div className="text-gray-400 text-xs p-2">Loading…</div>
 
   const statusColors = {
     UPLOADING: 'text-sky-500',
@@ -205,25 +180,72 @@ function JobCard({ jobId, onStatusChange }) {
   )
 }
 
+const TERMINAL = new Set(['COMPLETED', 'FAILED', 'SKIPPED'])
+
 export default function Ingest({ caseId, onComplete }) {
   const [dragging, setDragging]         = useState(false)
   const [uploading, setUploading]       = useState(false)
   const [uploadPct, setUploadPct]       = useState(0)
   const [jobs, setJobs]                 = useState([])       // ordered list of job IDs
-  const [jobStatuses, setJobStatuses]   = useState({})       // jobId → status
+  const [jobStatuses, setJobStatuses]   = useState({})       // jobId → status string
+  const [jobDataMap, setJobDataMap]     = useState({})       // jobId → full job object
   const [error, setError]               = useState('')
-  const inputRef  = useRef()
-  const folderRef = useRef()
+  const inputRef   = useRef()
+  const folderRef  = useRef()
+  const jobsRef    = useRef([])          // mirror of jobs — readable inside setInterval
+  const statusesRef = useRef({})         // mirror of jobStatuses — readable inside setInterval
   const { startUpload, updateUpload, finishUpload } = useUpload()
+
+  // Keep refs in sync with state so the central poller can read current values
+  useEffect(() => { jobsRef.current = jobs }, [jobs])
+  useEffect(() => { statusesRef.current = jobStatuses }, [jobStatuses])
+
+  // ── Central batch poller ──────────────────────────────────────────────────
+  // One request per tick for ALL active jobs, replacing per-JobCard polling.
+  // Fires every 3 s; only includes non-terminal jobs so the interval naturally
+  // becomes a no-op once everything is done.
+  useEffect(() => {
+    async function doPoll() {
+      const activeIds = jobsRef.current.filter(id => !TERMINAL.has(statusesRef.current[id]))
+      if (!activeIds.length) return
+
+      // Batch in groups of 100 to keep request payloads small
+      for (let i = 0; i < activeIds.length; i += 100) {
+        const slice = activeIds.slice(i, i + 100)
+        try {
+          const results = await api.ingest.batchJobs(slice)
+          if (!results?.length) continue
+          setJobDataMap(prev => {
+            const next = { ...prev }
+            results.forEach(j => { next[j.job_id] = j })
+            return next
+          })
+          setJobStatuses(prev => {
+            const next = { ...prev }
+            results.forEach(j => { next[j.job_id] = j.status })
+            return next
+          })
+        } catch { /* ignore network errors — will retry on next tick */ }
+      }
+    }
+
+    doPoll()
+    const id = setInterval(doPoll, 3000)
+    return () => clearInterval(id)
+  }, []) // mount once — reads jobs/statuses via refs
 
   useEffect(() => {
     api.ingest.listJobs(caseId)
       .then(r => {
         const all = r.jobs || []
-        // Seed known statuses from the initial fetch so we can sort immediately
         const statusMap = {}
-        all.forEach(j => { statusMap[j.job_id] = j.status })
+        const dataMap   = {}
+        all.forEach(j => {
+          statusMap[j.job_id] = j.status
+          dataMap[j.job_id]   = j
+        })
         setJobStatuses(statusMap)
+        setJobDataMap(dataMap)
         // Sort: FAILED first, then RUNNING/PENDING, then COMPLETED
         const order = { FAILED: 0, RUNNING: 1, PENDING: 2, UPLOADING: 3, COMPLETED: 4, SKIPPED: 5 }
         const sorted = [...all].sort((a, b) =>
@@ -234,11 +256,9 @@ export default function Ingest({ caseId, onComplete }) {
       .catch(() => {})
   }, [caseId])
 
-  const handleStatusChange = useCallback((jobId, status) => {
-    setJobStatuses(prev => {
-      if (prev[jobId] === status) return prev
-      return { ...prev, [jobId]: status }
-    })
+  // Re-activate polling for a retried job by clearing its terminal status
+  const handleRetry = useCallback((jobId) => {
+    setJobStatuses(prev => ({ ...prev, [jobId]: 'PENDING' }))
   }, [])
 
   async function handleFiles(files) {
@@ -250,7 +270,8 @@ export default function Ingest({ caseId, onComplete }) {
     const CHUNK_SIZE = 50 * 1024 * 1024  // 50 MB per chunk
     const token = localStorage.getItem('fo_token') || ''
     const base = window.location.origin
-    const allJobIds = []
+    const allJobIds  = []
+    const allJobData = []   // partial job objects from upload response
 
     const uploadId = `${caseId}-${Date.now()}`
     const label = files.length === 1 ? files[0].name : `${files.length} files`
@@ -294,10 +315,11 @@ export default function Ingest({ caseId, onComplete }) {
           setUploadPct(pct)
           updateUpload(uploadId, pct)
 
-          // Last chunk response contains job IDs
+          // Last chunk response contains job IDs + partial job data
           if (i === totalChunks - 1) {
             const r = await res.json()
             jobIds = (r.jobs || []).map(j => j.job_id)
+            allJobData.push(...(r.jobs || []))
           }
         }
 
@@ -307,7 +329,12 @@ export default function Ingest({ caseId, onComplete }) {
       setJobs(prev => [...allJobIds, ...prev])
       setJobStatuses(prev => {
         const next = { ...prev }
-        allJobIds.forEach(id => { next[id] = 'PENDING' })
+        allJobIds.forEach(id => { next[id] = 'UPLOADING' })
+        return next
+      })
+      setJobDataMap(prev => {
+        const next = { ...prev }
+        allJobData.forEach(j => { next[j.job_id] = j })
         return next
       })
       onComplete?.()
@@ -430,7 +457,7 @@ export default function Ingest({ caseId, onComplete }) {
             </div>
             <div className="space-y-2">
               {jobs.map(jid => (
-                <JobCard key={jid} jobId={jid} onStatusChange={handleStatusChange} />
+                <JobCard key={jid} jobId={jid} jobData={jobDataMap[jid]} onRetry={handleRetry} />
               ))}
             </div>
           </div>

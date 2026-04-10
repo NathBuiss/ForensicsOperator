@@ -6,16 +6,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-import redis as redis_lib
-
-from config import settings
+from config import settings, get_redis
 
 logger = logging.getLogger(__name__)
 JOB_TTL = 604800  # 7 days
-
-
-def get_redis() -> redis_lib.Redis:
-    return redis_lib.Redis.from_url(settings.REDIS_URL, decode_responses=True)
 
 
 def create_job(

@@ -6,22 +6,17 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-import redis as _redis
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from config import settings
+from config import settings, get_redis as _r
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["yara-rules"])
 
 _RULE_KEY  = "fo:yara_rule:{id}"
 _RULES_SET = "fo:yara_rules"
-
-
-def _r():
-    return _redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
 
 
 def _load(r, rule_id: str) -> dict | None:

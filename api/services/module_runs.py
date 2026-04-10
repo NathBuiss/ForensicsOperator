@@ -5,9 +5,7 @@ import json
 import logging
 import time
 
-import redis as redis_lib
-
-from config import settings
+from config import settings, get_redis
 
 logger = logging.getLogger(__name__)
 MODULE_RUN_TTL   = 604800  # 7 days
@@ -16,10 +14,6 @@ MALWARE_RUNS_MAX = 200     # keep last 200 standalone runs
 
 # Sentinel case_id used for runs that are not tied to a specific case
 MALWARE_CASE_ID = "__malware__"
-
-
-def get_redis() -> redis_lib.Redis:
-    return redis_lib.Redis.from_url(settings.REDIS_URL, decode_responses=True)
 
 
 def create_module_run(

@@ -57,7 +57,7 @@ spec:
             - name: MINIO_BUCKET
               value: "forensics-cases"
             - name: BULK_SIZE
-              value: "500"
+              value: "1000"
             # Worker concurrency — number of parallel Celery processes per pod.
             # Increase to match the CPU limit above (1 process per vCPU is a good rule).
             # Change here + redeploy; no image rebuild needed.
@@ -101,4 +101,4 @@ spec:
             claimName: plugins-pvc
         - name: tmp-storage
           emptyDir:
-            sizeLimit: 10Gi
+            sizeLimit: 20Gi

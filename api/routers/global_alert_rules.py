@@ -20,7 +20,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import redis as redis_lib
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -30,7 +29,7 @@ try:
 except ImportError:
     _YAML_AVAILABLE = False
 
-from config import settings
+from config import settings, get_redis as _redis
 from services.elasticsearch import _request as es_req
 
 logger = logging.getLogger(__name__)
@@ -101,10 +100,6 @@ def _get_default_rules() -> list[dict]:
 
 
 # ── Redis helpers ─────────────────────────────────────────────────────────────
-
-def _redis() -> redis_lib.Redis:
-    return redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
-
 
 def _make_rule(template: dict) -> dict:
     """Stamp a rule template with a fresh id and created_at."""

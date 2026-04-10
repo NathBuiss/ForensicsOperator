@@ -4,8 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 
-import redis as redis_lib
-from config import settings
+from config import settings, get_redis
 from auth.dependencies import require_admin
 from services.sigma_sync import SigmaSyncService
 
@@ -81,7 +80,7 @@ def list_sigma_rules(
     current_user: dict = Depends(require_admin)
 ):
     """List synced Sigma HQ rules."""
-    redis_client = redis_lib.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+    redis_client = get_redis()
     rules = json.loads(redis_client.get("fo:alert_rules:_global:sigma") or "[]")
     
     return {

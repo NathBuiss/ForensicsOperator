@@ -33,3 +33,36 @@ class Settings:
 
 
 settings = Settings()
+
+# ── Shared Redis connection pools ─────────────────────────────────────────────
+# A single ConnectionPool is shared across the entire API process so that
+# connections are reused across requests rather than opened/closed per call.
+# All callers use get_redis() — the pool borrows a connection per operation
+# and returns it automatically; no teardown code is needed.
+import redis as _redis_lib
+
+_redis_pool = _redis_lib.ConnectionPool.from_url(
+    settings.REDIS_URL,
+    max_connections=30,
+    decode_responses=True,
+)
+
+# A separate pool with tight socket timeouts for health probes and metrics
+# collection — these must never block for more than a few seconds.
+_redis_timeout_pool = _redis_lib.ConnectionPool.from_url(
+    settings.REDIS_URL,
+    max_connections=10,
+    decode_responses=True,
+    socket_timeout=3,
+    socket_connect_timeout=3,
+)
+
+
+def get_redis() -> _redis_lib.Redis:
+    """Return a Redis client backed by the shared connection pool."""
+    return _redis_lib.Redis(connection_pool=_redis_pool)
+
+
+def get_redis_with_timeout() -> _redis_lib.Redis:
+    """Return a Redis client with socket timeouts for health/metrics probes."""
+    return _redis_lib.Redis(connection_pool=_redis_timeout_pool)

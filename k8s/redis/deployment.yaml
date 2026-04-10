@@ -16,16 +16,26 @@ spec:
       containers:
         - name: redis
           image: redis:7.2-alpine
-          args: ["--appendonly", "yes"]
+          args:
+            - "--appendonly"
+            - "yes"
+            - "--appendfsync"
+            - "everysec"
+            - "--maxmemory"
+            - "800mb"
+            - "--maxmemory-policy"
+            - "allkeys-lru"
+            - "--tcp-keepalive"
+            - "300"
           ports:
             - containerPort: 6379
           resources:
             requests:
-              memory: "128Mi"
-              cpu: "100m"
-            limits:
               memory: "256Mi"
-              cpu: "200m"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
           volumeMounts:
             - name: redis-data
               mountPath: /data
