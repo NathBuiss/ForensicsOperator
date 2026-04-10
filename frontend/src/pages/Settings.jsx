@@ -645,7 +645,12 @@ export default function Settings() {
                   <button
                     key={v.id}
                     type="button"
-                    onClick={() => setS3Triage('vendor', v.id)}
+                    onClick={() => setS3TriageForm(f => ({
+                      ...f,
+                      vendor:   v.id,
+                      endpoint: v.id === 'scaleway' ? SCALEWAY_REGIONS[0].endpoint : '',
+                      region:   v.id === 'scaleway' ? SCALEWAY_REGIONS[0].region   : '',
+                    }))}
                     className={`text-xs py-2 px-3 rounded-lg border transition-colors font-medium ${
                       s3TriageForm.vendor === v.id
                         ? 'bg-brand-accent text-white border-brand-accent'
@@ -861,7 +866,12 @@ export default function Settings() {
                   <button
                     key={v.id}
                     type="button"
-                    onClick={() => setS3('vendor', v.id)}
+                    onClick={() => setS3Form(f => ({
+                      ...f,
+                      vendor:   v.id,
+                      endpoint: v.id === 'scaleway' ? SCALEWAY_REGIONS[0].endpoint : '',
+                      region:   v.id === 'scaleway' ? SCALEWAY_REGIONS[0].region   : '',
+                    }))}
                     className={`text-xs py-2 px-3 rounded-lg border transition-colors font-medium ${
                       s3Form.vendor === v.id
                         ? 'bg-brand-accent text-white border-brand-accent'
