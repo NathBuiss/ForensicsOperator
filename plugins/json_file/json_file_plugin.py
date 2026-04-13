@@ -150,7 +150,9 @@ class JsonFilePlugin(BasePlugin):
 
     def _file_event(self, filename: str, message: str, content: str) -> dict:
         return {
-            "timestamp":     "",
+            # No meaningful timestamp for raw file content — ingest_task falls
+            # back to ingested_at so ES never receives an invalid date value.
+            "timestamp":     None,
             "message":       message,
             "artifact_type": "file",
             "file": {

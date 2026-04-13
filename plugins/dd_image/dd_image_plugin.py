@@ -369,7 +369,7 @@ class DDImagePlugin(BasePlugin):
             self._listed += 1
             yield {
                 "artifact_type":  "dd_file",
-                "timestamp":      mtime or crtime or atime or "",
+                "timestamp":      mtime or crtime or atime or None,
                 "timestamp_desc": "Modified",
                 "message": (
                     f"[{part_label}] {filepath}  ({size:,} bytes)"
@@ -513,7 +513,7 @@ class DDImagePlugin(BasePlugin):
 
             yield {
                 "artifact_type":  "dd_carved",
-                "timestamp":      "",
+                "timestamp":      None,
                 "timestamp_desc": "Carved",
                 "message":        f"[carved] {fname}  ({size:,} bytes)",
                 "dd": {

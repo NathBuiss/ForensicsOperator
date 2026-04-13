@@ -98,7 +98,7 @@ class LnkPlugin(BasePlugin):
             yield {
                 "fo_id": str(uuid.uuid4()),
                 "artifact_type": "lnk",
-                "timestamp": modified or created or "",
+                "timestamp": modified or created or None,
                 "timestamp_desc": "LNK File Modified",
                 "message": message,
                 "lnk": {

@@ -54,7 +54,7 @@ class StringsFallbackPlugin(BasePlugin):
             batch = strings[i:i + BATCH]
             content = "\n".join(batch)
             yield {
-                "timestamp":     "",
+                "timestamp":     None,   # ingest_task falls back to ingested_at
                 "message":       f"[{filename}] {batch[0][:120]}",
                 "artifact_type": "strings",
                 "strings": {

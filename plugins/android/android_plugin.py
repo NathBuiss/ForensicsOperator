@@ -264,7 +264,7 @@ class AndroidPlugin(BasePlugin):
                 yield {
                     "fo_id": str(uuid.uuid4()),
                     "artifact_type": "android",
-                    "timestamp": "",
+                    "timestamp": None,
                     "timestamp_desc": "Contact Record",
                     "message": message,
                     "android": {
@@ -492,7 +492,7 @@ class AndroidPlugin(BasePlugin):
                 yield {
                     "fo_id": str(uuid.uuid4()),
                     "artifact_type": "android",
-                    "timestamp": "",
+                    "timestamp": None,
                     "timestamp_desc": "WiFi Configuration",
                     "message": message,
                     "android": {
@@ -543,7 +543,7 @@ class AndroidPlugin(BasePlugin):
                 yield {
                     "fo_id": str(uuid.uuid4()),
                     "artifact_type": "android",
-                    "timestamp": "",
+                    "timestamp": None,
                     "timestamp_desc": "WiFi Configuration",
                     "message": message,
                     "android": {
@@ -638,7 +638,7 @@ class AndroidPlugin(BasePlugin):
         yield {
             "fo_id": str(uuid.uuid4()),
             "artifact_type": "android",
-            "timestamp": "",
+            "timestamp": None,
             "timestamp_desc": "Android Backup",
             "message": message,
             "android": {

@@ -131,7 +131,7 @@ class SyslogPlugin(BasePlugin):
             return {
                 "fo_id": str(uuid.uuid4()),
                 "artifact_type": "syslog",
-                "timestamp": ts if ts != "-" else "",
+                "timestamp": ts if ts != "-" else None,
                 "timestamp_desc": "Log Time",
                 "message": f"[{app}] {msg}",
                 "host": {"hostname": hostname if hostname != "-" else ""},

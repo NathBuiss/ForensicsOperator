@@ -60,7 +60,7 @@ class PlistPlugin(BasePlugin):
             for key, value in data.items():
                 val_str = _to_str(value)
                 yield {
-                    "timestamp":      "",
+                    "timestamp":      None,
                     "message":        f"{filename} | {key}: {val_str[:300]}",
                     "artifact_type":  "plist",
                     "plist": {
@@ -73,7 +73,7 @@ class PlistPlugin(BasePlugin):
             for i, item in enumerate(data):
                 val_str = _to_str(item)
                 yield {
-                    "timestamp":     "",
+                    "timestamp":     None,
                     "message":       f"{filename}[{i}]: {val_str[:300]}",
                     "artifact_type": "plist",
                     "plist": {
@@ -85,7 +85,7 @@ class PlistPlugin(BasePlugin):
         else:
             val_str = _to_str(data)
             yield {
-                "timestamp":     "",
+                "timestamp":     None,
                 "message":       f"{filename}: {val_str[:300]}",
                 "artifact_type": "plist",
                 "plist": {

@@ -330,8 +330,10 @@ def _merge_base_fields(
         "source_file": source_minio_url,
         "ingested_at": ingested_at,
         "artifact_type": "generic",
-        "timestamp": "",
-        "timestamp_desc": "Unknown",
+        # Default to ingested_at — plugins with real timestamps override this.
+        # Using "" would cause ES to reject the doc (date field rejects empty strings).
+        "timestamp": ingested_at,
+        "timestamp_desc": "Ingestion Time",
         "message": "",
         "tags": [],
         "analyst_note": "",
@@ -344,4 +346,10 @@ def _merge_base_fields(
         "raw": {},
     }
     base.update(event)
+    # Coerce falsy timestamps (empty string, None) from plugins to ingested_at
+    # so the event is never rejected by the ES date mapping.
+    if not base.get("timestamp"):
+        base["timestamp"] = ingested_at
+        if not base.get("timestamp_desc") or base["timestamp_desc"] == "Unknown":
+            base["timestamp_desc"] = "Ingestion Time"
     return base

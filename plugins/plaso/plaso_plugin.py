@@ -225,7 +225,7 @@ class PlasoPlugin(BasePlugin):
                 yield {
                     "fo_id": str(uuid.uuid4()),
                     "artifact_type": "timeline",
-                    "timestamp": "",
+                    "timestamp": None,
                     "timestamp_desc": "Unknown",
                     "message": str(d),
                     "plaso": d,
