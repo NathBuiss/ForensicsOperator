@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { X, Flag, Tag, Plus, Minus, Save, Search, Shield, AlertTriangle, Brain, Loader2, Clock, Download, FileText } from 'lucide-react'
-import { api } from '../../api/client'
+import { api, getToken } from '../../api/client'
 import { extractIocs, iocSearchQuery } from '../../utils/ioc'
 import { getMitre, TACTIC_COLORS } from '../../utils/mitre'
 
@@ -12,6 +12,7 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
   const [saving, setSaving]           = useState(false)
   const [explaining, setExplaining]   = useState(false)
   const [explanation, setExplanation] = useState(null)
+  const [downloading, setDownloading] = useState(false)
   const navigate = useNavigate()
 
   async function explainEvent() {
@@ -54,6 +55,40 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
     const tags = (event.tags || []).filter(t => t !== tag)
     await api.search.tagEvent(caseId, event.fo_id, tags)
     setEvent(p => ({ ...p, tags }))
+  }
+
+  async function downloadFile() {
+    if (!event.ingest_job_id || downloading) return
+    setDownloading(true)
+    try {
+      const archiveMember = event.raw?.archive_member
+      const url = archiveMember
+        ? `/api/v1/cases/${caseId}/files/${event.ingest_job_id}/extract?member=${encodeURIComponent(archiveMember)}`
+        : `/api/v1/cases/${caseId}/files/${event.ingest_job_id}/download`
+      const token = getToken()
+      const res = await fetch(url, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }))
+        throw new Error(err.detail || `HTTP ${res.status}`)
+      }
+      const blob = await res.blob()
+      const blobUrl = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = blobUrl
+      // Use the artifact filename, or the last segment of the archive path, or job id
+      const fallback = archiveMember
+        ? archiveMember.split('/').pop()
+        : event.ingest_job_id
+      a.download = artifactData.filename || fallback
+      a.click()
+      URL.revokeObjectURL(blobUrl)
+    } catch (err) {
+      console.error('File download failed:', err)
+    } finally {
+      setDownloading(false)
+    }
   }
 
   function downloadEventJSON() {
@@ -320,14 +355,17 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
                 )}
               </p>
               {event.ingest_job_id && (
-                <a
-                  href={api.caseFiles.downloadUrl(caseId, event.ingest_job_id)}
-                  download={artifactData.filename || event.ingest_job_id}
+                <button
+                  onClick={downloadFile}
+                  disabled={downloading}
                   className="btn-ghost text-[10px] flex items-center gap-1 flex-shrink-0"
-                  title="Download original binary file"
+                  title={event.raw?.archive_member ? 'Download extracted binary' : 'Download original file'}
                 >
-                  <Download size={10} /> Download file
-                </a>
+                  {downloading
+                    ? <Loader2 size={10} className="animate-spin" />
+                    : <Download size={10} />}
+                  {downloading ? 'Downloading…' : 'Download file'}
+                </button>
               )}
             </div>
             {artifactData.filename && (
