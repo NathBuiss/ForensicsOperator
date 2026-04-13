@@ -1506,6 +1506,48 @@ export default function CaseTimeline() {
   const [showCollector, setShowCollector]   = useState(false)
   const [showAlertRules, setShowAlertRules] = useState(false)
   const [showNotes, setShowNotes]           = useState(false)
+  const [jobSummary, setJobSummary]         = useState({ active: 0, failed: 0, eventsPerSec: null, totalEvents: 0 })
+  const prevJobSnap                         = useRef(null)
+
+  // Poll job counts + compute live events/s rate when the IngestPanel is closed.
+  // Suspended while the panel is open — IngestPanel runs its own 3 s batch poller.
+  useEffect(() => {
+    if (showIngest) return
+    prevJobSnap.current = null  // discard stale baseline on each poller start
+    const ACTIVE = new Set(['RUNNING', 'PENDING', 'UPLOADING'])
+    async function fetchSummary() {
+      try {
+        const r    = await api.ingest.listJobs(caseId)
+        const jobs = r.jobs || []
+        const now  = Date.now()
+
+        // Sum events_indexed only across RUNNING jobs so that already-completed
+        // jobs don't inflate the baseline and produce a false rate spike.
+        const totalEvents = jobs
+          .filter(j => j.status === 'RUNNING')
+          .reduce((s, j) => s + (parseInt(j.events_indexed) || 0), 0)
+
+        // Rate is undefined on the first sample (no baseline to diff against).
+        let eventsPerSec = null
+        if (prevJobSnap.current !== null) {
+          const elapsed = (now - prevJobSnap.current.ts) / 1000
+          if (elapsed > 0)
+            eventsPerSec = Math.max(0, Math.round((totalEvents - prevJobSnap.current.total) / elapsed))
+        }
+        prevJobSnap.current = { total: totalEvents, ts: now }
+
+        setJobSummary({
+          active:      jobs.filter(j => ACTIVE.has(j.status)).length,
+          failed:      jobs.filter(j => j.status === 'FAILED').length,
+          totalEvents,
+          eventsPerSec,
+        })
+      } catch { /* silent */ }
+    }
+    fetchSummary()
+    const id = setInterval(fetchSummary, 3000)
+    return () => clearInterval(id)
+  }, [caseId, showIngest])
 
   const loadCase = useCallback(() => {
     api.cases.get(caseId)
@@ -1585,6 +1627,24 @@ export default function CaseTimeline() {
           >
             <Upload size={14} />
             Ingest
+            {jobSummary.active > 0 && (
+              <span className="ml-1 flex items-center gap-1 bg-white/20 rounded px-1.5 py-px text-[10px] font-mono leading-none">
+                <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse flex-shrink-0" />
+                {jobSummary.active}
+                {jobSummary.eventsPerSec !== null && (
+                  <span className="opacity-75">
+                    {' · '}{jobSummary.eventsPerSec > 0
+                      ? `${jobSummary.eventsPerSec.toLocaleString()} ev/s`
+                      : 'indexing…'}
+                  </span>
+                )}
+              </span>
+            )}
+            {jobSummary.failed > 0 && (
+              <span className="ml-1 bg-red-500 rounded px-1.5 py-px text-[10px] font-mono">
+                ⚠ {jobSummary.failed}
+              </span>
+            )}
           </button>
 
           <button
