@@ -79,7 +79,7 @@ class AndroidPlugin(BasePlugin):
     PLUGIN_NAME = "android"
     PLUGIN_VERSION = "1.0.0"
     DEFAULT_ARTIFACT_TYPE = "android"
-    SUPPORTED_EXTENSIONS = [".db", ".sqlite", ".xml", ".txt", ".ab"]
+    SUPPORTED_EXTENSIONS = [".ab"]  # Only Android backup by extension; DB/XML files matched by exact filename
     SUPPORTED_MIME_TYPES: list[str] = []
 
     @classmethod

@@ -749,6 +749,16 @@ export default function IngestPanel({ caseId, onClose, onComplete }) {
     setJobDataMap(p => { const n = { ...p }; delete n[id]; return n })
   }, [])
 
+  const handleClearFailed = useCallback(async () => {
+    const failedIds = jobsRef.current.filter(jid => statusesRef.current[jid] === 'FAILED')
+    if (!failedIds.length) return
+    if (!window.confirm(`Delete all ${failedIds.length} failed job${failedIds.length > 1 ? 's' : ''} and their data?`)) return
+    await Promise.allSettled(failedIds.map(id => api.ingest.deleteJob(id)))
+    setJobs(prev => prev.filter(jid => statusesRef.current[jid] !== 'FAILED'))
+    setJobStatuses(p => { const n = { ...p }; failedIds.forEach(id => delete n[id]); return n })
+    setJobDataMap(p => { const n = { ...p }; failedIds.forEach(id => delete n[id]); return n })
+  }, [])
+
   // ── Derived counts ────────────────────────────────────────────────────────
   const statusCounts = Object.values(jobStatuses).reduce((acc, s) => {
     acc[s] = (acc[s] || 0) + 1
@@ -854,10 +864,16 @@ export default function IngestPanel({ caseId, onClose, onComplete }) {
                     </span>
                   </button>
                 ))}
-                {activeCount > 0 && (
+                {activeCount > 0 ? (
                   <span className="ml-auto text-[10px] text-brand-accent animate-pulse font-medium">
                     {activeCount} running
                   </span>
+                ) : (statusCounts['FAILED'] || 0) >= 2 && (
+                  <button onClick={handleClearFailed}
+                    className="ml-auto text-[10px] text-red-400 hover:text-red-600 flex items-center gap-1 transition-colors">
+                    <Trash2 size={10} />
+                    Clear all failed
+                  </button>
                 )}
               </div>
               {/* Filename search — only shown when there are enough jobs to warrant it */}

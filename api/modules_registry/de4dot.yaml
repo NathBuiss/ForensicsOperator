@@ -6,3 +6,5 @@ input_extensions:
   - .dll
 available: true
 run_on_files: true
+category: Binary Analysis
+tags: [dotnet, deobfuscation, pe, malware, windows]

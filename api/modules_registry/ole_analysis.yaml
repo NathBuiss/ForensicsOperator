@@ -11,3 +11,5 @@ input_extensions:
   - .rtf
 available: true
 run_on_files: true
+category: Malware Detection
+tags: [office, macro, vba, ole, document, malware]

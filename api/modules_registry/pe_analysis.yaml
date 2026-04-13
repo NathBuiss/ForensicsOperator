@@ -9,3 +9,5 @@ input_extensions:
   - .scr
 available: true
 run_on_files: true
+category: Binary Analysis
+tags: [pe, binary, malware, imports, exports, windows]

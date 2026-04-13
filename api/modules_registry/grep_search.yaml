@@ -5,5 +5,7 @@ input_extensions:
   - "*"
 available: true
 run_on_files: true
+category: Search
+tags: [grep, regex, ioc, keyword, pattern, search]
 config_keys:
   - patterns

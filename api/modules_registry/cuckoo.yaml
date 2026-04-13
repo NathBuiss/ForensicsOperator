@@ -19,6 +19,8 @@ input_extensions:
   - .zip
 available: true
 run_on_files: true
+category: Malware Detection
+tags: [sandbox, dynamic, behavior, malware, cuckoo]
 config_keys:
   - cuckoo_api_url
   - cuckoo_api_token

@@ -83,6 +83,9 @@ _HANDLED_FILENAMES: list[str] = [
     "BOOKMARKS",
     "WEB DATA",
     "DOWNLOADS",
+    "FAVICONS",       # Chrome: extensionless favicon database
+    "SHORTCUTS",      # Chrome: address bar shortcut/autocomplete database
+    "TOP SITES",      # Chrome: most-visited sites database
     "PLACES.SQLITE",
     "COOKIES.SQLITE",
     "FAVICONS.SQLITE",
@@ -90,7 +93,8 @@ _HANDLED_FILENAMES: list[str] = [
 ]
 
 # Chromium-family filenames (no extension, title-case)
-_CHROMIUM_FILES = {"HISTORY", "COOKIES", "LOGIN DATA", "BOOKMARKS", "WEB DATA", "DOWNLOADS"}
+_CHROMIUM_FILES = {"HISTORY", "COOKIES", "LOGIN DATA", "BOOKMARKS", "WEB DATA", "DOWNLOADS",
+                   "FAVICONS", "SHORTCUTS", "TOP SITES"}
 # Firefox-family filenames
 _FIREFOX_FILES = {"PLACES.SQLITE", "COOKIES.SQLITE", "FAVICONS.SQLITE", "FORMHISTORY.SQLITE"}
 
@@ -237,6 +241,15 @@ class BrowserPlugin(BasePlugin):
         elif filename_upper == "BOOKMARKS":
             # Chromium Bookmarks is JSON, not SQLite -- handle gracefully
             yield from self._parse_chromium_bookmarks_json()
+
+        elif filename_upper in ("FAVICONS", "FAVICONS.SQLITE"):
+            yield from self._parse_chromium_favicons(tables)
+
+        elif filename_upper == "SHORTCUTS":
+            yield from self._parse_chromium_shortcuts(tables)
+
+        elif filename_upper == "TOP SITES":
+            yield from self._parse_chromium_top_sites(tables)
 
     # ------------------------------------------------------------------
     # Chromium: History (urls + visits)
@@ -1031,6 +1044,160 @@ class BrowserPlugin(BasePlugin):
             except Exception as exc:
                 self._records_skipped += 1
                 self.log.debug("Skipping firefox favicon row: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Chromium: Favicons (icon_mapping + favicons tables)
+    # ------------------------------------------------------------------
+
+    def _parse_chromium_favicons(
+        self, tables: set[str]
+    ) -> Generator[dict[str, Any], None, None]:
+        assert self._conn
+        # icon_mapping maps page URLs to favicon IDs
+        if "icon_mapping" not in tables or "favicons" not in tables:
+            return
+        query = """
+            SELECT im.page_url, f.url AS icon_url, f.expiry
+            FROM icon_mapping im
+            LEFT JOIN favicons f ON im.icon_id = f.id
+            ORDER BY im.id ASC
+        """
+        try:
+            cursor = self._conn.execute(query)
+        except sqlite3.DatabaseError as exc:
+            self.log.debug("Chromium favicons query failed: %s", exc)
+            return
+
+        for row in cursor:
+            try:
+                page_url = row["page_url"] or ""
+                icon_url = row["icon_url"] or ""
+                expiry = row["expiry"] or 0
+                ts = _webkit_to_iso(expiry) if expiry else ""
+
+                message = f"Favicon cached for: {page_url}"
+
+                self._records_read += 1
+                yield {
+                    "fo_id": str(uuid.uuid4()),
+                    "artifact_type": "browser",
+                    "timestamp": ts,
+                    "timestamp_desc": "Favicon Cache Entry",
+                    "message": message,
+                    "browser": {
+                        "browser_type": "chromium",
+                        "data_type": "favicon",
+                        "page_url": page_url,
+                        "icon_url": icon_url,
+                    },
+                    "raw": {},
+                }
+            except Exception as exc:
+                self._records_skipped += 1
+                self.log.debug("Skipping chromium favicon row: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Chromium: Shortcuts (address bar autocomplete)
+    # ------------------------------------------------------------------
+
+    def _parse_chromium_shortcuts(
+        self, tables: set[str]
+    ) -> Generator[dict[str, Any], None, None]:
+        assert self._conn
+        if "omni_box_shortcuts" not in tables:
+            return
+        query = """
+            SELECT text, fill_into_edit, url, contents, last_access_time, number_of_hits
+            FROM omni_box_shortcuts
+            ORDER BY last_access_time ASC
+        """
+        try:
+            cursor = self._conn.execute(query)
+        except sqlite3.DatabaseError as exc:
+            self.log.debug("Chromium shortcuts query failed: %s", exc)
+            return
+
+        for row in cursor:
+            try:
+                ts = _webkit_to_iso(row["last_access_time"])
+                text = row["text"] or ""
+                url = row["url"] or ""
+                contents = row["contents"] or ""
+                hits = row["number_of_hits"] or 0
+
+                message = f"Address bar shortcut: {text} → {url}"
+
+                self._records_read += 1
+                yield {
+                    "fo_id": str(uuid.uuid4()),
+                    "artifact_type": "browser",
+                    "timestamp": ts,
+                    "timestamp_desc": "Shortcut Last Access",
+                    "message": message,
+                    "browser": {
+                        "browser_type": "chromium",
+                        "data_type": "shortcut",
+                        "typed_text": text,
+                        "fill_into_edit": row["fill_into_edit"] or "",
+                        "url": url,
+                        "display_text": contents,
+                        "hit_count": hits,
+                    },
+                    "raw": {},
+                }
+            except Exception as exc:
+                self._records_skipped += 1
+                self.log.debug("Skipping chromium shortcut row: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Chromium: Top Sites (most-visited thumbnail database)
+    # ------------------------------------------------------------------
+
+    def _parse_chromium_top_sites(
+        self, tables: set[str]
+    ) -> Generator[dict[str, Any], None, None]:
+        assert self._conn
+        if "top_sites" not in tables:
+            return
+        query = """
+            SELECT url, url_rank, title, redirects
+            FROM top_sites
+            ORDER BY url_rank ASC
+        """
+        try:
+            cursor = self._conn.execute(query)
+        except sqlite3.DatabaseError as exc:
+            self.log.debug("Chromium top sites query failed: %s", exc)
+            return
+
+        for row in cursor:
+            try:
+                url = row["url"] or ""
+                title = row["title"] or ""
+                rank = row["url_rank"] or 0
+
+                message = f"Top site #{rank}: {title or url}"
+
+                self._records_read += 1
+                yield {
+                    "fo_id": str(uuid.uuid4()),
+                    "artifact_type": "browser",
+                    "timestamp": None,
+                    "timestamp_desc": "Top Site",
+                    "message": message,
+                    "browser": {
+                        "browser_type": "chromium",
+                        "data_type": "top_site",
+                        "url": url,
+                        "title": title,
+                        "rank": rank,
+                        "redirects": row["redirects"] or "",
+                    },
+                    "raw": {},
+                }
+            except Exception as exc:
+                self._records_skipped += 1
+                self.log.debug("Skipping chromium top site row: %s", exc)
 
     # ------------------------------------------------------------------
     # Stats

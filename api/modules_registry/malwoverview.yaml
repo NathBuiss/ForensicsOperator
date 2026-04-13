@@ -30,5 +30,7 @@ input_extensions:
   - .elf
 available: true
 run_on_files: true
+category: Threat Intelligence
+tags: [virustotal, hash, malware, ioc, reputation]
 config_keys:
   - vt_api_key
