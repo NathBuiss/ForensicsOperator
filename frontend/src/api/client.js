@@ -107,6 +107,11 @@ export const api = {
     delete: (caseId, id)   => request('DELETE', `/cases/${caseId}/saved-searches/${id}`),
   },
 
+  notes: {
+    get:  (caseId)       => request('GET', `/cases/${caseId}/notes`),
+    save: (caseId, body) => request('PUT', `/cases/${caseId}/notes`, { body }),
+  },
+
   alertRules: {
     list:            (caseId)         => request('GET',    `/cases/${caseId}/alert-rules`),
     create:          (caseId, data)   => request('POST',   `/cases/${caseId}/alert-rules`, data),

@@ -1,12 +1,13 @@
 import { useParams, useNavigate, Routes, Route, NavLink, Navigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
-import { AlertTriangle } from 'lucide-react'
+import { AlertTriangle, FileText } from 'lucide-react'
 import { api } from '../api/client'
 import Timeline from './Timeline'
 import Search from './Search'
 import Ingest from './Ingest'
 import AlertRules from './AlertRules'
 import CaseFiles from './CaseFiles'
+import CaseNotes from './CaseNotes'
 
 export default function CaseDetail() {
   const { caseId } = useParams()
@@ -30,6 +31,7 @@ export default function CaseDetail() {
     { path: 'files',    label: 'Files' },
     { path: 'ingest',   label: 'Ingest' },
     { path: 'alerts',   label: 'Alerts', icon: AlertTriangle },
+    { path: 'notes',    label: 'Notes',  icon: FileText },
   ]
 
   return (
@@ -88,6 +90,7 @@ export default function CaseDetail() {
           <Route path="ingest" element={<Ingest caseId={caseId} onComplete={() =>
             api.cases.get(caseId).then(setCaseData)} />} />
           <Route path="alerts" element={<AlertRules caseId={caseId} />} />
+          <Route path="notes"  element={<CaseNotes  caseId={caseId} />} />
         </Routes>
       </div>
     </div>

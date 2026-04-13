@@ -715,7 +715,7 @@ export default function AlertLibrary() {
   }
 
   return (
-    <div className="p-6 max-w-4xl">
+    <div className="p-6 max-w-4xl mx-auto">
 
       {/* Page header */}
       <div className="mb-6">

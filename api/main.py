@@ -19,7 +19,7 @@ from config import settings
 
 from routers import (
     cases, ingest, jobs, search, plugins, health,
-    saved_searches, alert_rules, export, global_alert_rules,
+    saved_searches, notes, alert_rules, export, global_alert_rules,
     modules, collector, editor, llm_config, s3_integration, metrics,
     cti, yara_rules, sigma_sync, case_files,
 )
@@ -155,6 +155,7 @@ app.include_router(jobs.router,               prefix="/api/v1", dependencies=_an
 app.include_router(search.router,             prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(plugins.router,            prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(saved_searches.router,     prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(notes.router,              prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(alert_rules.router,        prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(export.router,             prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(modules.router,            prefix="/api/v1", dependencies=_analyst_or_admin)

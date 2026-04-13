@@ -354,7 +354,7 @@ export default function Ingest({ caseId, onComplete }) {
   }
 
   return (
-    <div className="p-6 max-w-2xl">
+    <div className="p-6 max-w-2xl mx-auto">
       <h2 className="text-sm font-semibold text-brand-text mb-1">Ingest Forensics Files</h2>
       <p className="text-xs text-gray-500 mb-1">
         Supported: {ACCEPTED_TYPES.join(' ')} and common named artefacts (NTUSER.DAT, $MFT, conn.log, eve.json…)

@@ -419,7 +419,7 @@ export default function Settings() {
   const provider = PROVIDERS.find(p => p.id === form.provider) || PROVIDERS[0]
 
   return (
-    <div className="p-6 max-w-2xl">
+    <div className="p-6 max-w-2xl mx-auto">
       <div className="mb-6">
         <div className="flex items-center gap-2.5 mb-1">
           <Settings2 size={20} className="text-brand-accent" />

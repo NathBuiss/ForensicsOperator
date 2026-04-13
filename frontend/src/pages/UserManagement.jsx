@@ -192,7 +192,7 @@ export default function UserManagement() {
   /* ── Access gate ── */
   if (me?.role !== 'admin') {
     return (
-      <div className="p-6 max-w-2xl">
+      <div className="p-6 max-w-2xl mx-auto">
         <div className="card p-8 flex flex-col items-center gap-3 text-center">
           <AlertTriangle size={28} className="text-amber-500" />
           <h2 className="font-semibold text-brand-text">Admin access required</h2>
@@ -271,7 +271,7 @@ export default function UserManagement() {
 
   /* ── Main render ── */
   return (
-    <div className="p-6 max-w-4xl">
+    <div className="p-6 max-w-4xl mx-auto">
 
       {/* Header */}
       <div className="mb-6">

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { X, Flag, Tag, Plus, Minus, Save, Search, Shield, AlertTriangle, Brain, Loader2 } from 'lucide-react'
+import { X, Flag, Tag, Plus, Minus, Save, Search, Shield, AlertTriangle, Brain, Loader2, Clock } from 'lucide-react'
 import { api } from '../../api/client'
 import { extractIocs, iocSearchQuery } from '../../utils/ioc'
 import { getMitre, TACTIC_COLORS } from '../../utils/mitre'
@@ -58,6 +58,14 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
 
   function pivot(query) {
     navigate('../search', { state: { pivotQuery: query } })
+  }
+
+  function pivotTimeWindow(minutes) {
+    if (!event.timestamp) return
+    const center = new Date(event.timestamp)
+    const from = new Date(center.getTime() - minutes * 60_000).toISOString()
+    const to   = new Date(center.getTime() + minutes * 60_000).toISOString()
+    navigate('../search', { state: { pivotQuery: `timestamp:[${from} TO ${to}]` } })
   }
 
   const ts = event.timestamp
@@ -129,6 +137,27 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
             {explaining ? 'Analyzing…' : 'Explain'}
           </button>
         </div>
+
+        {/* Time window pivot */}
+        {event.timestamp && (
+          <div>
+            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5 flex items-center gap-1">
+              <Clock size={9} /> Time Window
+            </p>
+            <div className="flex gap-1 flex-wrap">
+              {[1, 3, 5, 10].map(m => (
+                <button
+                  key={m}
+                  onClick={() => pivotTimeWindow(m)}
+                  className="btn-ghost text-[10px] px-2 py-0.5 font-mono"
+                  title={`Search all events within ±${m} min of this timestamp`}
+                >
+                  ±{m}m
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* AI explanation */}
         {explanation && (
