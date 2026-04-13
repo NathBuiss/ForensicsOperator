@@ -21,6 +21,7 @@ import tarfile
 import zipfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -56,6 +57,19 @@ _DISK_IMAGE_EXTS = {
 
 _MAX_VIEW_BYTES   = 5 * 1024 * 1024   # 5 MB
 _MAX_SEARCH_BYTES = 2 * 1024 * 1024   # 2 MB per file during search
+
+
+def _content_disposition(filename: str) -> str:
+    """
+    Build a Content-Disposition header value that handles non-ASCII filenames.
+
+    Sends both an ASCII fallback (filename=) and an RFC 5987 UTF-8 encoded
+    version (filename*=) so all browsers get the correct name without raising
+    Python's UnicodeEncodeError when the header is serialised as latin-1.
+    """
+    ascii_name = filename.encode("ascii", errors="replace").decode("ascii").replace('"', '\\"')
+    utf8_name  = quote(filename, safe="")
+    return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_name}'
 
 
 def _is_readable(filename: str) -> bool:
@@ -148,12 +162,11 @@ def download_file(case_id: str, job_id: str):
 
     fname        = job.get("original_filename", "download")
     content_type = mimetypes.guess_type(fname)[0] or "application/octet-stream"
-    safe_fname   = fname.replace('"', '\\"')
 
     return StreamingResponse(
         _minio_stream(minio_key),
         media_type=content_type,
-        headers={"Content-Disposition": f'attachment; filename="{safe_fname}"'},
+        headers={"Content-Disposition": _content_disposition(fname)},
     )
 
 
@@ -246,12 +259,11 @@ def extract_archive_member(
         )
 
     content_type = mimetypes.guess_type(member_name)[0] or "application/octet-stream"
-    safe_fname   = member_name.replace('"', '\\"')
 
     return StreamingResponse(
         iter([member_bytes]),
         media_type=content_type,
-        headers={"Content-Disposition": f'attachment; filename="{safe_fname}"'},
+        headers={"Content-Disposition": _content_disposition(member_name)},
     )
 
 
