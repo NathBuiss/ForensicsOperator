@@ -56,6 +56,16 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
     setEvent(p => ({ ...p, tags }))
   }
 
+  function downloadEventJSON() {
+    const blob = new Blob([JSON.stringify(event, null, 2)], { type: 'application/json' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href     = url
+    a.download = `event-${event.fo_id || 'unknown'}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   function pivot(query) {
     navigate(`/cases/${caseId}/search`, { state: { pivotQuery: query } })
   }
@@ -136,16 +146,13 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
             {explaining ? <Loader2 size={12} className="animate-spin" /> : <Brain size={12} />}
             {explaining ? 'Analyzing…' : 'Explain'}
           </button>
-          {event.ingest_job_id && (
-            <a
-              href={api.caseFiles.downloadUrl(caseId, event.ingest_job_id)}
-              download={artifactData.filename || event.ingest_job_id}
-              className="btn-ghost text-xs flex items-center gap-1"
-              title="Download original source file"
-            >
-              <Download size={12} /> Download
-            </a>
-          )}
+          <button
+            onClick={downloadEventJSON}
+            className="btn-ghost text-xs flex items-center gap-1"
+            title="Download this event as JSON"
+          >
+            <Download size={12} /> Event JSON
+          </button>
         </div>
 
         {/* Time window pivot */}
@@ -312,6 +319,16 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
                   </span>
                 )}
               </p>
+              {event.ingest_job_id && (
+                <a
+                  href={api.caseFiles.downloadUrl(caseId, event.ingest_job_id)}
+                  download={artifactData.filename || event.ingest_job_id}
+                  className="btn-ghost text-[10px] flex items-center gap-1 flex-shrink-0"
+                  title="Download original binary file"
+                >
+                  <Download size={10} /> Download file
+                </a>
+              )}
             </div>
             {artifactData.filename && (
               <p className="text-[10px] text-gray-400 font-mono mb-1.5 truncate" title={artifactData.filename}>
