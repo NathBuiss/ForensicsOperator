@@ -59,7 +59,8 @@ export const api = {
     listJobs: (caseId)           => request('GET',  `/cases/${caseId}/jobs`),
     getJob:    (jobId)            => request('GET',  `/jobs/${jobId}`),
     batchJobs: (jobIds)          => request('POST', '/jobs/batch', { job_ids: jobIds }),
-    retryJob:  (jobId)           => request('POST', `/jobs/${jobId}/retry`),
+    retryJob:  (jobId)           => request('POST',   `/jobs/${jobId}/retry`),
+    deleteJob: (jobId)           => request('DELETE', `/jobs/${jobId}`),
   },
 
   search: {

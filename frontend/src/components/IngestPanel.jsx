@@ -10,7 +10,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Upload, Cloud, X, RefreshCw, AlertTriangle,
-  ChevronRight, Folder, File, Loader2, Database, Download,
+  ChevronRight, Folder, File, Loader2, Database, Download, Trash2,
 } from 'lucide-react'
 import { api } from '../api/client'
 import { useUpload } from '../contexts/UploadContext'
@@ -57,8 +57,9 @@ function useElapsed(iso) {
 
 // ── JobCard ───────────────────────────────────────────────────────────────────
 
-function JobCard({ jobId, jobData, onRetry }) {
-  const [retrying, setRetrying] = useState(false)
+function JobCard({ jobId, jobData, onRetry, onDelete }) {
+  const [retrying,  setRetrying]  = useState(false)
+  const [deleting,  setDeleting]  = useState(false)
   const elapsed = useElapsed(jobData?.created_at)
   const job = jobData
 
@@ -67,6 +68,18 @@ function JobCard({ jobId, jobData, onRetry }) {
     try { await api.ingest.retryJob(jobId); onRetry?.(jobId) }
     catch (err) { alert('Retry failed: ' + err.message) }
     finally { setRetrying(false) }
+  }
+
+  async function deleteJob() {
+    if (!window.confirm(`Remove "${job.original_filename}"?\nThis deletes the file and all its indexed events.`)) return
+    setDeleting(true)
+    try {
+      await api.ingest.deleteJob(jobId)
+      onDelete?.(jobId)
+    } catch (err) {
+      alert('Delete failed: ' + err.message)
+      setDeleting(false)
+    }
   }
 
   if (!job) return <div className="text-gray-400 text-xs p-2">Loading…</div>
@@ -107,6 +120,15 @@ function JobCard({ jobId, jobData, onRetry }) {
               title={job.status === 'PENDING' ? 'Re-queue stuck job' : 'Retry'}>
               <RefreshCw size={12} className={retrying ? 'animate-spin' : ''} />
               {job.status === 'PENDING' ? 'Re-queue' : 'Retry'}
+            </button>
+          )}
+          {!['RUNNING', 'UPLOADING'].includes(job.status) && (
+            <button onClick={deleteJob} disabled={deleting}
+              className="btn-ghost text-xs px-1.5 py-0.5 text-red-400 hover:text-red-600 flex items-center gap-1"
+              title="Delete this job and all its indexed events">
+              {deleting
+                ? <Loader2 size={12} className="animate-spin" />
+                : <Trash2 size={12} />}
             </button>
           )}
         </div>
@@ -507,11 +529,15 @@ function S3Tab({ caseId, onJobsAdded }) {
 
 // ── Main IngestPanel ──────────────────────────────────────────────────────────
 
+const JOB_SORT_ORDER = { RUNNING: 0, UPLOADING: 1, PENDING: 2, COMPLETED: 3, SKIPPED: 4, FAILED: 5 }
+
 export default function IngestPanel({ caseId, onClose, onComplete }) {
   const [tab,          setTab]          = useState('upload')
   const [jobs,         setJobs]         = useState([])
   const [jobStatuses,  setJobStatuses]  = useState({})
   const [jobDataMap,   setJobDataMap]   = useState({})
+  const [filterStatus, setFilterStatus] = useState(null)   // null = All
+  const [searchQuery,  setSearchQuery]  = useState('')
 
   const jobsRef     = useRef([])
   const statusesRef = useRef({})
@@ -527,8 +553,7 @@ export default function IngestPanel({ caseId, onClose, onComplete }) {
       all.forEach(j => { sm[j.job_id] = j.status; dm[j.job_id] = j })
       setJobStatuses(sm)
       setJobDataMap(dm)
-      const ORDER = { FAILED: 0, RUNNING: 1, PENDING: 2, UPLOADING: 3, COMPLETED: 4, SKIPPED: 5 }
-      setJobs([...all].sort((a, b) => (ORDER[a.status] ?? 9) - (ORDER[b.status] ?? 9)).map(j => j.job_id))
+      setJobs([...all].sort((a, b) => (JOB_SORT_ORDER[a.status] ?? 9) - (JOB_SORT_ORDER[b.status] ?? 9)).map(j => j.job_id))
     }).catch(() => {})
   }, [caseId])
 
@@ -563,8 +588,43 @@ export default function IngestPanel({ caseId, onClose, onComplete }) {
     setJobStatuses(p => ({ ...p, [id]: 'PENDING' }))
   }, [])
 
-  const failedCount = Object.values(jobStatuses).filter(s => s === 'FAILED').length
-  const activeCount = Object.values(jobStatuses).filter(s => ['RUNNING', 'PENDING', 'UPLOADING'].includes(s)).length
+  const handleDelete = useCallback((id) => {
+    setJobs(prev => prev.filter(jid => jid !== id))
+    setJobStatuses(p => { const n = { ...p }; delete n[id]; return n })
+    setJobDataMap(p => { const n = { ...p }; delete n[id]; return n })
+  }, [])
+
+  // ── Derived counts ────────────────────────────────────────────────────────
+  const statusCounts = Object.values(jobStatuses).reduce((acc, s) => {
+    acc[s] = (acc[s] || 0) + 1
+    return acc
+  }, {})
+  const activeCount = (statusCounts['RUNNING'] || 0) + (statusCounts['UPLOADING'] || 0)
+
+  // Always sort by priority (active first, failed last), then filter by tab + search
+  const sortedJobs = [...jobs].sort((a, b) =>
+    (JOB_SORT_ORDER[jobStatuses[a]] ?? 9) - (JOB_SORT_ORDER[jobStatuses[b]] ?? 9)
+  )
+  const filteredJobs = sortedJobs.filter(jid => {
+    const job = jobDataMap[jid]
+    if (!job) return true
+    if (filterStatus === 'ACTIVE'   && !['RUNNING', 'UPLOADING'].includes(job.status)) return false
+    if (filterStatus === 'PENDING'  && job.status !== 'PENDING')                        return false
+    if (filterStatus === 'COMPLETED'&& job.status !== 'COMPLETED')                      return false
+    if (filterStatus === 'FAILED'   && job.status !== 'FAILED')                         return false
+    if (searchQuery.trim()) {
+      return (job.original_filename || '').toLowerCase().includes(searchQuery.toLowerCase())
+    }
+    return true
+  })
+
+  const FILTER_TABS = [
+    { id: null,        label: 'All',     count: jobs.length },
+    { id: 'ACTIVE',    label: 'Active',  count: activeCount },
+    { id: 'PENDING',   label: 'Pending', count: statusCounts['PENDING']   || 0 },
+    { id: 'COMPLETED', label: 'Done',    count: statusCounts['COMPLETED'] || 0 },
+    { id: 'FAILED',    label: 'Failed',  count: statusCounts['FAILED']    || 0 },
+  ].filter(f => f.id === null || f.count > 0)
 
   return (
     <div className="panel-backdrop" onClick={onClose}>
@@ -606,35 +666,89 @@ export default function IngestPanel({ caseId, onClose, onComplete }) {
         </div>
 
         {/* ── Shared job list — always visible, scrollable ── */}
-        <div className="flex-1 overflow-y-auto p-4 min-h-0">
-          {jobs.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-32 gap-2 text-gray-300">
-              <Database size={28} />
-              <p className="text-xs">No jobs yet — upload or import from S3</p>
-            </div>
-          ) : (
-            <>
-              <div className="flex items-center gap-2 mb-3 flex-wrap">
-                <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                  Ingestion Jobs
-                </h3>
-                <span className="text-[10px] text-gray-400">{jobs.length} total</span>
-                {failedCount > 0 && (
-                  <span className="badge bg-red-50 border-red-200 text-red-600 flex items-center gap-1">
-                    <AlertTriangle size={9} /> {failedCount} failed
+        <div className="flex flex-col flex-1 min-h-0">
+          {/* Filter + search bar — sticky above the scrollable list */}
+          {jobs.length > 0 && (
+            <div className="px-4 pt-3 pb-2 border-b border-gray-100 flex-shrink-0 space-y-2">
+              {/* Status filter pills */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mr-0.5">
+                  Filter
+                </span>
+                {FILTER_TABS.map(f => (
+                  <button
+                    key={String(f.id)}
+                    onClick={() => setFilterStatus(f.id)}
+                    className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors font-medium ${
+                      filterStatus === f.id
+                        ? f.id === 'FAILED'
+                          ? 'bg-red-500 text-white border-red-500'
+                          : f.id === 'ACTIVE'
+                            ? 'bg-brand-accent text-white border-brand-accent'
+                            : 'bg-gray-700 text-white border-gray-700'
+                        : f.id === 'FAILED' && f.count > 0
+                          ? 'bg-red-50 text-red-500 border-red-200 hover:bg-red-100'
+                          : f.id === 'ACTIVE' && f.count > 0
+                            ? 'bg-brand-accentlight text-brand-accent border-brand-accent/30 hover:bg-brand-accent/10'
+                            : 'bg-white text-gray-500 border-gray-200 hover:border-gray-400 hover:text-gray-700'
+                    }`}
+                  >
+                    {f.label}
+                    <span className={`ml-1 ${filterStatus === f.id ? 'opacity-80' : 'opacity-60'}`}>
+                      {f.count}
+                    </span>
+                  </button>
+                ))}
+                {activeCount > 0 && (
+                  <span className="ml-auto text-[10px] text-brand-accent animate-pulse font-medium">
+                    {activeCount} running
                   </span>
                 )}
-                {activeCount > 0 && (
-                  <span className="text-[10px] text-brand-accent animate-pulse">{activeCount} active</span>
-                )}
               </div>
+              {/* Filename search — only shown when there are enough jobs to warrant it */}
+              {jobs.length >= 5 && (
+                <div className="relative">
+                  <input
+                    value={searchQuery}
+                    onChange={e => setSearchQuery(e.target.value)}
+                    placeholder="Search by filename…"
+                    className="input w-full text-xs py-1 pr-7"
+                  />
+                  {searchQuery && (
+                    <button
+                      onClick={() => setSearchQuery('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                    >
+                      <X size={11} />
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="flex-1 overflow-y-auto p-4 min-h-0">
+            {jobs.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-32 gap-2 text-gray-300">
+                <Database size={28} />
+                <p className="text-xs">No jobs yet — upload or import from S3</p>
+              </div>
+            ) : filteredJobs.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-24 gap-1.5 text-gray-300">
+                <p className="text-xs">No jobs match this filter</p>
+                <button onClick={() => { setFilterStatus(null); setSearchQuery('') }}
+                  className="text-[10px] text-brand-accent hover:underline">
+                  Clear filters
+                </button>
+              </div>
+            ) : (
               <div className="space-y-2">
-                {jobs.map(jid => (
-                  <JobCard key={jid} jobId={jid} jobData={jobDataMap[jid]} onRetry={handleRetry} />
+                {filteredJobs.map(jid => (
+                  <JobCard key={jid} jobId={jid} jobData={jobDataMap[jid]} onRetry={handleRetry} onDelete={handleDelete} />
                 ))}
               </div>
-            </>
-          )}
+            )}
+          </div>
         </div>
       </div>
     </div>

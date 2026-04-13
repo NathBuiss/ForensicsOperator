@@ -4,6 +4,8 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from services import jobs as job_svc
+from services import storage
+from services import elasticsearch as es
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["jobs"])
@@ -95,3 +97,50 @@ def retry_job(job_id: str):
         "status": "PENDING",
         "message": "Job has been re-queued for processing",
     }
+
+
+@router.delete("/jobs/{job_id}")
+def delete_job(job_id: str):
+    """
+    Permanently delete an ingestion job and all its associated data:
+      - Job metadata from Redis
+      - Source file from MinIO
+      - All indexed events from Elasticsearch (delete_by_query on ingest_job_id)
+
+    Active jobs (RUNNING, UPLOADING) are rejected — wait for them to finish first.
+    """
+    job = job_svc.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.get("status") in ("RUNNING", "UPLOADING"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot delete an active job (status: {job.get('status')}). Wait for it to finish.",
+        )
+
+    case_id   = job["case_id"]
+    minio_key = job.get("minio_object_key", "")
+
+    # 1. Remove source file from MinIO (best-effort — may already be gone)
+    if minio_key:
+        try:
+            storage.delete_object(minio_key)
+        except Exception as exc:
+            logger.warning("MinIO delete skipped for %s: %s", minio_key, exc)
+
+    # 2. Remove all indexed events produced by this job from Elasticsearch
+    try:
+        es._request(
+            "POST",
+            f"/fo-case-{case_id}-*/_delete_by_query?conflicts=proceed",
+            {"query": {"term": {"ingest_job_id": job_id}}},
+        )
+    except Exception as exc:
+        logger.warning("ES delete_by_query skipped for job %s: %s", job_id, exc)
+
+    # 3. Remove job record from Redis
+    job_svc.delete_job(job_id, case_id)
+
+    logger.info("Deleted job %s (case %s)", job_id, case_id)
+    return {"job_id": job_id, "deleted": True}

@@ -91,6 +91,13 @@ def reset_job_for_retry(job_id: str) -> None:
     r.expire(key, JOB_TTL)
 
 
+def delete_job(job_id: str, case_id: str) -> None:
+    """Remove a job record from Redis and from the case's job set."""
+    r = get_redis()
+    r.delete(f"job:{job_id}")
+    r.srem(f"case:{case_id}:jobs", job_id)
+
+
 def list_case_jobs(case_id: str) -> list[dict]:
     r = get_redis()
     job_ids = r.smembers(f"case:{case_id}:jobs")

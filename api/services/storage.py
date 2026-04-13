@@ -138,6 +138,13 @@ def download_fileobj(object_key: str) -> bytes:
             pass
 
 
+def delete_object(object_key: str) -> None:
+    """Remove an object from MinIO (no-op if it doesn't exist)."""
+    client = get_minio()
+    _retry(lambda: client.remove_object(settings.MINIO_BUCKET, object_key))
+    logger.info("Deleted MinIO object: %s", object_key)
+
+
 def get_presigned_url(object_key: str, expires_seconds: int = 3600) -> str:
     """Generate a presigned download URL."""
     from datetime import timedelta
