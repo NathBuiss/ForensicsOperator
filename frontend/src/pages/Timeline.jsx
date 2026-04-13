@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import {
-  Search, Filter, X, Flag, Loader2, Download,
+  Search, Filter, X, Flag, Loader2, Download, RefreshCw,
   BarChart2, Plus, Minus, Keyboard, SlidersHorizontal, Brain,
 } from 'lucide-react'
 import { api } from '../api/client'
@@ -94,6 +94,7 @@ export default function Timeline({ caseId, artifactTypes }) {
   const colPickerRef                      = useRef(null)
 
   const [checkedFoIds, setCheckedFoIds]     = useState(new Set())
+  const [refreshing, setRefreshing]         = useState(false)
   const [explaining, setExplaining]         = useState(false)
   const [explainResult, setExplainResult]   = useState(null)
   const [naturalDate, setNaturalDate]       = useState('')
@@ -217,6 +218,20 @@ export default function Timeline({ caseId, artifactTypes }) {
     const next = new Date(day); next.setDate(next.getDate() + 1)
     setFromTs(day.toISOString())
     setToTs(next.toISOString())
+  }
+
+  async function refresh() {
+    setRefreshing(true)
+    try {
+      await Promise.all([
+        api.search.facets(caseId, {})
+          .then(r => setHistogram(r.facets?.events_over_time?.buckets || []))
+          .catch(() => {}),
+        load(0, true),
+      ])
+    } finally {
+      setRefreshing(false)
+    }
   }
 
   function downloadCsv() {
@@ -543,6 +558,16 @@ export default function Timeline({ caseId, artifactTypes }) {
 
             <button type="button" onClick={downloadCsv} className="btn-ghost text-xs" title="Export CSV">
               <Download size={13} />
+            </button>
+
+            <button
+              type="button"
+              onClick={refresh}
+              disabled={refreshing}
+              className={`btn-ghost text-xs ${refreshing ? 'text-brand-accent' : ''}`}
+              title="Refresh — reload events and histogram to see newly ingested files"
+            >
+              <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
             </button>
 
             {histogram.length > 0 && (
