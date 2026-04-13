@@ -14,8 +14,8 @@ from typing import Any, Generator
 from plugins.base_plugin import BasePlugin, PluginContext, PluginFatalError
 
 MIN_LEN   = 6
-MAX_BYTES = 10 * 1024 * 1024   # 10 MB cap
-BATCH     = 150                 # strings per event
+MAX_BYTES = 50 * 1024 * 1024   # 50 MB scan cap
+MAX_STRINGS = 50_000            # safety cap on number of strings kept
 
 _RE = re.compile(rb'[\x20-\x7e]{' + str(MIN_LEN).encode() + rb',}')
 
@@ -23,7 +23,7 @@ _RE = re.compile(rb'[\x20-\x7e]{' + str(MIN_LEN).encode() + rb',}')
 class StringsFallbackPlugin(BasePlugin):
 
     PLUGIN_NAME = "strings"
-    PLUGIN_VERSION = "1.0.0"
+    PLUGIN_VERSION = "1.1.0"
     DEFAULT_ARTIFACT_TYPE = "strings"
     SUPPORTED_EXTENSIONS = []
     SUPPORTED_MIME_TYPES = []
@@ -45,22 +45,24 @@ class StringsFallbackPlugin(BasePlugin):
         if len(data) > MAX_BYTES:
             data = data[:MAX_BYTES]
 
-        strings = [m.group(0).decode("ascii", errors="replace") for m in _RE.finditer(data)]
+        strings = [
+            m.group(0).decode("ascii", errors="replace")
+            for m in _RE.finditer(data)
+        ][:MAX_STRINGS]
 
         if not strings:
             return
 
-        for i in range(0, len(strings), BATCH):
-            batch = strings[i:i + BATCH]
-            content = "\n".join(batch)
-            yield {
-                "timestamp":     None,   # ingest_task falls back to ingested_at
-                "message":       f"[{filename}] {batch[0][:120]}",
-                "artifact_type": "strings",
-                "strings": {
-                    "filename":     filename,
-                    "content":      content,
-                    "count":        len(batch),
-                    "batch_offset": i // BATCH,
-                },
-            }
+        # All strings go into ONE event — keeps the file as a single timeline entry
+        # and makes it unambiguous when feeding the file to analysis modules.
+        content = "\n".join(strings)
+        yield {
+            "timestamp":     None,   # ingest_task falls back to ingested_at
+            "message":       f"[{filename}] {strings[0][:120]}",
+            "artifact_type": "strings",
+            "strings": {
+                "filename": filename,
+                "content":  content,
+                "count":    len(strings),
+            },
+        }

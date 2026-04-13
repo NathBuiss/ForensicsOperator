@@ -57,7 +57,7 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
   }
 
   function pivot(query) {
-    navigate('../search', { state: { pivotQuery: query } })
+    navigate(`/cases/${caseId}/search`, { state: { pivotQuery: query } })
   }
 
   function pivotTimeWindow(minutes) {
@@ -65,7 +65,7 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
     const center = new Date(event.timestamp)
     const from = new Date(center.getTime() - minutes * 60_000).toISOString()
     const to   = new Date(center.getTime() + minutes * 60_000).toISOString()
-    navigate('../search', { state: { pivotQuery: `timestamp:[${from} TO ${to}]` } })
+    navigate(`/cases/${caseId}/search`, { state: { pivotQuery: `timestamp:[${from} TO ${to}]` } })
   }
 
   const ts = event.timestamp

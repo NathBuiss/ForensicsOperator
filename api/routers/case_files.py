@@ -15,9 +15,13 @@ import re
 from pathlib import Path
 from typing import Optional
 
+import mimetypes
+
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from config import settings
 from services import jobs as job_svc
 from services import storage
 from services.cases import get_case
@@ -100,6 +104,52 @@ def list_case_files(case_id: str):
             "source_zip":     job.get("source_zip", ""),
         })
     return {"case_id": case_id, "files": files, "total": len(files)}
+
+
+# ── Download raw file ────────────────────────────────────────────────────────
+
+def _minio_stream(minio_key: str):
+    """Generator that yields chunks directly from MinIO — no full-file RAM buffer."""
+    client = storage.get_minio()
+    response = client.get_object(settings.MINIO_BUCKET, minio_key)
+    try:
+        yield from response
+    finally:
+        try:
+            response.close()
+            response.release_conn()
+        except Exception:
+            pass
+
+
+@router.get("/cases/{case_id}/files/{job_id}/download")
+def download_file(case_id: str, job_id: str):
+    """
+    Stream the original stored file as a browser download.
+
+    Auth via ?_token= query param (same pattern as CSV export) so the browser
+    can trigger the download directly without AJAX.
+    """
+    if not get_case(case_id):
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    job = job_svc.get_job(job_id)
+    if not job or job.get("case_id") != case_id:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    minio_key = job.get("minio_object_key", "")
+    if not minio_key:
+        raise HTTPException(status_code=404, detail="File not yet in storage")
+
+    fname        = job.get("original_filename", "download")
+    content_type = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+    safe_fname   = fname.replace('"', '\\"')
+
+    return StreamingResponse(
+        _minio_stream(minio_key),
+        media_type=content_type,
+        headers={"Content-Disposition": f'attachment; filename="{safe_fname}"'},
+    )
 
 
 # ── Read file content ─────────────────────────────────────────────────────────

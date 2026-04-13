@@ -266,6 +266,12 @@ export const api = {
     diskImages:  (caseId)         => request('GET',  `/cases/${caseId}/disk-images`),
     browse:      (caseId, jobId, path = '/') =>
       request('GET', `/cases/${caseId}/disk-images/${jobId}/browse?path=${encodeURIComponent(path)}`),
+    // Returns a URL suitable for window.open() — token in query param since
+    // browser-initiated downloads cannot set Authorization headers.
+    downloadUrl: (caseId, jobId) => {
+      const token = getToken()
+      return `/api/v1/cases/${caseId}/files/${jobId}/download${token ? `?_token=${encodeURIComponent(token)}` : ''}`
+    },
   },
 
   collector: {

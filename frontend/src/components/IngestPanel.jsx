@@ -10,7 +10,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Upload, Cloud, X, RefreshCw, AlertTriangle,
-  ChevronRight, Folder, File, Loader2, Database,
+  ChevronRight, Folder, File, Loader2, Database, Download,
 } from 'lucide-react'
 import { api } from '../api/client'
 import { useUpload } from '../contexts/UploadContext'
@@ -91,6 +91,16 @@ function JobCard({ jobId, jobData, onRetry }) {
             {job.status}
             {job.status === 'RUNNING' && <span className="ml-1 animate-pulse">●</span>}
           </span>
+          {job.status === 'COMPLETED' && (
+            <a
+              href={api.caseFiles.downloadUrl(job.case_id, job.job_id)}
+              download={job.original_filename}
+              className="btn-ghost text-xs px-1.5 py-0.5 text-gray-500 hover:text-brand-accent flex items-center gap-1"
+              title="Download original file"
+            >
+              <Download size={12} />
+            </a>
+          )}
           {canRetry && (
             <button onClick={retryJob} disabled={retrying}
               className="btn-ghost text-xs px-1.5 py-0.5 text-brand-accent hover:text-brand-accenthover flex items-center gap-1"
