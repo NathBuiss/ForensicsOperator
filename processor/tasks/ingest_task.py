@@ -187,6 +187,108 @@ def process_artifact(
             shutil.rmtree(work_dir, ignore_errors=True)
 
 
+@app.task(bind=True, name="ingest.s3_transfer", queue="ingest")
+def s3_transfer(
+    self,
+    job_id: str,
+    case_id: str,
+    s3_config_key: str,
+    s3_key: str,
+    filename: str,
+) -> None:
+    """
+    Stream a file from an external S3 bucket into internal MinIO, then
+    dispatch process_artifact.  Runs entirely in the background — the HTTP
+    request that triggered this returns immediately with a PENDING job ID.
+
+    Job status lifecycle:
+        PENDING  (created by API)
+        UPLOADING  (this task: S3 → MinIO streaming)
+        PENDING  (MinIO ready, waiting for process_artifact to start)
+        RUNNING → COMPLETED / FAILED  (process_artifact)
+    """
+    r = get_redis()
+    update_job_status(r, job_id,
+                      status="UPLOADING",
+                      started_at=datetime.now(timezone.utc).isoformat(),
+                      task_id=self.request.id)
+
+    # ── 1. Load S3 config from Redis ─────────────────────────────────────────
+    cfg_raw = r.get(s3_config_key)
+    if not cfg_raw:
+        update_job_status(r, job_id,
+                          status="FAILED",
+                          error="S3 configuration not found — was it removed from Settings?",
+                          completed_at=datetime.now(timezone.utc).isoformat())
+        return
+
+    cfg = json.loads(cfg_raw)
+
+    # ── 2. Build external S3 client ───────────────────────────────────────────
+    from minio import Minio
+    endpoint = cfg.get("endpoint", "")
+    for proto in ("https://", "http://"):
+        if endpoint.lower().startswith(proto):
+            endpoint = endpoint[len(proto):]
+            break
+
+    try:
+        ext_client = Minio(
+            endpoint,
+            access_key=cfg.get("access_key", ""),
+            secret_key=cfg.get("secret_key", ""),
+            secure=cfg.get("use_ssl", True),
+            region=cfg.get("region") or None,
+        )
+
+        # ── 3. Stream external S3 → internal MinIO (no temp file) ────────────
+        stat      = ext_client.stat_object(cfg["bucket"], s3_key)
+        file_size = stat.size
+        minio_key = f"cases/{case_id}/{job_id}/{filename}"
+
+        logger.info("[%s] S3 transfer: %s/%s → MinIO/%s (%d bytes)",
+                    job_id, cfg["bucket"], s3_key, minio_key, file_size)
+
+        response = None
+        try:
+            response   = ext_client.get_object(cfg["bucket"], s3_key)
+            int_client = get_minio()
+            if not int_client.bucket_exists(MINIO_BUCKET):
+                int_client.make_bucket(MINIO_BUCKET)
+            int_client.put_object(
+                MINIO_BUCKET,
+                minio_key,
+                response,
+                length=file_size,
+                part_size=10 * 1024 * 1024,    # 10 MB multipart chunks
+            )
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                    response.release_conn()
+                except Exception:
+                    pass
+
+        logger.info("[%s] S3 transfer complete — %d bytes written", job_id, file_size)
+
+        # ── 4. Update job and dispatch ingest ─────────────────────────────────
+        update_job_status(r, job_id, minio_object_key=minio_key, status="PENDING")
+        app.send_task(
+            "ingest.process_artifact",
+            args=[job_id, case_id, minio_key, filename],
+            queue="ingest",
+        )
+
+    except Exception as exc:
+        logger.exception("[%s] S3 transfer failed: %s", job_id, exc)
+        update_job_status(r, job_id,
+                          status="FAILED",
+                          error=f"S3 transfer failed: {exc}",
+                          completed_at=datetime.now(timezone.utc).isoformat())
+        raise RuntimeError(str(exc)) from None
+
+
 def _run_plugin_and_index(
     plugin,
     indexer: ESBulkIndexer,

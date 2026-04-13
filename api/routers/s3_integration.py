@@ -25,8 +25,8 @@ from fastapi import APIRouter, HTTPException, Query
 from minio import Minio
 from pydantic import BaseModel
 
-from config import settings, get_redis as _redis
-from services import storage, jobs as job_svc
+from config import get_redis as _redis
+from services import jobs as job_svc
 from services.cases import get_case
 
 logger = logging.getLogger(__name__)
@@ -74,55 +74,6 @@ def _build_client(cfg: dict) -> Minio:
         region=cfg.get("region") or None,
     )
 
-
-def _stream_to_minio(ext_client: Minio, ext_bucket: str, s3_key: str, minio_key: str) -> int:
-    """
-    Stream an object from an external S3 bucket directly into internal MinIO.
-
-    Never buffers the full payload — uses MinIO multipart upload under the hood
-    for objects larger than ~5 MB. Returns the number of bytes transferred.
-    """
-    # HEAD the object to get its size (required by put_object for non-chunked streams)
-    try:
-        stat = ext_client.stat_object(ext_bucket, s3_key)
-        file_size = stat.size
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Could not stat '{s3_key}': {exc}")
-
-    if file_size == 0:
-        raise HTTPException(status_code=400, detail="Remote object is empty.")
-
-    response = None
-    try:
-        response = ext_client.get_object(ext_bucket, s3_key)
-        int_client = storage.get_minio()
-        storage.ensure_bucket()
-        # Stream directly: external S3 → internal MinIO, no RAM accumulation
-        int_client.put_object(
-            settings.MINIO_BUCKET,
-            minio_key,
-            response,
-            length=file_size,
-            part_size=10 * 1024 * 1024,  # 10 MB multipart chunks for large files
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Transfer failed: {exc}")
-    finally:
-        if response is not None:
-            try:
-                response.close()
-                response.release_conn()
-            except Exception:
-                pass
-
-    return file_size
-
-
-def _dispatch(job_id: str, case_id: str, minio_key: str, filename: str) -> None:
-    from services.celery_dispatch import dispatch_ingest
-    dispatch_ingest(job_id, case_id, minio_key, filename)
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -307,38 +258,31 @@ def browse_triage_s3(
 @router.post("/cases/{case_id}/s3-import")
 def import_from_s3(case_id: str, body: S3ImportIn):
     """
-    Stream a file from the case-data-import S3 bucket into a case.
+    Enqueue an async S3 → MinIO → ingest pipeline for a single file.
 
-    Streams directly from external S3 to internal MinIO — no full-file
-    RAM buffer, safe for multi-GB forensic images.
+    Returns immediately with a job ID; the actual transfer and parsing run
+    in a background Celery worker so the client never blocks on large files.
     """
     case = get_case(case_id)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    r = _redis()
-    cfg = _load(r, _S3_IMPORT_KEY)
+    cfg = _load(_redis(), _S3_IMPORT_KEY)
     if not cfg or not cfg.get("endpoint"):
         raise HTTPException(status_code=400, detail="No import S3 configuration saved.")
 
-    filename = body.filename or body.s3_key.rsplit("/", 1)[-1] or "unknown"
-    job_id   = uuid.uuid4().hex
+    filename  = body.filename or body.s3_key.rsplit("/", 1)[-1] or "unknown"
+    job_id    = uuid.uuid4().hex
     minio_key = f"cases/{case_id}/{job_id}/{filename}"
 
-    ext_client = _build_client(cfg)
-    size = _stream_to_minio(ext_client, cfg["bucket"], body.s3_key, minio_key)
-
     job_svc.create_job(job_id, case_id, filename, minio_key, source_zip="")
-    _dispatch(job_id, case_id, minio_key, filename)
+    job_svc.update_job(job_id, s3_config_key=_S3_IMPORT_KEY, s3_source_key=body.s3_key)
 
-    return {
-        "job_id":     job_id,
-        "case_id":    case_id,
-        "filename":   filename,
-        "s3_key":     body.s3_key,
-        "size_bytes": size,
-        "status":     "PENDING",
-    }
+    from services.celery_dispatch import dispatch_s3_transfer
+    dispatch_s3_transfer(job_id, case_id, _S3_IMPORT_KEY, body.s3_key, filename)
+
+    return {"job_id": job_id, "case_id": case_id, "filename": filename,
+            "s3_key": body.s3_key, "status": "PENDING"}
 
 
 # ── Pull: triage S3 → case ───────────────────────────────────────────────────
@@ -368,67 +312,57 @@ def pull_from_triage(case_id: str, body: S3ImportIn):
     job_id    = uuid.uuid4().hex
     minio_key = f"cases/{case_id}/{job_id}/{filename}"
 
-    ext_client = _build_client(cfg)
-    size = _stream_to_minio(ext_client, cfg["bucket"], body.s3_key, minio_key)
-
     job_svc.create_job(job_id, case_id, filename, minio_key, source_zip="")
-    _dispatch(job_id, case_id, minio_key, filename)
+    job_svc.update_job(job_id, s3_config_key=_S3_TRIAGE_KEY, s3_source_key=body.s3_key)
 
-    return {
-        "job_id":     job_id,
-        "case_id":    case_id,
-        "filename":   filename,
-        "s3_key":     body.s3_key,
-        "size_bytes": size,
-        "status":     "PENDING",
-    }
+    from services.celery_dispatch import dispatch_s3_transfer
+    dispatch_s3_transfer(job_id, case_id, _S3_TRIAGE_KEY, body.s3_key, filename)
+
+    return {"job_id": job_id, "case_id": case_id, "filename": filename,
+            "s3_key": body.s3_key, "status": "PENDING"}
 
 
 # ── Batch import helpers ──────────────────────────────────────────────────────
 
-def _batch_transfer(case_id: str, cfg: dict, keys: list[str]) -> dict:
-    """Transfer multiple S3 objects into MinIO and dispatch ingest jobs.
+def _batch_dispatch(case_id: str, cfg_redis_key: str, keys: list[str]) -> dict:
+    """Enqueue S3 transfer tasks for multiple objects and return immediately.
 
-    Streams each object individually — no full-file RAM buffer.
-    Returns {'jobs': [...], 'errors': [...]} so callers can surface partial failures.
+    Creates a job record for each key, stores S3 metadata for retry routing,
+    then dispatches a background Celery task — no blocking I/O in the request.
+    Returns {'jobs': [...], 'errors': [...]} so callers can surface creation failures.
     """
-    ext_client = _build_client(cfg)
+    from services.celery_dispatch import dispatch_s3_transfer
     jobs, errors = [], []
     for s3_key in keys:
         filename  = s3_key.rsplit("/", 1)[-1] or "unknown"
         job_id    = uuid.uuid4().hex
         minio_key = f"cases/{case_id}/{job_id}/{filename}"
         try:
-            size = _stream_to_minio(ext_client, cfg["bucket"], s3_key, minio_key)
             job_svc.create_job(job_id, case_id, filename, minio_key, source_zip="")
-            _dispatch(job_id, case_id, minio_key, filename)
-            jobs.append({
-                "job_id":     job_id,
-                "filename":   filename,
-                "s3_key":     s3_key,
-                "size_bytes": size,
-                "status":     "PENDING",
-            })
+            job_svc.update_job(job_id, s3_config_key=cfg_redis_key, s3_source_key=s3_key)
+            dispatch_s3_transfer(job_id, case_id, cfg_redis_key, s3_key, filename)
+            jobs.append({"job_id": job_id, "filename": filename,
+                         "s3_key": s3_key, "status": "PENDING"})
         except Exception as exc:
-            logger.warning("Batch import failed for %s: %s", s3_key, exc)
+            logger.warning("Batch dispatch failed for %s: %s", s3_key, exc)
             errors.append({"s3_key": s3_key, "error": str(exc)})
     return {"jobs": jobs, "errors": errors}
 
 
 @router.post("/cases/{case_id}/s3-import-batch")
 def import_batch_from_s3(case_id: str, body: S3BatchImportIn):
-    """Stream multiple objects from the import S3 bucket into a case."""
+    """Enqueue async transfer tasks for multiple objects from the import S3 bucket."""
     if not get_case(case_id):
         raise HTTPException(status_code=404, detail="Case not found")
     cfg = _load(_redis(), _S3_IMPORT_KEY)
     if not cfg or not cfg.get("endpoint"):
         raise HTTPException(status_code=400, detail="No import S3 configuration saved.")
-    return _batch_transfer(case_id, cfg, body.keys)
+    return _batch_dispatch(case_id, _S3_IMPORT_KEY, body.keys)
 
 
 @router.post("/cases/{case_id}/s3-triage-pull-batch")
 def pull_batch_from_triage(case_id: str, body: S3BatchImportIn):
-    """Pull multiple objects from the triage S3 bucket into a case."""
+    """Enqueue async transfer tasks for multiple objects from the triage S3 bucket."""
     if not get_case(case_id):
         raise HTTPException(status_code=404, detail="Case not found")
     cfg = _load(_redis(), _S3_TRIAGE_KEY)
@@ -437,7 +371,7 @@ def pull_batch_from_triage(case_id: str, body: S3BatchImportIn):
             status_code=400,
             detail="No triage S3 configuration saved. Configure it in Settings → Triage Upload Storage.",
         )
-    return _batch_transfer(case_id, cfg, body.keys)
+    return _batch_dispatch(case_id, _S3_TRIAGE_KEY, body.keys)
 
 
 # ── Scaleway region helper ─────────────────────────────────────────────────────

@@ -83,6 +83,18 @@ def dispatch_ingest(job_id: str, case_id: str, minio_key: str, filename: str) ->
           [job_id, case_id, minio_key, filename])
 
 
+def dispatch_s3_transfer(
+    job_id: str,
+    case_id: str,
+    s3_config_key: str,
+    s3_key: str,
+    filename: str,
+) -> None:
+    """Dispatch the S3→MinIO streaming task that runs fully in the background."""
+    _push("ingest", "ingest.s3_transfer", job_id,
+          [job_id, case_id, s3_config_key, s3_key, filename])
+
+
 def dispatch_module(run_id: str, case_id: str, module_id: str,
                     source_files: list, params: dict) -> None:
     _push("modules", "module.run", run_id,

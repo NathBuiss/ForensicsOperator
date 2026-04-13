@@ -64,17 +64,25 @@ def retry_job(job_id: str):
             detail=f"Only FAILED or PENDING jobs can be retried (current status: {job.get('status')})",
         )
 
-    case_id = job["case_id"]
-    minio_object_key = job["minio_object_key"]
+    case_id           = job["case_id"]
+    minio_object_key  = job["minio_object_key"]
     original_filename = job["original_filename"]
+    s3_config_key     = job.get("s3_config_key", "")
+    s3_source_key     = job.get("s3_source_key", "")
 
     # Reset job state in Redis
     job_svc.reset_job_for_retry(job_id)
 
-    # Re-dispatch the Celery ingest task
+    # Re-dispatch — S3-originated jobs restart from the transfer phase so
+    # the full S3 → MinIO → ingest pipeline runs again (handles partial
+    # transfers, overwritten objects, etc.).
     try:
-        from services.celery_dispatch import dispatch_ingest
-        dispatch_ingest(job_id, case_id, minio_object_key, original_filename)
+        if s3_source_key and s3_config_key:
+            from services.celery_dispatch import dispatch_s3_transfer
+            dispatch_s3_transfer(job_id, case_id, s3_config_key, s3_source_key, original_filename)
+        else:
+            from services.celery_dispatch import dispatch_ingest
+            dispatch_ingest(job_id, case_id, minio_object_key, original_filename)
     except Exception as exc:
         logger.exception("Failed to re-dispatch Celery task for job %s", job_id)
         raise HTTPException(
