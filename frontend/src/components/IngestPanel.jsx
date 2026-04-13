@@ -10,7 +10,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Upload, Cloud, X, RefreshCw, AlertTriangle,
-  ChevronRight, Folder, File, Loader2, Database, Download, Trash2,
+  ChevronRight, ChevronDown, Folder, File, Loader2, Database, Download, Trash2,
 } from 'lucide-react'
 import { api } from '../api/client'
 import { useUpload } from '../contexts/UploadContext'
@@ -55,13 +55,59 @@ function useElapsed(iso) {
   return e
 }
 
+// 1-second resolution timer — used for the RUNNING elapsed display
+function useElapsedFine(iso) {
+  const [e, setE] = useState(0)
+  useEffect(() => {
+    if (!iso) return
+    const tick = () => setE(Date.now() - new Date(iso).getTime())
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [iso])
+  return e
+}
+
+function fmtElapsed(ms) {
+  if (ms <= 0) return '0s'
+  const s = Math.floor(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ${s % 60}s`
+  return `${Math.floor(m / 60)}h ${m % 60}m`
+}
+
 // ── JobCard ───────────────────────────────────────────────────────────────────
 
 function JobCard({ jobId, jobData, onRetry, onDelete }) {
-  const [retrying,  setRetrying]  = useState(false)
-  const [deleting,  setDeleting]  = useState(false)
-  const elapsed = useElapsed(jobData?.created_at)
+  const [retrying,     setRetrying]     = useState(false)
+  const [deleting,     setDeleting]     = useState(false)
+  const [expanded,     setExpanded]     = useState(false)
+  const [eventsPerSec, setEventsPerSec] = useState(null)
+  const lastSnapRef = useRef(null)
+
+  const elapsed    = useElapsed(jobData?.created_at)
+  const runElapsed = useElapsedFine(jobData?.started_at)
   const job = jobData
+
+  // Compute events/s from successive polling values (poll interval ≈ 3 s)
+  useEffect(() => {
+    if (!job || job.status !== 'RUNNING') {
+      lastSnapRef.current = null
+      setEventsPerSec(null)
+      return
+    }
+    const now    = Date.now()
+    const events = parseInt(job.events_indexed || 0)
+    const snap   = lastSnapRef.current
+    if (snap) {
+      const dt = (now - snap.time) / 1000
+      if (dt > 0.5 && events >= snap.events) {
+        setEventsPerSec(Math.round((events - snap.events) / dt))
+      }
+    }
+    lastSnapRef.current = { events, time: now }
+  }, [job?.events_indexed, job?.status])  // eslint-disable-line
 
   async function retryJob() {
     setRetrying(true)
@@ -93,24 +139,27 @@ function JobCard({ jobId, jobData, onRetry, onDelete }) {
     SKIPPED:   'text-gray-400',
   }
 
-  const canRetry = job.status === 'FAILED' || (job.status === 'PENDING' && elapsed > STUCK_MS)
+  const canRetry    = job.status === 'FAILED' || (job.status === 'PENDING' && elapsed > STUCK_MS)
+  const eventsCount = parseInt(job.events_indexed || 0)
+  const statsEntries = job.plugin_stats
+    ? Object.entries(job.plugin_stats).filter(([, v]) => v != null && v !== '' && v !== 0 && v !== '0')
+    : []
 
   return (
-    <div className={`card p-3 ${job.status === 'FAILED' ? 'border-red-200' : ''}`}>
-      <div className="flex items-center justify-between mb-1 gap-2">
-        <span className="text-xs text-brand-text font-medium truncate">{job.original_filename}</span>
-        <div className="flex items-center gap-2 flex-shrink-0">
+    <div className={`card p-3 ${job.status === 'FAILED' ? 'border-red-200' : job.status === 'RUNNING' ? 'border-brand-accent/30' : ''}`}>
+
+      {/* ── Header row ── */}
+      <div className="flex items-start justify-between mb-1 gap-2">
+        <span className="text-xs text-brand-text font-medium break-all leading-snug">{job.original_filename}</span>
+        <div className="flex items-center gap-1.5 flex-shrink-0">
           <span className={`text-xs font-mono ${STATUS[job.status] || 'text-gray-500'}`}>
             {job.status}
             {job.status === 'RUNNING' && <span className="ml-1 animate-pulse">●</span>}
           </span>
           {job.status === 'COMPLETED' && (
-            <a
-              href={api.caseFiles.downloadUrl(job.case_id, job.job_id)}
-              download={job.original_filename}
+            <a href={api.caseFiles.downloadUrl(job.case_id, job.job_id)} download={job.original_filename}
               className="btn-ghost text-xs px-1.5 py-0.5 text-gray-500 hover:text-brand-accent flex items-center gap-1"
-              title="Download original file"
-            >
+              title="Download original file">
               <Download size={12} />
             </a>
           )}
@@ -126,53 +175,151 @@ function JobCard({ jobId, jobData, onRetry, onDelete }) {
             <button onClick={deleteJob} disabled={deleting}
               className="btn-ghost text-xs px-1.5 py-0.5 text-red-400 hover:text-red-600 flex items-center gap-1"
               title="Delete this job and all its indexed events">
-              {deleting
-                ? <Loader2 size={12} className="animate-spin" />
-                : <Trash2 size={12} />}
+              {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
             </button>
           )}
         </div>
       </div>
 
-      {job.plugin_used && (
-        <p className="text-xs text-gray-500">Plugin: <code className="font-mono">{job.plugin_used}</code></p>
-      )}
+      {/* ── Plugin + size metadata ── */}
+      <div className="flex items-center gap-3 flex-wrap mb-1">
+        {job.plugin_used && (
+          <span className="text-[10px] text-gray-400">
+            Plugin: <code className="font-mono text-gray-600">{job.plugin_used}</code>
+          </span>
+        )}
+        {job.size_bytes > 0 && (
+          <span className="text-[10px] text-gray-400">{fmtSize(job.size_bytes)}</span>
+        )}
+        {job.started_at && (
+          <span className="text-[10px] text-gray-400">
+            Started {new Date(job.started_at).toLocaleTimeString()}
+          </span>
+        )}
+      </div>
 
+      {/* ── UPLOADING ── */}
       {job.status === 'UPLOADING' && (
         <div className="mt-1">
           <div className="h-1 bg-gray-200 rounded overflow-hidden">
             <div className="h-full bg-sky-500 animate-pulse w-2/3 rounded" />
           </div>
-          <p className="text-xs text-sky-500 mt-0.5">Uploading to storage…</p>
-        </div>
-      )}
-      {job.status === 'RUNNING' && (
-        <div className="mt-1">
-          <div className="h-1 bg-gray-200 rounded overflow-hidden">
-            <div className="h-full bg-brand-accent animate-pulse w-1/3 rounded" />
-          </div>
-          <p className="text-xs text-gray-500 mt-0.5">
-            {parseInt(job.events_indexed || 0).toLocaleString()} events indexed
+          <p className="text-[10px] text-sky-500 mt-0.5 flex items-center gap-1">
+            <Loader2 size={9} className="animate-spin flex-shrink-0" />
+            Transferring to storage
+            {job.size_bytes > 0 && ` — ${fmtSize(job.size_bytes)}`}
+            {elapsed > 60_000 && ` — ${Math.floor(elapsed / 60_000)}m elapsed`}
           </p>
         </div>
       )}
+
+      {/* ── RUNNING — rich progress panel ── */}
+      {job.status === 'RUNNING' && (
+        <div className="mt-1.5 space-y-1.5">
+          {/* Progress bar */}
+          <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+            <div className="h-full bg-brand-accent rounded-full animate-pulse" style={{ width: '40%' }} />
+          </div>
+
+          {/* Key metrics row */}
+          <div className="flex items-center gap-3 flex-wrap">
+            <span className="text-sm font-semibold text-brand-text tabular-nums">
+              {eventsCount.toLocaleString()}
+            </span>
+            <span className="text-[10px] text-gray-500">events indexed</span>
+            {eventsPerSec !== null && (
+              <span className={`text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded ${
+                eventsPerSec > 0 ? 'bg-green-50 text-green-700' : 'bg-gray-50 text-gray-500'
+              }`}>
+                ↑ {eventsPerSec.toLocaleString()} ev/s
+              </span>
+            )}
+            {runElapsed > 0 && (
+              <span className="text-[10px] text-gray-400 ml-auto font-mono">
+                {fmtElapsed(runElapsed)}
+              </span>
+            )}
+          </div>
+
+          {/* Plugin stats (if any already available) */}
+          {statsEntries.length > 0 && (
+            <div className="flex gap-3 flex-wrap">
+              {statsEntries.map(([k, v]) => (
+                <span key={k} className="text-[10px] text-gray-400">
+                  {k.replace(/_/g, ' ')}: <span className="text-gray-600 font-mono">{String(v)}</span>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── COMPLETED ── */}
       {job.status === 'COMPLETED' && (
-        <p className="text-xs text-green-600 mt-0.5">
-          {parseInt(job.events_indexed || 0).toLocaleString()} events indexed
-          {job.plugin_stats?.records_skipped > 0 && ` (${job.plugin_stats.records_skipped} skipped)`}
+        <div className="mt-0.5">
+          <p className="text-xs text-green-600">
+            {eventsCount.toLocaleString()} events indexed
+            {job.plugin_stats?.records_skipped > 0 && ` · ${job.plugin_stats.records_skipped} skipped`}
+            {job.completed_at && job.started_at && (
+              <span className="text-gray-400 text-[10px] ml-1.5">
+                in {fmtElapsed(new Date(job.completed_at) - new Date(job.started_at))}
+              </span>
+            )}
+          </p>
+        </div>
+      )}
+
+      {/* ── FAILED / SKIPPED ── */}
+      {job.status === 'FAILED'  && <p className="text-xs text-red-600  mt-0.5 break-all">{job.error}</p>}
+      {job.status === 'SKIPPED' && <p className="text-xs text-gray-400 mt-0.5 break-all">{job.error}</p>}
+
+      {/* ── Stuck warnings ── */}
+      {job.status === 'UPLOADING' && elapsed > STUCK_MS && (
+        <p className="text-[10px] text-sky-400 mt-0.5 flex items-center gap-1">
+          <AlertTriangle size={10} />
+          Large file — still uploading ({Math.floor(elapsed / 60_000)} min). This is normal for files over a few GB.
         </p>
       )}
-      {job.status === 'FAILED' && (
-        <p className="text-xs text-red-600 mt-0.5 break-all">{job.error}</p>
-      )}
-      {job.status === 'SKIPPED' && (
-        <p className="text-xs text-gray-400 mt-0.5 break-all">{job.error}</p>
-      )}
-      {(job.status === 'UPLOADING' || job.status === 'PENDING') && elapsed > STUCK_MS && (
+      {job.status === 'PENDING' && elapsed > STUCK_MS && (
         <p className="text-[10px] text-amber-500 mt-0.5 flex items-center gap-1">
           <AlertTriangle size={10} />
           In queue {Math.floor(elapsed / 60_000)} min — worker will pick it up when free
         </p>
+      )}
+
+      {/* ── Expandable details ── */}
+      <button
+        onClick={() => setExpanded(p => !p)}
+        className="mt-1.5 flex items-center gap-0.5 text-[10px] text-gray-400 hover:text-gray-600 transition-colors"
+      >
+        <ChevronDown size={10} className={`transition-transform ${expanded ? 'rotate-180' : ''}`} />
+        {expanded ? 'Less' : 'Details'}
+      </button>
+
+      {expanded && (
+        <div className="mt-1.5 pt-1.5 border-t border-gray-100 space-y-0.5">
+          {[
+            ['Job ID',       job.job_id],
+            ['Created',      job.created_at  ? new Date(job.created_at).toLocaleString()  : null],
+            ['Started',      job.started_at  ? new Date(job.started_at).toLocaleString()  : null],
+            ['Completed',    job.completed_at? new Date(job.completed_at).toLocaleString(): null],
+            ['File size',    job.size_bytes > 0 ? fmtSize(job.size_bytes) : null],
+            ['Source',       job.source_zip || null],
+            ['Task ID',      job.task_id     || null],
+            ['Storage key',  job.minio_object_key ? '…/' + job.minio_object_key.split('/').pop() : null],
+          ].filter(([, v]) => v).map(([k, v]) => (
+            <div key={k} className="flex gap-2 text-[10px]">
+              <span className="text-gray-400 w-20 flex-shrink-0">{k}</span>
+              <span className="font-mono text-gray-600 break-all">{v}</span>
+            </div>
+          ))}
+          {statsEntries.map(([k, v]) => (
+            <div key={k} className="flex gap-2 text-[10px]">
+              <span className="text-gray-400 w-20 flex-shrink-0">{k.replace(/_/g, ' ')}</span>
+              <span className="font-mono text-gray-600">{String(v)}</span>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   )
@@ -181,10 +328,12 @@ function JobCard({ jobId, jobData, onRetry, onDelete }) {
 // ── Upload tab ────────────────────────────────────────────────────────────────
 
 function UploadTab({ caseId, onJobsAdded }) {
-  const [dragging,   setDragging]   = useState(false)
-  const [uploading,  setUploading]  = useState(false)
-  const [uploadPct,  setUploadPct]  = useState(0)
-  const [error,      setError]      = useState('')
+  const [dragging,     setDragging]     = useState(false)
+  const [uploading,    setUploading]    = useState(false)
+  const [uploadPct,    setUploadPct]    = useState(0)
+  const [uploadSent,   setUploadSent]   = useState(0)   // bytes sent to server so far
+  const [uploadTotal,  setUploadTotal]  = useState(0)   // total bytes to send
+  const [error,        setError]        = useState('')
   const inputRef  = useRef()
   const folderRef = useRef()
   const { startUpload, updateUpload, finishUpload } = useUpload()
@@ -202,6 +351,8 @@ function UploadTab({ caseId, onJobsAdded }) {
     startUpload(uploadId, label)
 
     const totalBytes = Array.from(files).reduce((s, f) => s + f.size, 0)
+    setUploadTotal(totalBytes)
+    setUploadSent(0)
     let sentBytes = 0
     const allJobs = []
 
@@ -232,6 +383,7 @@ function UploadTab({ caseId, onJobsAdded }) {
           sentBytes += slice.size
           const pct  = Math.round((sentBytes / totalBytes) * 100)
           setUploadPct(pct)
+          setUploadSent(sentBytes)
           updateUpload(uploadId, pct)
 
           if (i === totalChunks - 1) {
@@ -262,7 +414,7 @@ function UploadTab({ caseId, onJobsAdded }) {
       >
         <p className="text-2xl mb-2">📂</p>
         <p className="text-sm text-gray-500">
-          {uploading ? `Transferring… ${uploadPct}%` : 'Drop files here or click to browse'}
+          {uploading ? `Uploading… ${uploadPct}%` : 'Drop files here or click to browse'}
         </p>
         {uploading && (
           <div className="mt-2 w-full max-w-xs mx-auto">
@@ -270,8 +422,11 @@ function UploadTab({ caseId, onJobsAdded }) {
               <div className="h-full bg-sky-500 rounded transition-all duration-300"
                 style={{ width: `${uploadPct}%` }} />
             </div>
-            <p className="text-[10px] text-sky-500 mt-1">
-              Sending to server — jobs appear when transfer completes
+            <p className="text-[10px] text-sky-600 mt-1 font-mono tabular-nums">
+              {fmtSize(uploadSent)} / {fmtSize(uploadTotal)} ({uploadPct}%)
+            </p>
+            <p className="text-[10px] text-gray-400 mt-0.5">
+              Jobs appear in the list below when transfer completes
             </p>
           </div>
         )}
