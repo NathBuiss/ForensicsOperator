@@ -5,13 +5,14 @@ import {
   CheckCircle, Clock, Database, Loader2, Shield,
   Cpu, RefreshCw, Plus, Download, Play, Terminal,
   AlertCircle, ChevronDown, FileCode, ExternalLink,
-  Flag, Filter, Sparkles,
+  Flag, Filter, Sparkles, FileText,
 } from 'lucide-react'
 import { api } from '../api/client'
 import Timeline from './Timeline'
 import Ingest from './Ingest'
 import CollectorModal from '../components/CollectorModal'
 import AlertRules from './AlertRules'
+import CaseNotes from './CaseNotes'
 
 // ── Artifact badge colours ────────────────────────────────────────────────────
 const ARTIFACT_BADGE = {
@@ -1532,6 +1533,7 @@ export default function CaseTimeline() {
   const [showModuleRuns, setShowModuleRuns] = useState(false)
   const [showCollector, setShowCollector]   = useState(false)
   const [showAlertRules, setShowAlertRules] = useState(false)
+  const [showNotes, setShowNotes]           = useState(false)
 
   const loadCase = useCallback(() => {
     api.cases.get(caseId)
@@ -1622,6 +1624,14 @@ export default function CaseTimeline() {
           </button>
 
           <button
+            onClick={() => setShowNotes(v => !v)}
+            className={`btn-outline ${showNotes ? 'bg-brand-accentlight border-brand-accent text-brand-accent' : ''}`}
+          >
+            <FileText size={14} />
+            Notes
+          </button>
+
+          <button
             onClick={() => setShowAlertRules(v => !v)}
             className={`btn-outline ${showAlertRules ? 'bg-yellow-50 border-yellow-300 text-yellow-700' : ''}`}
           >
@@ -1673,6 +1683,28 @@ export default function CaseTimeline() {
         />
       )}
 
+      {showNotes && (
+        <div className="panel-backdrop" onClick={() => setShowNotes(false)}>
+          <div
+            className="absolute right-0 top-0 h-full w-[560px] bg-white border-l border-gray-200 flex flex-col"
+            style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.10)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 flex-shrink-0">
+              <div className="flex items-center gap-2">
+                <FileText size={16} className="text-brand-accent" />
+                <span className="font-semibold text-brand-text">Investigator Notes</span>
+              </div>
+              <button onClick={() => setShowNotes(false)} className="btn-ghost p-1.5 rounded-lg">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              <CaseNotes caseId={caseId} />
+            </div>
+          </div>
+        </div>
+      )}
 
       {showAlertRules && (
         <div className="panel-backdrop" onClick={() => setShowAlertRules(false)}>
