@@ -4,11 +4,12 @@ import {
   LayoutDashboard, Puzzle, FolderOpen,
   Plus, X, ChevronRight, Bell, Sun, Moon, Cpu, PackageOpen, Layers,
   Code2, BookOpen, LogOut, UserCircle, Settings2, Stars,
-  Activity, Shield, Users, FlaskConical,
+  Activity, Shield, Users, FlaskConical, FileCode, Loader2,
 } from 'lucide-react'
 import { api } from '../../api/client'
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts'
 import KeyboardShortcutsModal from '../KeyboardShortcutsModal'
+import { useUpload } from '../../contexts/UploadContext'
 
 const STATUS_DOT = {
   active:   'status-dot-active',
@@ -47,6 +48,11 @@ export default function Layout({ user, onLogout }) {
   const [theme, cycleTheme]            = useTheme()
   const [showShortcuts, setShowShortcuts] = useState(false)
   const navigate = useNavigate()
+  const { uploads } = useUpload()
+  const uploadCount = Object.keys(uploads).length
+  const avgPct = uploadCount > 0
+    ? Math.round(Object.values(uploads).reduce((s, u) => s + (u.pct || 0), 0) / uploadCount)
+    : 0
 
   useKeyboardShortcuts([
     { key: 'g d', handler: () => navigate('/') },
@@ -138,7 +144,13 @@ export default function Layout({ user, onLogout }) {
           <NavLink to="/alert-rules" className={({ isActive }) =>
             isActive ? 'nav-item-active' : 'nav-item-inactive'}>
             <Bell size={15} />
-            Alert Rules
+            Detection Rules
+          </NavLink>
+
+          <NavLink to="/yara-rules" className={({ isActive }) =>
+            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
+            <FileCode size={15} />
+            YARA Rules
           </NavLink>
 
           <NavLink to="/modules" className={({ isActive }) =>
@@ -273,6 +285,28 @@ export default function Layout({ user, onLogout }) {
             </div>
           </div>
         </nav>
+
+        {/* ── Global upload indicator ──────────────────────────────────── */}
+        {uploadCount > 0 && (
+          <div className="px-3 py-2 border-t border-white/10">
+            <div className="flex items-center gap-2 mb-1">
+              <Loader2 size={11} className="animate-spin text-brand-accent flex-shrink-0" />
+              <span className="text-[11px] text-white/70 truncate">
+                {uploadCount === 1
+                  ? `Uploading ${Object.values(uploads)[0]?.label ?? 'file'}…`
+                  : `${uploadCount} uploads in progress…`
+                }
+              </span>
+              <span className="text-[10px] text-white/40 ml-auto flex-shrink-0">{avgPct}%</span>
+            </div>
+            <div className="h-0.5 bg-white/10 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-brand-accent transition-all duration-300 rounded-full"
+                style={{ width: `${avgPct}%` }}
+              />
+            </div>
+          </div>
+        )}
 
         {/* ── User / logout footer ───────────────────────────────────────── */}
         {user && (

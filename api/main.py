@@ -1,19 +1,27 @@
 """TraceX API — FastAPI entrypoint."""
 import asyncio
+import collections
 import logging
+import time
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
+# ── API request telemetry ─────────────────────────────────────────────────────
+# Rolling window of (duration_ms, status_code) tuples for the last 2000 requests.
+# Stored at module level so middleware and the metrics endpoint share it directly.
+_REQUEST_WINDOW: collections.deque = collections.deque(maxlen=2000)
+_REQUEST_TOTALS = {"count": 0, "errors": 0}   # monotonic counters, never reset
+
 from config import settings
 
 from routers import (
     cases, ingest, jobs, search, plugins, health,
-    saved_searches, alert_rules, export, global_alert_rules,
+    saved_searches, notes, alert_rules, export, global_alert_rules,
     modules, collector, editor, llm_config, s3_integration, metrics,
-    cti,
+    cti, yara_rules, sigma_sync, case_files,
 )
 from routers import auth as auth_router
 from auth.dependencies import get_current_user, require_admin, require_analyst_or_admin
@@ -83,6 +91,17 @@ async def _unhandled_exception(request: Request, exc: Exception) -> JSONResponse
 
 # ── Middleware ─────────────────────────────────────────────────────────────────
 
+@app.middleware("http")
+async def _telemetry_middleware(request: Request, call_next):
+    t0  = time.perf_counter()
+    res = await call_next(request)
+    ms  = round((time.perf_counter() - t0) * 1000, 1)
+    _REQUEST_WINDOW.append((ms, res.status_code))
+    _REQUEST_TOTALS["count"]  += 1
+    if res.status_code >= 500:
+        _REQUEST_TOTALS["errors"] += 1
+    return res
+
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 app.add_middleware(
@@ -95,10 +114,25 @@ app.add_middleware(
 
 # ── Startup hook ─────────────────────────────────────────────────────────────
 
+async def _metrics_background_loop():
+    """Collect and persist a slim metrics snapshot every 30 s, forever."""
+    import asyncio as _aio
+    # Small initial delay so services are fully up before first scrape
+    await _aio.sleep(10)
+    while True:
+        try:
+            # Run the blocking collection in a thread so the event loop stays free
+            await _aio.get_event_loop().run_in_executor(None, metrics.store_metrics_snapshot)
+        except Exception:
+            pass
+        await _aio.sleep(30)
+
+
 @app.on_event("startup")
 async def _on_startup():
     _bootstrap_admin()
     asyncio.create_task(cti.start_cti_scheduler())
+    asyncio.create_task(_metrics_background_loop())
 
 
 # ── Auth dependencies for route protection ────────────────────────────────────
@@ -121,12 +155,15 @@ app.include_router(jobs.router,               prefix="/api/v1", dependencies=_an
 app.include_router(search.router,             prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(plugins.router,            prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(saved_searches.router,     prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(notes.router,              prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(alert_rules.router,        prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(export.router,             prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(modules.router,            prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(collector.router,          prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(editor.router,             prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(cti.router,               prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(yara_rules.router,        prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(case_files.router,        prefix="/api/v1", dependencies=_analyst_or_admin)
 
 # Protected — analyst or admin (alert rules used by analysts too)
 app.include_router(global_alert_rules.router, prefix="/api/v1", dependencies=_analyst_or_admin)
@@ -137,3 +174,4 @@ app.include_router(global_alert_rules.router, prefix="/api/v1", dependencies=_an
 app.include_router(llm_config.router,         prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(s3_integration.router,     prefix="/api/v1", dependencies=_admin_only)
 app.include_router(metrics.router,            prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(sigma_sync.router,         prefix="/api/v1", dependencies=_admin_only)

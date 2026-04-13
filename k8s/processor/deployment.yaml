@@ -5,6 +5,11 @@ metadata:
   namespace: __FO_NAMESPACE__
 spec:
   replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0        # never schedule extra pods during rollout (avoids Pending on resource-constrained nodes)
+      maxUnavailable: 1  # terminate one old pod first, then start the replacement
   selector:
     matchLabels:
       app: processor
@@ -24,8 +29,8 @@ spec:
             - sh
             - -c
             - |
-              cp -rn /app/plugins_builtin/. /app/plugins/ 2>/dev/null || true
-              echo "Built-in plugins seeded (no-overwrite): $(ls /app/plugins)"
+              cp -r /app/plugins_builtin/. /app/plugins/ 2>/dev/null || true
+              echo "Built-in plugins seeded: $(ls /app/plugins)"
           volumeMounts:
             - name: plugins-volume
               mountPath: /app/plugins
@@ -52,7 +57,7 @@ spec:
             - name: MINIO_BUCKET
               value: "forensics-cases"
             - name: BULK_SIZE
-              value: "500"
+              value: "1000"
             # Worker concurrency — number of parallel Celery processes per pod.
             # Increase to match the CPU limit above (1 process per vCPU is a good rule).
             # Change here + redeploy; no image rebuild needed.
@@ -88,12 +93,17 @@ spec:
           volumeMounts:
             - name: plugins-volume
               mountPath: /app/plugins
+            - name: uploads-volume
+              mountPath: /app/uploads
             - name: tmp-storage
               mountPath: /tmp
       volumes:
         - name: plugins-volume
           persistentVolumeClaim:
             claimName: plugins-pvc
+        - name: uploads-volume
+          persistentVolumeClaim:
+            claimName: uploads-pvc
         - name: tmp-storage
           emptyDir:
-            sizeLimit: 10Gi
+            sizeLimit: 20Gi

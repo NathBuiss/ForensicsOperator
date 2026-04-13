@@ -1,0 +1,71 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# TraceX — Traefik reverse proxy override
+#
+# Use this if you already run Traefik on your Docker server and want TraceX
+# to appear at a hostname (e.g. tracex.myserver.com) with automatic HTTPS via
+# Let's Encrypt, instead of binding a host port.
+#
+# SETUP
+# ─────
+# 1. Make sure Traefik is already running and has a Docker network it listens on.
+#    If you don't have one yet:
+#        docker network create traefik_proxy
+#
+# 2. Set TRACEX_HOST in .env (or export it):
+#        TRACEX_HOST=tracex.myserver.com
+#
+# 3. Set TRAEFIK_NETWORK in .env if your network is not named "traefik_proxy":
+#        TRAEFIK_NETWORK=web
+#
+# 4. Start TraceX with both compose files:
+#        docker compose -f docker-compose.prod.yml -f docker-compose.traefik.yml \
+#          --env-file .env up -d --build
+#
+# Or add to foctl — edit the deploy_docker() function and change:
+#    ${dc} -f "${COMPOSE_FILE}" ...
+# to:
+#    ${dc} -f "${COMPOSE_FILE}" -f docker-compose.traefik.yml ...
+#
+# HOW IT WORKS
+# ────────────
+# This override does two things to the 'proxy' service:
+#   - Removes the host port binding (no more port 80 clash)
+#   - Adds Traefik labels so Traefik discovers it and routes the hostname to it
+#   - Attaches it to the external Traefik Docker network
+# ══════════════════════════════════════════════════════════════════════════════
+
+services:
+  proxy:
+    # Remove the host port — Traefik handles routing, no direct port binding needed
+    ports: []
+
+    labels:
+      # Tell Traefik to discover this container
+      - "traefik.enable=true"
+
+      # HTTP router → redirect all HTTP to HTTPS
+      - "traefik.http.routers.tracex-http.rule=Host(`${TRACEX_HOST:-tracex.local}`)"
+      - "traefik.http.routers.tracex-http.entrypoints=web"
+      - "traefik.http.routers.tracex-http.middlewares=tracex-https-redirect"
+      - "traefik.http.middlewares.tracex-https-redirect.redirectscheme.scheme=https"
+
+      # HTTPS router with Let's Encrypt cert
+      - "traefik.http.routers.tracex.rule=Host(`${TRACEX_HOST:-tracex.local}`)"
+      - "traefik.http.routers.tracex.entrypoints=websecure"
+      - "traefik.http.routers.tracex.tls=true"
+      - "traefik.http.routers.tracex.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}"
+
+      # Tell Traefik which internal port the proxy container listens on
+      - "traefik.http.services.tracex.loadbalancer.server.port=80"
+
+      # Which Docker network Traefik should use to reach this container
+      - "traefik.docker.network=${TRAEFIK_NETWORK:-traefik_proxy}"
+
+    networks:
+      - default         # stays connected to all other TraceX containers
+      - traefik_proxy   # also on the Traefik network so Traefik can reach it
+
+networks:
+  traefik_proxy:
+    external: true
+    name: ${TRAEFIK_NETWORK:-traefik_proxy}

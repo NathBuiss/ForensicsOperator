@@ -24,9 +24,12 @@ import json
 import logging
 import os
 import re
+import importlib.util
 import shutil
 import struct
 import subprocess
+import sys
+import sysconfig
 import tempfile
 import time
 import urllib.error
@@ -306,7 +309,13 @@ def run_module(
         }
         runner = RUNNERS.get(module_id)
 
-        if runner is not None:
+        if module_id in ("cti_match", "browser_report"):
+            # Special runners: query ES events directly — need case_id
+            if module_id == "cti_match":
+                results = _run_cti_match(run_id, case_id, work_dir, sources_dir, params, tool_meta)
+            else:
+                results = _run_browser_report(run_id, case_id, work_dir, sources_dir, params, tool_meta)
+        elif runner is not None:
             # Built-in module — run directly in this process
             results = runner(run_id, work_dir, sources_dir, params, tool_meta)
         else:
@@ -940,17 +949,44 @@ def _run_strings(run_id: str, work_dir: Path, sources_dir: Path, params: dict, t
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _run_hindsight(run_id: str, work_dir: Path, sources_dir: Path, params: dict, tool_meta: dict) -> list[dict]:
-    hindsight_bin = shutil.which("hindsight") or shutil.which("hindsight.py")
-    if not hindsight_bin:
-        raise RuntimeError(
-            "hindsight binary not found. Ensure pyhindsight is installed in the processor image."
+    # pyhindsight installs a console script (hindsight.py) but has no __main__.py,
+    # so `python -m hindsight` does NOT work.  Find the script file and invoke it
+    # as `sys.executable script_path` so the correct interpreter is used regardless
+    # of the shebang or PATH.
+    hindsight_script = None
+
+    # 1. Canonical pip scripts directory (most reliable — avoids PATH/shebang issues)
+    scripts_dir = sysconfig.get_path("scripts")
+    if scripts_dir:
+        for name in ("hindsight.py", "hindsight"):
+            candidate = os.path.join(scripts_dir, name)
+            if os.path.isfile(candidate):
+                hindsight_script = candidate
+                break
+
+    # 2. PATH fallback
+    if not hindsight_script:
+        for name in ("hindsight.py", "hindsight"):
+            found = shutil.which(name)
+            if found:
+                hindsight_script = found
+                break
+
+    if not hindsight_script:
+        installed = importlib.util.find_spec("hindsight") is not None
+        msg = (
+            f"pyhindsight is installed but hindsight.py was not found in {scripts_dir}. "
+            "Try: pip3 install --force-reinstall pyhindsight"
+            if installed else
+            "hindsight not found. Ensure pyhindsight is installed in the processor image."
         )
+        raise RuntimeError(msg)
 
     output_dir = work_dir / "hindsight_output"
     output_dir.mkdir()
     output_prefix = str(output_dir / "results")
 
-    cmd = [hindsight_bin, "-i", str(sources_dir), "-o", output_prefix, "-f", "json"]
+    cmd = [sys.executable, hindsight_script, "-i", str(sources_dir), "-o", output_prefix, "-f", "jsonl"]
     logger.info("[%s] Running: %s", run_id, " ".join(cmd))
 
     try:
@@ -959,44 +995,37 @@ def _run_hindsight(run_id: str, work_dir: Path, sources_dir: Path, params: dict,
         raise RuntimeError("Hindsight timed out after 10 minutes")
 
     # Hindsight may exit non-zero but still produce output
-    json_files = list(output_dir.glob("*.json"))
-    if not json_files:
+    jsonl_files = list(output_dir.glob("*.jsonl"))
+    if not jsonl_files:
         if proc.returncode != 0:
             raise RuntimeError(
                 f"Hindsight failed (code {proc.returncode}): {(proc.stderr or '')[:500]}"
             )
         return []
 
-    return _parse_hindsight_json(json_files[0])
+    return _parse_hindsight_jsonl(jsonl_files[0])
 
 
-def _parse_hindsight_json(json_path: Path) -> list[dict]:
-    try:
-        with open(json_path, "r", encoding="utf-8", errors="replace") as f:
-            data = json.load(f)
-    except json.JSONDecodeError:
-        return []
-
-    if not isinstance(data, list):
-        data = [data]
-
+def _parse_hindsight_jsonl(jsonl_path: Path) -> list[dict]:
+    """Parse hindsight JSONL output (one JSON object per line)."""
     results: list[dict] = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        # Columnar format (older hindsight): {"col_types": [...], "data": [[...], ...]}
-        if "col_types" in item and "data" in item:
-            cols = item["col_types"]
-            for row in item.get("data", []):
-                if isinstance(row, list):
-                    hit = _hindsight_item_to_hit(dict(zip(cols, row)))
-                    if hit:
-                        results.append(hit)
-        else:
-            hit = _hindsight_item_to_hit(item)
-            if hit:
-                results.append(hit)
-
+    try:
+        with open(jsonl_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                hit = _hindsight_item_to_hit(item)
+                if hit:
+                    results.append(hit)
+    except Exception as exc:
+        logger.warning("Failed to parse hindsight JSONL output: %s", exc)
     return results
 
 
@@ -1894,6 +1923,53 @@ def _compile_yara_rules(custom_rules_source: str | None = None):
     return yara.compile(source=source)
 
 
+def _load_yara_library_rules(run_id: str, selected_ids: list[str] | None = None) -> str:
+    """
+    Fetch YARA rules from the library (Redis).
+    If selected_ids is provided, only those rule IDs are included.
+    Each rule is compiled individually before inclusion — bad rules are skipped with a warning
+    so one invalid rule never prevents the rest from running.
+    """
+    try:
+        import yara
+        r = get_redis()
+        all_ids = r.smembers("fo:yara_rules")
+        if not all_ids:
+            return ""
+
+        # Normalise to strings
+        str_ids = {(rid.decode() if isinstance(rid, bytes) else rid) for rid in all_ids}
+
+        # Apply selection filter if provided
+        if selected_ids is not None:
+            str_ids = str_ids & set(selected_ids)
+
+        parts: list[str] = []
+        skipped = 0
+        for rid in str_ids:
+            key = f"fo:yara_rule:{rid}"
+            content = r.hget(key, "content")
+            if not content:
+                continue
+            content_str = content.decode() if isinstance(content, bytes) else content
+            # Validate before including — skip rules that don't compile cleanly
+            try:
+                yara.compile(source=content_str)
+                parts.append(content_str)
+            except Exception as exc:
+                skipped += 1
+                logger.warning("[%s] YARA: skipping library rule %s (compilation error): %s", run_id, rid, exc)
+
+        if skipped:
+            logger.warning("[%s] YARA: skipped %d invalid library rule(s)", run_id, skipped)
+        if parts:
+            logger.info("[%s] YARA: loaded %d valid library rule(s)", run_id, len(parts))
+        return "\n\n".join(parts)
+    except Exception as exc:
+        logger.warning("[%s] YARA: could not load library rules: %s", run_id, exc)
+        return ""
+
+
 def _run_yara(
     run_id: str,
     work_dir: Path,
@@ -1901,8 +1977,14 @@ def _run_yara(
     params: dict,
     tool_meta: dict,
 ) -> list[dict]:
-    """Scan source files with YARA rules (built-in + optional custom rules)."""
-    custom_rules = params.get("custom_rules", "") or ""
+    """Scan source files with YARA rules (built-in + library + optional custom rules)."""
+    custom_rules     = params.get("custom_rules", "") or ""
+    use_library      = params.get("use_library_rules", True)
+    selected_ids     = params.get("selected_rule_ids", None)  # list[str] | None
+
+    # Merge library rules (fetched from Redis) with any inline custom rules from the run params
+    library_rules = _load_yara_library_rules(run_id, selected_ids) if use_library else ""
+    all_extra = "\n\n".join(s for s in [custom_rules.strip(), library_rules.strip()] if s)
 
     try:
         import yara
@@ -1915,14 +1997,15 @@ def _run_yara(
             )
         return _run_yara_cli(run_id, work_dir, sources_dir, yara_bin, params, tool_meta)
 
-    # Compile built-in rules + any custom rules
+    # Compile built-in rules + library rules + any custom rules
     try:
-        rules = _compile_yara_rules(custom_rules if custom_rules.strip() else None)
-    except yara.SyntaxError as exc:
+        rules = _compile_yara_rules(all_extra if all_extra else None)
+    except Exception as exc:
         raise RuntimeError(f"YARA rule compilation failed: {exc}") from exc
 
-    n_custom = custom_rules.strip().count("rule ") if custom_rules.strip() else 0
-    tool_meta["log"] = f"Built-in rules + {n_custom} custom rule(s)\n"
+    n_custom  = custom_rules.strip().count("rule ") if custom_rules.strip() else 0
+    n_library = library_rules.strip().count("rule ") if library_rules.strip() else 0
+    tool_meta["log"] = f"Built-in rules + {n_library} library rule(s) + {n_custom} custom rule(s)\n"
 
     _SEVERITY_MAP = {
         "critical": ("critical", 5),
@@ -2919,6 +3002,22 @@ def _run_strings_analysis(
 # Pattern Search (grep) — regex-based IOC / keyword scanning
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _normalize_grep_pattern(pat: str) -> str:
+    """
+    Ensure pat is valid PCRE for grep -P.
+    If it's already valid regex, return as-is.
+    If it's invalid (e.g. a shell glob like *vent*), convert it:
+      * → .*   (glob wildcard → regex any-sequence)
+      ? → .    (glob single-char → regex any-char)
+    All other special chars are re.escape'd so they match literally.
+    """
+    try:
+        re.compile(pat)
+        return pat  # already valid regex — use unchanged
+    except re.error:
+        # Treat as shell glob: escape special chars, then un-escape * and ?
+        return re.escape(pat).replace(r'\*', '.*').replace(r'\?', '.')
+
 _DEFAULT_GREP_PATTERNS = [
     r'https?://[^\s<>"]+',
     r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b',
@@ -2959,6 +3058,7 @@ def _run_grep_search(
         tool_meta["stdout"] += f"\n=== {file_path.name} ===\n"
 
         for pat in patterns:
+            pat = _normalize_grep_pattern(pat)
             # Count matches
             try:
                 proc_count = subprocess.run(
@@ -3645,4 +3745,478 @@ def _run_malwoverview(
             tool_meta["stderr"] += f"  Error processing {file_path.name}: {exc}\n"
 
     tool_meta["log"] += f"\nmalwoverview: {len(results)} file(s) queried\n"
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CTI IOC Matching
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CTI_IOC_TYPES = ("hash", "ip", "domain", "url", "email", "filename")
+_CTI_TYPE_KEY  = "fo:cti:iocs:type:{type}"
+
+_CTI_MATCH_FIELDS: dict[str, list[str]] = {
+    "hash":     ["process.hash.md5", "process.hash.sha1", "process.hash.sha256",
+                 "file.hash.md5", "file.hash.sha1", "file.hash.sha256", "message"],
+    "ip":       ["network.src_ip", "network.dst_ip", "network.dest_ip",
+                 "source.ip", "destination.ip", "message"],
+    "domain":   ["dns.question.name", "url.domain", "host.hostname", "message"],
+    "url":      ["url.full", "url.original", "message"],
+    "email":    ["email.from.address", "email.to.address", "user.email", "message"],
+    "filename": ["file.name", "process.executable", "process.name", "message"],
+}
+
+_CTI_BATCH_SIZE = 500
+
+
+def _cti_get_nested(doc: dict, dotted_key: str):
+    """Safely traverse a nested dict by dotted key path."""
+    parts = dotted_key.split(".")
+    cur = doc
+    for part in parts:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+        if cur is None:
+            return None
+    return cur
+
+
+def _run_cti_match(
+    run_id: str,
+    case_id: str,
+    work_dir: Path,
+    sources_dir: Path,
+    params: dict,
+    tool_meta: dict,
+) -> list[dict]:
+    """Scan all case events in Elasticsearch against the CTI IOC database."""
+    r = redis.from_url(REDIS_URL, decode_responses=True)
+
+    # Load all IOCs into memory grouped by type
+    ioc_sets: dict[str, dict[str, dict]] = {}
+    for ioc_type in _CTI_IOC_TYPES:
+        type_key = _CTI_TYPE_KEY.format(type=ioc_type)
+        members = r.smembers(type_key)
+        lookup: dict[str, dict] = {}
+        for m in members:
+            try:
+                obj = json.loads(m)
+                val = obj.get("value", "").lower()
+                if val:
+                    lookup[val] = obj
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if lookup:
+            ioc_sets[ioc_type] = lookup
+
+    total_iocs = sum(len(v) for v in ioc_sets.values())
+    tool_meta["log"] += f"Loaded {total_iocs} IOC(s) across {len(ioc_sets)} type(s)\n"
+
+    if not ioc_sets:
+        tool_meta["stdout"] += "No IOCs loaded — ingest CTI feeds first.\n"
+        return []
+
+    # Scan ES events in batches via search_after (no scroll TTL issues)
+    index = f"fo-case-{case_id}-*"
+    results: list[dict] = []
+    events_scanned = 0
+    search_after = None
+
+    while True:
+        body: dict = {
+            "query": {"match_all": {}},
+            "size": _CTI_BATCH_SIZE,
+            "sort": [{"_doc": "asc"}],
+            "_source": True,
+        }
+        if search_after:
+            body["search_after"] = search_after
+
+        try:
+            url  = f"{ELASTICSEARCH_URL.rstrip('/')}/{index}/_search"
+            data = json.dumps(body).encode("utf-8")
+            req  = urllib.request.Request(
+                url, data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                es_resp = json.loads(resp.read())
+        except Exception as exc:
+            logger.error("[%s] CTI match ES query failed: %s", run_id, exc)
+            tool_meta["stderr"] += f"ES query failed: {exc}\n"
+            break
+
+        hits = es_resp.get("hits", {}).get("hits", [])
+        if not hits:
+            break
+
+        for hit in hits:
+            source      = hit.get("_source", {})
+            event_fo_id = source.get("fo_id", hit.get("_id", ""))
+            event_ts    = source.get("timestamp", "")
+            host_obj    = source.get("host", {})
+            hostname    = host_obj.get("hostname", "") if isinstance(host_obj, dict) else ""
+            events_scanned += 1
+
+            for ioc_type, lookup in ioc_sets.items():
+                fields = _CTI_MATCH_FIELDS.get(ioc_type, ["message"])
+                for field in fields:
+                    field_value = _cti_get_nested(source, field)
+                    if field_value is None:
+                        continue
+                    field_str = str(field_value).lower()
+                    for ioc_value, ioc_obj in lookup.items():
+                        if ioc_value in field_str:
+                            results.append({
+                                "id":            str(uuid.uuid4()),
+                                "timestamp":     event_ts,
+                                "level":         "high",
+                                "level_int":     LEVEL_INT.get("high", 4),
+                                "rule_title":    f"CTI Match — {ioc_type}: {ioc_obj.get('value', ioc_value)[:80]}",
+                                "computer":      hostname,
+                                "details_raw":   json.dumps({
+                                    "event_fo_id":   event_fo_id,
+                                    "ioc_type":      ioc_type,
+                                    "ioc_value":     ioc_obj.get("value", ioc_value),
+                                    "indicator_id":  ioc_obj.get("indicator_id", ""),
+                                    "feed_name":     ioc_obj.get("feed_name", ""),
+                                    "matched_field": field,
+                                }),
+                                "event_fo_id":   event_fo_id,
+                                "ioc_type":      ioc_type,
+                                "ioc_value":     ioc_obj.get("value", ioc_value),
+                                "feed_name":     ioc_obj.get("feed_name", ""),
+                                "matched_field": field,
+                            })
+
+        search_after = hits[-1].get("sort")
+        if not search_after:
+            break
+
+    tool_meta["log"]    += f"Scanned {events_scanned} event(s), {len(results)} IOC match(es)\n"
+    tool_meta["stdout"] += (
+        f"Events scanned : {events_scanned}\n"
+        f"IOCs checked   : {total_iocs}\n"
+        f"Matches found  : {len(results)}\n"
+    )
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Browser History Report
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Search engine query parameter patterns: (domain_fragment, query_param)
+_SEARCH_ENGINES = [
+    ("google.",     "q"),
+    ("bing.com",    "q"),
+    ("duckduckgo.", "q"),
+    ("yahoo.com",   "p"),
+    ("ecosia.org",  "q"),
+    ("baidu.com",   "wd"),
+    ("yandex.",     "text"),
+    ("search.brave","q"),
+    ("startpage.",  "query"),
+]
+
+_BROWSER_BATCH = 500
+
+
+def _extract_domain(url: str) -> str:
+    """Return the bare domain (no scheme/www/path) from a URL string."""
+    try:
+        # Strip scheme
+        s = url.split("://", 1)[-1]
+        # Strip path/query/fragment
+        domain = s.split("/")[0].split("?")[0].split("#")[0]
+        # Strip port
+        domain = domain.rsplit(":", 1)[0]
+        # Strip leading www.
+        if domain.startswith("www."):
+            domain = domain[4:]
+        return domain.lower() or url
+    except Exception:
+        return url
+
+
+def _extract_search_query(url: str) -> str | None:
+    """Extract the search query string from a known search engine URL, or None."""
+    url_lower = url.lower()
+    for engine_frag, param in _SEARCH_ENGINES:
+        if engine_frag in url_lower:
+            # Parse query string manually (no urllib in safe env)
+            try:
+                qs = url.split("?", 1)[1] if "?" in url else ""
+                for kv in qs.split("&"):
+                    if "=" in kv:
+                        k, v = kv.split("=", 1)
+                        if k.lower() == param:
+                            # URL-decode + signs and percent-encoding (basic)
+                            query = v.replace("+", " ")
+                            # Simple percent-decode for common chars
+                            import urllib.parse
+                            query = urllib.parse.unquote(query)
+                            return query.strip() if query.strip() else None
+            except Exception:
+                pass
+    return None
+
+
+def _run_browser_report(
+    run_id: str,
+    case_id: str,
+    work_dir: Path,
+    sources_dir: Path,
+    params: dict,
+    tool_meta: dict,
+) -> list[dict]:
+    """
+    Generate a browser history report by aggregating all browser events
+    already indexed in Elasticsearch for this case.
+
+    Produces hits grouped into:
+      1. Summary statistics (one hit)
+      2. Top visited domains sorted by visit count
+      3. Full URL visit log (sorted by timestamp)
+      4. Downloads
+      5. Search queries extracted from search engine URLs
+      6. Saved login/credential sites
+    """
+    index = f"fo-case-{case_id}-*"
+    query_body: dict = {
+        "query": {
+            "term": {"artifact_type": "browser"}
+        },
+        "size": _BROWSER_BATCH,
+        "sort": [{"_doc": "asc"}],
+        "_source": True,
+    }
+
+    # Accumulators
+    visits:    list[dict] = []   # {timestamp, url, title, domain, browser_type, data_type, transition, visit_count}
+    downloads: list[dict] = []   # {timestamp, url, filename, size_bytes, mime_type, state}
+    searches:  list[dict] = []   # {timestamp, query, engine, url}
+    logins:    list[dict] = []   # {timestamp, url, username}
+    cookies_count = 0
+    events_scanned = 0
+    search_after = None
+    browsers_seen: set[str] = set()
+
+    while True:
+        body = dict(query_body)
+        body["sort"] = [{"_doc": "asc"}]
+        if search_after:
+            body["search_after"] = search_after
+
+        try:
+            url_es = f"{ELASTICSEARCH_URL.rstrip('/')}/{index}/_search"
+            data   = json.dumps(body).encode("utf-8")
+            req    = urllib.request.Request(
+                url_es, data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                es_resp = json.loads(resp.read())
+        except Exception as exc:
+            logger.error("[%s] browser_report ES query failed: %s", run_id, exc)
+            tool_meta["stderr"] += f"ES query failed: {exc}\n"
+            break
+
+        hits = es_resp.get("hits", {}).get("hits", [])
+        if not hits:
+            break
+
+        for hit in hits:
+            src          = hit.get("_source", {})
+            browser_dict = src.get("browser", {})
+            if not isinstance(browser_dict, dict):
+                events_scanned += 1
+                continue
+
+            data_type    = browser_dict.get("data_type", "")
+            browser_type = browser_dict.get("browser_type", "unknown")
+            ts           = src.get("timestamp", "")
+            browsers_seen.add(browser_type)
+            events_scanned += 1
+
+            if data_type == "history":
+                raw_url      = browser_dict.get("url", "")
+                title        = browser_dict.get("title", "")
+                transition   = browser_dict.get("transition", "")
+                visit_count  = browser_dict.get("visit_count", 1)
+                domain       = _extract_domain(raw_url)
+                query        = _extract_search_query(raw_url)
+                visits.append({
+                    "timestamp":    ts,
+                    "url":          raw_url,
+                    "title":        title,
+                    "domain":       domain,
+                    "browser_type": browser_type,
+                    "transition":   transition,
+                    "visit_count":  visit_count,
+                })
+                if query:
+                    # Try to identify engine name from URL
+                    engine = "unknown"
+                    url_lower = raw_url.lower()
+                    for eng_frag, _ in _SEARCH_ENGINES:
+                        if eng_frag in url_lower:
+                            engine = eng_frag.rstrip(".").replace("search.", "").capitalize()
+                            break
+                    searches.append({
+                        "timestamp": ts,
+                        "query":     query,
+                        "engine":    engine,
+                        "url":       raw_url,
+                    })
+
+            elif data_type == "download":
+                downloads.append({
+                    "timestamp":   ts,
+                    "url":         browser_dict.get("tab_url", "") or browser_dict.get("url", ""),
+                    "filename":    browser_dict.get("target_path", "") or browser_dict.get("current_path", ""),
+                    "size_bytes":  browser_dict.get("total_bytes", 0),
+                    "mime_type":   browser_dict.get("mime_type", ""),
+                    "state":       browser_dict.get("state", ""),
+                })
+
+            elif data_type == "login":
+                logins.append({
+                    "timestamp": ts,
+                    "url":       browser_dict.get("origin_url", "") or browser_dict.get("url", ""),
+                    "username":  browser_dict.get("username_value", ""),
+                })
+
+            elif data_type == "cookie":
+                cookies_count += 1
+
+        search_after = hits[-1].get("sort")
+        if not search_after:
+            break
+
+    # ── Aggregate domain counts ───────────────────────────────────────────────
+    domain_counts: dict[str, int] = {}
+    for v in visits:
+        d = v["domain"]
+        domain_counts[d] = domain_counts.get(d, 0) + 1
+
+    top_domains = sorted(domain_counts.items(), key=lambda x: x[1], reverse=True)
+
+    results: list[dict] = []
+
+    # ── Hit 1: Summary ────────────────────────────────────────────────────────
+    summary_lines = [
+        f"Browser(s) detected : {', '.join(sorted(browsers_seen)) or 'none'}",
+        f"URL visits          : {len(visits)}",
+        f"Unique domains      : {len(domain_counts)}",
+        f"Downloads           : {len(downloads)}",
+        f"Search queries      : {len(searches)}",
+        f"Saved logins found  : {len(logins)}",
+        f"Cookies indexed     : {cookies_count}",
+    ]
+    tool_meta["stdout"] += "\n".join(summary_lines) + "\n"
+    tool_meta["log"]    += (
+        f"Events scanned: {events_scanned} | visits: {len(visits)} | "
+        f"domains: {len(domain_counts)} | downloads: {len(downloads)} | "
+        f"searches: {len(searches)} | logins: {len(logins)}\n"
+    )
+
+    results.append({
+        "id":          str(uuid.uuid4()),
+        "timestamp":   "",
+        "level":       "informational",
+        "level_int":   LEVEL_INT["informational"],
+        "rule_title":  "Browser History Summary",
+        "details_raw": json.dumps({
+            "browsers":        sorted(browsers_seen),
+            "total_visits":    len(visits),
+            "unique_domains":  len(domain_counts),
+            "downloads":       len(downloads),
+            "search_queries":  len(searches),
+            "saved_logins":    len(logins),
+            "cookies_indexed": cookies_count,
+        }),
+        "summary": "\n".join(summary_lines),
+    })
+
+    # ── Hits 2+: Top domains ──────────────────────────────────────────────────
+    for rank, (domain, count) in enumerate(top_domains[:100], start=1):
+        results.append({
+            "id":          str(uuid.uuid4()),
+            "timestamp":   "",
+            "level":       "informational",
+            "level_int":   LEVEL_INT["informational"],
+            "rule_title":  f"Top Domain #{rank}: {domain} ({count} visit{'s' if count != 1 else ''})",
+            "details_raw": json.dumps({
+                "rank":   rank,
+                "domain": domain,
+                "visits": count,
+            }),
+            "domain":  domain,
+            "visits":  count,
+            "section": "top_domains",
+        })
+
+    # ── Hits: Search queries ──────────────────────────────────────────────────
+    for sq in searches:
+        results.append({
+            "id":          str(uuid.uuid4()),
+            "timestamp":   sq["timestamp"],
+            "level":       "informational",
+            "level_int":   LEVEL_INT["informational"],
+            "rule_title":  f"Search: {sq['query'][:120]} [{sq['engine']}]",
+            "details_raw": json.dumps(sq),
+            "query":       sq["query"],
+            "engine":      sq["engine"],
+            "section":     "searches",
+        })
+
+    # ── Hits: Downloads ───────────────────────────────────────────────────────
+    for dl in downloads:
+        fname = dl["filename"].split("/")[-1].split("\\")[-1] if dl["filename"] else dl["url"]
+        size_kb = f"{dl['size_bytes'] // 1024} KB" if dl["size_bytes"] else "unknown size"
+        results.append({
+            "id":          str(uuid.uuid4()),
+            "timestamp":   dl["timestamp"],
+            "level":       "low",
+            "level_int":   LEVEL_INT["low"],
+            "rule_title":  f"Download: {fname} ({size_kb})",
+            "details_raw": json.dumps(dl),
+            "filename":    fname,
+            "section":     "downloads",
+        })
+
+    # ── Hits: Saved logins ────────────────────────────────────────────────────
+    for lg in logins:
+        results.append({
+            "id":          str(uuid.uuid4()),
+            "timestamp":   lg["timestamp"],
+            "level":       "medium",
+            "level_int":   LEVEL_INT["medium"],
+            "rule_title":  f"Saved Login: {_extract_domain(lg['url'])} — user: {lg['username'] or '(blank)'}",
+            "details_raw": json.dumps(lg),
+            "url":         lg["url"],
+            "username":    lg["username"],
+            "section":     "logins",
+        })
+
+    # ── Hits: Full URL visit log (sorted by timestamp) ────────────────────────
+    visits_sorted = sorted(visits, key=lambda v: v["timestamp"] or "")
+    for v in visits_sorted:
+        results.append({
+            "id":          str(uuid.uuid4()),
+            "timestamp":   v["timestamp"],
+            "level":       "informational",
+            "level_int":   LEVEL_INT["informational"],
+            "rule_title":  f"Visit: {v['title'] or v['url'][:120]}",
+            "details_raw": json.dumps(v),
+            "url":         v["url"],
+            "domain":      v["domain"],
+            "section":     "visits",
+        })
+
+    logger.info("[%s] browser_report: %d result hits from %d events", run_id, len(results), events_scanned)
     return results

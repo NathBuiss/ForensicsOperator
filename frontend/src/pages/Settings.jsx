@@ -43,12 +43,27 @@ const PROVIDERS = [
 ]
 
 const S3_VENDORS = [
-  { id: 'aws',    name: 'AWS S3' },
-  { id: 'minio',  name: 'MinIO' },
-  { id: 'wasabi', name: 'Wasabi' },
-  { id: 'gcs',    name: 'GCS' },
-  { id: 'other',  name: 'Other' },
+  { id: 'aws',       name: 'AWS S3' },
+  { id: 'scaleway',  name: 'Scaleway' },
+  { id: 'minio',     name: 'MinIO' },
+  { id: 'wasabi',    name: 'Wasabi' },
+  { id: 'gcs',       name: 'GCS' },
+  { id: 'other',     name: 'Other' },
 ]
+
+const SCALEWAY_REGIONS = [
+  { region: 'nl-ams', endpoint: 's3.nl-ams.scw.cloud', label: 'Amsterdam (nl-ams)' },
+  { region: 'fr-par', endpoint: 's3.fr-par.scw.cloud', label: 'Paris (fr-par)' },
+  { region: 'pl-waw', endpoint: 's3.pl-waw.scw.cloud', label: 'Warsaw (pl-waw)' },
+]
+
+function scwEndpointPlaceholder(vendor) {
+  if (vendor === 'aws')      return 's3.amazonaws.com'
+  if (vendor === 'scaleway') return 's3.nl-ams.scw.cloud'
+  if (vendor === 'wasabi')   return 's3.wasabisys.com'
+  if (vendor === 'gcs')      return 'storage.googleapis.com'
+  return 'minio.example.com:9000'
+}
 
 export default function Settings() {
   const [config, setConfig]   = useState(null)
@@ -90,6 +105,28 @@ export default function Settings() {
 
   const setS3 = (k, v) => setS3Form(f => ({ ...f, [k]: v }))
 
+  // ── Triage Upload S3 state ─────────────────────────────────────────────────
+  const [s3TriageConfig, setS3TriageConfig]         = useState(null)
+  const [s3TriageLoading, setS3TriageLoading]       = useState(true)
+  const [s3TriageSaving, setS3TriageSaving]         = useState(false)
+  const [s3TriageSaved, setS3TriageSaved]           = useState(false)
+  const [s3TriageError, setS3TriageError]           = useState('')
+  const [s3TriageShowKey, setS3TriageShowKey]       = useState(false)
+  const [s3TriageTesting, setS3TriageTesting]       = useState(false)
+  const [s3TriageTestResult, setS3TriageTestResult] = useState(null)
+
+  const [s3TriageForm, setS3TriageForm] = useState({
+    vendor: 'scaleway',
+    endpoint: '',
+    access_key: '',
+    secret_key: '',
+    bucket: '',
+    region: 'nl-ams',
+    use_ssl: true,
+  })
+
+  const setS3Triage = (k, v) => setS3TriageForm(f => ({ ...f, [k]: v }))
+
   // ── Cuckoo Sandbox config state ────────────────────────────────────────────
   const [cuckooConfig, setCuckooConfig]         = useState(null)
   const [cuckooLoading, setCuckooLoading]       = useState(true)
@@ -116,7 +153,7 @@ export default function Settings() {
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
   useEffect(() => {
-    // Load S3 config
+    // Load S3 import config
     api.s3.getConfig()
       .then(cfg => {
         setS3Config(cfg)
@@ -134,6 +171,25 @@ export default function Settings() {
       })
       .catch(() => {})
       .finally(() => setS3Loading(false))
+
+    // Load S3 triage config
+    api.s3Triage.getConfig()
+      .then(cfg => {
+        setS3TriageConfig(cfg)
+        if (cfg.endpoint) {
+          setS3TriageForm({
+            vendor:     cfg.vendor || 'scaleway',
+            endpoint:   cfg.endpoint || '',
+            access_key: cfg.access_key || '',
+            secret_key: '',
+            bucket:     cfg.bucket || '',
+            region:     cfg.region || 'nl-ams',
+            use_ssl:    cfg.use_ssl !== false,
+          })
+        }
+      })
+      .catch(() => {})
+      .finally(() => setS3TriageLoading(false))
 
     api.llm.getConfig()
       .then(cfg => {
@@ -259,6 +315,49 @@ export default function Settings() {
     }
   }
 
+  // ── Triage S3 handlers ───────────────────────────────────────────────────
+  async function saveS3Triage(e) {
+    e.preventDefault()
+    setS3TriageSaving(true)
+    setS3TriageError('')
+    setS3TriageSaved(false)
+    try {
+      const updated = await api.s3Triage.setConfig(s3TriageForm)
+      setS3TriageConfig(updated)
+      setS3TriageSaved(true)
+      setTimeout(() => setS3TriageSaved(false), 3000)
+    } catch (err) {
+      setS3TriageError(err.message)
+    } finally {
+      setS3TriageSaving(false)
+    }
+  }
+
+  async function clearS3Triage() {
+    if (!confirm('Remove Triage Upload Storage configuration?')) return
+    try {
+      await api.s3Triage.clearConfig()
+      setS3TriageConfig({ endpoint: '', access_key: '', secret_key_set: false, bucket: '', region: '', vendor: 'scaleway', use_ssl: true })
+      setS3TriageForm({ vendor: 'scaleway', endpoint: '', access_key: '', secret_key: '', bucket: '', region: 'nl-ams', use_ssl: true })
+      setS3TriageTestResult(null)
+    } catch (err) {
+      setS3TriageError(err.message)
+    }
+  }
+
+  async function testS3Triage() {
+    setS3TriageTesting(true)
+    setS3TriageTestResult(null)
+    try {
+      const res = await api.s3Triage.testConfig()
+      setS3TriageTestResult({ ok: true, message: res.message })
+    } catch (err) {
+      setS3TriageTestResult({ ok: false, error: err.message })
+    } finally {
+      setS3TriageTesting(false)
+    }
+  }
+
   // ── Cuckoo handlers ────────────────────────────────────────────────────────
   async function saveCuckoo(e) {
     e.preventDefault()
@@ -320,7 +419,7 @@ export default function Settings() {
   const provider = PROVIDERS.find(p => p.id === form.provider) || PROVIDERS[0]
 
   return (
-    <div className="p-6 max-w-2xl">
+    <div className="p-6 max-w-2xl mx-auto">
       <div className="mb-6">
         <div className="flex items-center gap-2.5 mb-1">
           <Settings2 size={20} className="text-brand-accent" />
@@ -514,11 +613,232 @@ export default function Settings() {
         )}
       </section>
 
-      {/* S3 Storage section */}
+      {/* Triage Upload Storage section */}
+      <section className="card p-5 space-y-4 mt-6">
+        <div className="flex items-center gap-2">
+          <HardDrive size={15} className="text-orange-500" />
+          <h2 className="font-semibold text-brand-text">Triage Upload Storage</h2>
+          {!s3TriageLoading && s3TriageConfig?.endpoint && (
+            <span className="text-xs text-green-600 bg-green-50 border border-green-200 rounded-full px-2 py-0.5 flex items-center gap-1">
+              <Check size={10} /> Configured
+            </span>
+          )}
+        </div>
+
+        <p className="text-xs text-gray-500">
+          The bucket where <strong className="text-brand-text">collector agents push triage archives</strong> (ZIPs,
+          memory dumps, disk images). Analysts browse this bucket from the case view and pull relevant archives
+          into a case for processing. Supports Scaleway Object Storage, AWS S3, MinIO, and others.
+        </p>
+
+        {s3TriageLoading ? (
+          <div className="flex items-center gap-2 text-gray-400 py-4">
+            <Loader2 size={14} className="animate-spin" /> Loading...
+          </div>
+        ) : (
+          <form onSubmit={saveS3Triage} className="space-y-4">
+            {/* Vendor */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Vendor</label>
+              <div className="flex flex-wrap gap-2">
+                {S3_VENDORS.map(v => (
+                  <button
+                    key={v.id}
+                    type="button"
+                    onClick={() => setS3TriageForm(f => ({
+                      ...f,
+                      vendor:   v.id,
+                      endpoint: v.id === 'scaleway' ? SCALEWAY_REGIONS[0].endpoint : '',
+                      region:   v.id === 'scaleway' ? SCALEWAY_REGIONS[0].region   : '',
+                    }))}
+                    className={`text-xs py-2 px-3 rounded-lg border transition-colors font-medium ${
+                      s3TriageForm.vendor === v.id
+                        ? 'bg-brand-accent text-white border-brand-accent'
+                        : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
+                    }`}
+                  >
+                    {v.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Scaleway region selector (auto-fills endpoint) */}
+            {s3TriageForm.vendor === 'scaleway' && (
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Region</label>
+                <div className="flex flex-wrap gap-2">
+                  {SCALEWAY_REGIONS.map(r => (
+                    <button
+                      key={r.region}
+                      type="button"
+                      onClick={() => {
+                        setS3Triage('region', r.region)
+                        setS3Triage('endpoint', r.endpoint)
+                      }}
+                      className={`text-xs py-2 px-3 rounded-lg border transition-colors font-medium ${
+                        s3TriageForm.region === r.region
+                          ? 'bg-blue-600 text-white border-blue-600'
+                          : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
+                      }`}
+                    >
+                      {r.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-gray-400 mt-1">
+                  Selecting a region auto-fills the endpoint below.
+                </p>
+              </div>
+            )}
+
+            {/* Endpoint URL */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Endpoint URL</label>
+              <input
+                className="input text-xs font-mono"
+                placeholder={scwEndpointPlaceholder(s3TriageForm.vendor)}
+                value={s3TriageForm.endpoint}
+                onChange={e => setS3Triage('endpoint', e.target.value)}
+                required
+              />
+            </div>
+
+            {/* Access Key */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Access Key</label>
+              <input
+                className="input text-xs font-mono"
+                placeholder="AKIAIOSFODNN7EXAMPLE"
+                value={s3TriageForm.access_key}
+                onChange={e => setS3Triage('access_key', e.target.value)}
+                required
+              />
+            </div>
+
+            {/* Secret Key */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                Secret Key
+                {s3TriageConfig?.secret_key_set && (
+                  <span className="ml-1 text-green-600 font-normal">(key set — leave blank to keep)</span>
+                )}
+              </label>
+              <div className="relative">
+                <input
+                  type={s3TriageShowKey ? 'text' : 'password'}
+                  className="input text-xs pr-8 font-mono"
+                  placeholder={s3TriageConfig?.secret_key_set ? '••••••••••••••••' : 'wJalrXUtnFEMI/K7MDENG/bPxR...'}
+                  value={s3TriageForm.secret_key}
+                  onChange={e => setS3Triage('secret_key', e.target.value)}
+                />
+                <button
+                  type="button"
+                  onClick={() => setS3TriageShowKey(v => !v)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                  {s3TriageShowKey ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              </div>
+            </div>
+
+            {/* Bucket + Region (non-Scaleway) */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Bucket Name</label>
+                <input
+                  className="input text-xs font-mono"
+                  placeholder="triage-uploads"
+                  value={s3TriageForm.bucket}
+                  onChange={e => setS3Triage('bucket', e.target.value)}
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Region <span className="text-gray-400 font-normal">{s3TriageForm.vendor === 'scaleway' ? '(set above)' : '(optional)'}</span>
+                </label>
+                <input
+                  className="input text-xs font-mono"
+                  placeholder={s3TriageForm.vendor === 'scaleway' ? 'nl-ams' : 'us-east-1'}
+                  value={s3TriageForm.region}
+                  onChange={e => setS3Triage('region', e.target.value)}
+                  readOnly={s3TriageForm.vendor === 'scaleway'}
+                />
+              </div>
+            </div>
+
+            {/* Use SSL */}
+            <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={s3TriageForm.use_ssl}
+                onChange={e => setS3Triage('use_ssl', e.target.checked)}
+                className="rounded border-gray-300 text-brand-accent focus:ring-brand-accent"
+              />
+              Use SSL / HTTPS
+            </label>
+
+            {s3TriageError && (
+              <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-center gap-1.5">
+                <AlertCircle size={12} /> {s3TriageError}
+              </p>
+            )}
+
+            <div className="flex items-center gap-2 flex-wrap">
+              <button type="submit" disabled={s3TriageSaving} className="btn-primary text-xs">
+                {s3TriageSaving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+                Save
+              </button>
+              {s3TriageConfig?.endpoint && (
+                <button
+                  type="button"
+                  onClick={testS3Triage}
+                  disabled={s3TriageTesting}
+                  className="btn-outline text-xs"
+                >
+                  {s3TriageTesting ? <Loader2 size={13} className="animate-spin" /> : <Wifi size={13} />}
+                  Test Connection
+                </button>
+              )}
+              {s3TriageSaved && (
+                <span className="text-xs text-green-600 flex items-center gap-1">
+                  <Check size={11} /> Saved
+                </span>
+              )}
+              {s3TriageConfig?.endpoint && (
+                <button
+                  type="button"
+                  onClick={clearS3Triage}
+                  className="btn-ghost text-xs text-red-500 hover:text-red-700 ml-auto"
+                >
+                  <Trash2 size={12} /> Remove
+                </button>
+              )}
+            </div>
+
+            {s3TriageTestResult && (
+              s3TriageTestResult.ok ? (
+                <div className="text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2 flex items-start gap-1.5">
+                  <Check size={12} className="mt-0.5 flex-shrink-0" />
+                  <span><strong>Connected.</strong> {s3TriageTestResult.message}</span>
+                </div>
+              ) : (
+                <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-start gap-1.5">
+                  <X size={12} className="mt-0.5 flex-shrink-0" />
+                  <span><strong>Failed:</strong> {s3TriageTestResult.error}</span>
+                </div>
+              )
+            )}
+          </form>
+        )}
+      </section>
+
+      {/* Case Data Import S3 section */}
       <section className="card p-5 space-y-4 mt-6">
         <div className="flex items-center gap-2">
           <HardDrive size={15} className="text-blue-500" />
-          <h2 className="font-semibold text-brand-text">S3 Storage</h2>
+          <h2 className="font-semibold text-brand-text">Case Data Import Storage</h2>
           {!s3Loading && s3Config?.endpoint && (
             <span className="text-xs text-green-600 bg-green-50 border border-green-200 rounded-full px-2 py-0.5 flex items-center gap-1">
               <Check size={10} /> Configured
@@ -527,8 +847,9 @@ export default function Settings() {
         </div>
 
         <p className="text-xs text-gray-500">
-          Connect an external S3-compatible bucket (AWS S3, MinIO, Wasabi, GCS) to browse and import
-          forensic artifacts directly into cases, or let the collector upload evidence securely.
+          Browse an existing S3-compatible bucket and <strong className="text-brand-text">pull files directly into a case</strong> for
+          parsing — useful when forensic images are already stored in cloud storage (AWS S3, Scaleway,
+          MinIO, Wasabi, GCS). Files stream directly to internal storage with no RAM buffer.
         </p>
 
         {s3Loading ? (
@@ -540,13 +861,18 @@ export default function Settings() {
             {/* Vendor */}
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Vendor</label>
-              <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">
+              <div className="flex flex-wrap gap-2">
                 {S3_VENDORS.map(v => (
                   <button
                     key={v.id}
                     type="button"
-                    onClick={() => setS3('vendor', v.id)}
-                    className={`text-xs py-2 px-3 rounded-lg border transition-colors text-left font-medium ${
+                    onClick={() => setS3Form(f => ({
+                      ...f,
+                      vendor:   v.id,
+                      endpoint: v.id === 'scaleway' ? SCALEWAY_REGIONS[0].endpoint : '',
+                      region:   v.id === 'scaleway' ? SCALEWAY_REGIONS[0].region   : '',
+                    }))}
+                    className={`text-xs py-2 px-3 rounded-lg border transition-colors font-medium ${
                       s3Form.vendor === v.id
                         ? 'bg-brand-accent text-white border-brand-accent'
                         : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
@@ -558,12 +884,41 @@ export default function Settings() {
               </div>
             </div>
 
+            {/* Scaleway region selector (auto-fills endpoint) */}
+            {s3Form.vendor === 'scaleway' && (
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Region</label>
+                <div className="flex flex-wrap gap-2">
+                  {SCALEWAY_REGIONS.map(r => (
+                    <button
+                      key={r.region}
+                      type="button"
+                      onClick={() => {
+                        setS3('region', r.region)
+                        setS3('endpoint', r.endpoint)
+                      }}
+                      className={`text-xs py-2 px-3 rounded-lg border transition-colors font-medium ${
+                        s3Form.region === r.region
+                          ? 'bg-blue-600 text-white border-blue-600'
+                          : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
+                      }`}
+                    >
+                      {r.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-gray-400 mt-1">
+                  Selecting a region auto-fills the endpoint below.
+                </p>
+              </div>
+            )}
+
             {/* Endpoint URL */}
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Endpoint URL</label>
               <input
                 className="input text-xs font-mono"
-                placeholder={s3Form.vendor === 'aws' ? 's3.amazonaws.com' : s3Form.vendor === 'wasabi' ? 's3.wasabisys.com' : s3Form.vendor === 'gcs' ? 'storage.googleapis.com' : 'minio.example.com:9000'}
+                placeholder={scwEndpointPlaceholder(s3Form.vendor)}
                 value={s3Form.endpoint}
                 onChange={e => setS3('endpoint', e.target.value)}
                 required
@@ -622,13 +977,14 @@ export default function Settings() {
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">
-                  Region <span className="text-gray-400 font-normal">(optional)</span>
+                  Region <span className="text-gray-400 font-normal">{s3Form.vendor === 'scaleway' ? '(set above)' : '(optional)'}</span>
                 </label>
                 <input
                   className="input text-xs font-mono"
-                  placeholder="us-east-1"
+                  placeholder={s3Form.vendor === 'scaleway' ? 'nl-ams' : 'us-east-1'}
                   value={s3Form.region}
                   onChange={e => setS3('region', e.target.value)}
+                  readOnly={s3Form.vendor === 'scaleway'}
                 />
               </div>
             </div>

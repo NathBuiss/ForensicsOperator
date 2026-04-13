@@ -1,14 +1,66 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { RefreshCw, Upload, AlertTriangle } from 'lucide-react'
 import { api } from '../api/client'
+import { useUpload } from '../contexts/UploadContext'
 
-const ACCEPTED_TYPES = ['.evtx', '.plaso', '.pf', '.lnk', '.dat', '.hive', '.jsonl', '.csv', '.zip',
-                         '.pcap', '.pcapng', '.cap', '.sqlite', '.db', '.sqlite3', '.sqlitedb',
-                         '.plist', '.xml', '.log', '.ab', '.txt']
-const ACCEPTED_NAMES = ['$MFT', 'NTUSER.DAT', 'SYSTEM', 'SOFTWARE', 'SAM', 'SECURITY',
-                        'HISTORY', 'COOKIES', 'LOGIN DATA', 'BOOKMARKS', 'WEB DATA',
-                        'PLACES.SQLITE', 'COOKIES.SQLITE']
-const ACCEPT_ATTR   = [...ACCEPTED_TYPES, ...ACCEPTED_NAMES.map(n => `.${n.replace('$', '')}`)].join(',')
+// ── Accepted file types ───────────────────────────────────────────────────
+// Covers every extension recognised by the built-in plugins and module runners.
+// The accept attribute is a hint to the OS file picker — not a hard block.
+const ACCEPTED_TYPES = [
+  // Windows event logs & artifacts
+  '.evtx', '.evt',
+  // Plaso storage file
+  '.plaso',
+  // Prefetch, LNK, Registry hives
+  '.pf', '.lnk', '.dat', '.hive',
+  // Network captures
+  '.pcap', '.pcapng', '.cap',
+  // Structured logs / NDJSON
+  '.log', '.json', '.ndjson', '.jsonl',
+  // SQLite / ESE databases
+  '.sqlite', '.db', '.sqlite3', '.sqlitedb', '.db3', '.esedb', '.edb',
+  // Memory forensics images
+  '.dmp', '.raw', '.lime', '.mem', '.vmem', '.vmdk', '.dd', '.img',
+  '.e01', '.ex01', '.001',
+  // macOS artifacts
+  '.plist', '.asl',
+  // Linux login records
+  '.utmp', '.utmpx', '.wtmp',
+  // Office / OLE documents (oletools)
+  '.doc', '.docm', '.docx',
+  '.xls', '.xlsm', '.xlsx',
+  '.ppt', '.pptm', '.pptx',
+  '.rtf', '.mht',
+  // PE / executables / binaries
+  '.exe', '.dll', '.sys', '.scr', '.ocx', '.so', '.elf', '.bin',
+  // Archives (auto-extracted on ingest)
+  '.zip', '.tar', '.gz', '.7z', '.rar',
+  // Android backup
+  '.ab',
+  // Scripts / text / CSV
+  '.ps1', '.bat', '.vbs', '.js', '.txt', '.csv',
+  // Misc
+  '.msi', '.jar', '.pdf', '.xml',
+]
+
+const ACCEPTED_NAMES = [
+  // Windows Registry hives (no extension)
+  '$MFT', 'NTUSER.DAT', 'USRCLASS.DAT', 'SYSTEM', 'SOFTWARE', 'SAM', 'SECURITY', 'DEFAULT',
+  // Browser artefacts
+  'HISTORY', 'COOKIES', 'LOGIN DATA', 'BOOKMARKS', 'WEB DATA', 'FAVICONS', 'SHORTCUTS',
+  'TOP SITES', 'PLACES.SQLITE', 'COOKIES.SQLITE', 'FORMHISTORY.SQLITE',
+  // iOS / macOS
+  'SMS.DB', 'CALL_HISTORY.DB', 'ADDRESSBOOK.SQLITEDB', 'CONSOLIDATED.DB', 'MANIFEST.DB',
+  // Zeek named logs
+  'CONN.LOG', 'DNS.LOG', 'HTTP.LOG', 'SSL.LOG', 'SSH.LOG', 'FTP.LOG', 'SMTP.LOG',
+  'FILES.LOG', 'WEIRD.LOG', 'NOTICE.LOG',
+  // Linux syslogs
+  'SYSLOG', 'AUTH.LOG', 'KERN.LOG', 'DAEMON.LOG', 'MESSAGES', 'SECURE', 'DMESG',
+  // Suricata
+  'EVE.JSON',
+]
+
+const ACCEPT_ATTR = [...ACCEPTED_TYPES, ...ACCEPTED_NAMES.map(n => `.${n.replace(/^\$/, '')}`)].join(',')
 
 const STUCK_THRESHOLD_MS = 5 * 60 * 1000  // 5 minutes
 
@@ -24,41 +76,16 @@ function useElapsed(isoTimestamp) {
   return elapsed
 }
 
-function JobCard({ jobId, onStatusChange }) {
-  const [job, setJob] = useState(null)
+function JobCard({ jobId, jobData, onRetry }) {
   const [retrying, setRetrying] = useState(false)
-  const intervalRef = useRef(null)
-  const elapsed = useElapsed(job?.created_at)
-
-  function startPolling() {
-    const poll = () => {
-      api.ingest.getJob(jobId).then(j => {
-        setJob(j)
-        onStatusChange?.(jobId, j?.status)
-      }).catch(() => {})
-    }
-    poll()
-    intervalRef.current = setInterval(poll, 3000)
-  }
-
-  useEffect(() => {
-    startPolling()
-    return () => clearInterval(intervalRef.current)
-  }, [jobId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (job?.status === 'COMPLETED' || job?.status === 'FAILED') {
-      clearInterval(intervalRef.current)
-    }
-  }, [job?.status])
+  const elapsed = useElapsed(jobData?.created_at)
+  const job = jobData
 
   async function retryJob() {
     setRetrying(true)
     try {
       await api.ingest.retryJob(jobId)
-      // Restart polling after retry
-      clearInterval(intervalRef.current)
-      startPolling()
+      onRetry?.(jobId)
     } catch (err) {
       alert('Retry failed: ' + err.message)
     } finally {
@@ -66,7 +93,7 @@ function JobCard({ jobId, onStatusChange }) {
     }
   }
 
-  if (!job) return <div className="text-gray-400 text-xs p-2">Loading job {jobId}...</div>
+  if (!job) return <div className="text-gray-400 text-xs p-2">Loading…</div>
 
   const statusColors = {
     UPLOADING: 'text-sky-500',
@@ -74,6 +101,7 @@ function JobCard({ jobId, onStatusChange }) {
     RUNNING:   'text-brand-accent',
     COMPLETED: 'text-green-600',
     FAILED:    'text-red-600',
+    SKIPPED:   'text-gray-400',
   }
 
   return (
@@ -109,7 +137,7 @@ function JobCard({ jobId, onStatusChange }) {
       {(job.status === 'UPLOADING' || job.status === 'PENDING') && elapsed > STUCK_THRESHOLD_MS && (
         <p className="text-[10px] text-amber-500 mt-0.5 flex items-center gap-1">
           <AlertTriangle size={10} />
-          Waiting {Math.floor(elapsed / 60000)} min — processor may be busy or unavailable
+          In queue {Math.floor(elapsed / 60000)} min — processor is busy, job will run when a worker is free
         </p>
       )}
 
@@ -144,30 +172,82 @@ function JobCard({ jobId, onStatusChange }) {
       {job.status === 'FAILED' && (
         <p className="text-xs text-red-600 mt-0.5 break-all">{job.error}</p>
       )}
+
+      {job.status === 'SKIPPED' && (
+        <p className="text-xs text-gray-400 mt-0.5 break-all">{job.error}</p>
+      )}
     </div>
   )
 }
+
+const TERMINAL = new Set(['COMPLETED', 'FAILED', 'SKIPPED'])
 
 export default function Ingest({ caseId, onComplete }) {
   const [dragging, setDragging]         = useState(false)
   const [uploading, setUploading]       = useState(false)
   const [uploadPct, setUploadPct]       = useState(0)
   const [jobs, setJobs]                 = useState([])       // ordered list of job IDs
-  const [jobStatuses, setJobStatuses]   = useState({})       // jobId → status
+  const [jobStatuses, setJobStatuses]   = useState({})       // jobId → status string
+  const [jobDataMap, setJobDataMap]     = useState({})       // jobId → full job object
   const [error, setError]               = useState('')
-  const inputRef  = useRef()
-  const folderRef = useRef()
+  const inputRef   = useRef()
+  const folderRef  = useRef()
+  const jobsRef    = useRef([])          // mirror of jobs — readable inside setInterval
+  const statusesRef = useRef({})         // mirror of jobStatuses — readable inside setInterval
+  const { startUpload, updateUpload, finishUpload } = useUpload()
+
+  // Keep refs in sync with state so the central poller can read current values
+  useEffect(() => { jobsRef.current = jobs }, [jobs])
+  useEffect(() => { statusesRef.current = jobStatuses }, [jobStatuses])
+
+  // ── Central batch poller ──────────────────────────────────────────────────
+  // One request per tick for ALL active jobs, replacing per-JobCard polling.
+  // Fires every 3 s; only includes non-terminal jobs so the interval naturally
+  // becomes a no-op once everything is done.
+  useEffect(() => {
+    async function doPoll() {
+      const activeIds = jobsRef.current.filter(id => !TERMINAL.has(statusesRef.current[id]))
+      if (!activeIds.length) return
+
+      // Batch in groups of 100 to keep request payloads small
+      for (let i = 0; i < activeIds.length; i += 100) {
+        const slice = activeIds.slice(i, i + 100)
+        try {
+          const results = await api.ingest.batchJobs(slice)
+          if (!results?.length) continue
+          setJobDataMap(prev => {
+            const next = { ...prev }
+            results.forEach(j => { next[j.job_id] = j })
+            return next
+          })
+          setJobStatuses(prev => {
+            const next = { ...prev }
+            results.forEach(j => { next[j.job_id] = j.status })
+            return next
+          })
+        } catch { /* ignore network errors — will retry on next tick */ }
+      }
+    }
+
+    doPoll()
+    const id = setInterval(doPoll, 3000)
+    return () => clearInterval(id)
+  }, []) // mount once — reads jobs/statuses via refs
 
   useEffect(() => {
     api.ingest.listJobs(caseId)
       .then(r => {
         const all = r.jobs || []
-        // Seed known statuses from the initial fetch so we can sort immediately
         const statusMap = {}
-        all.forEach(j => { statusMap[j.job_id] = j.status })
+        const dataMap   = {}
+        all.forEach(j => {
+          statusMap[j.job_id] = j.status
+          dataMap[j.job_id]   = j
+        })
         setJobStatuses(statusMap)
+        setJobDataMap(dataMap)
         // Sort: FAILED first, then RUNNING/PENDING, then COMPLETED
-        const order = { FAILED: 0, RUNNING: 1, PENDING: 2, UPLOADING: 3, COMPLETED: 4 }
+        const order = { FAILED: 0, RUNNING: 1, PENDING: 2, UPLOADING: 3, COMPLETED: 4, SKIPPED: 5 }
         const sorted = [...all].sort((a, b) =>
           (order[a.status] ?? 99) - (order[b.status] ?? 99)
         )
@@ -176,65 +256,95 @@ export default function Ingest({ caseId, onComplete }) {
       .catch(() => {})
   }, [caseId])
 
-  const handleStatusChange = useCallback((jobId, status) => {
-    setJobStatuses(prev => {
-      if (prev[jobId] === status) return prev
-      return { ...prev, [jobId]: status }
-    })
+  // Re-activate polling for a retried job by clearing its terminal status
+  const handleRetry = useCallback((jobId) => {
+    setJobStatuses(prev => ({ ...prev, [jobId]: 'PENDING' }))
   }, [])
 
-  function handleFiles(files) {
+  async function handleFiles(files) {
     if (!files.length) return
     setError('')
     setUploading(true)
     setUploadPct(0)
 
-    const formData = new FormData()
-    for (const f of files) formData.append('files', f)
-
-    // Use XHR so we get upload progress events (fetch doesn't expose them)
+    const CHUNK_SIZE = 50 * 1024 * 1024  // 50 MB per chunk
     const token = localStorage.getItem('fo_token') || ''
-    const xhr = new XMLHttpRequest()
+    const base = window.location.origin
+    const allJobIds  = []
+    const allJobData = []   // partial job objects from upload response
 
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) setUploadPct(Math.round((e.loaded / e.total) * 100))
-    }
+    const uploadId = `${caseId}-${Date.now()}`
+    const label = files.length === 1 ? files[0].name : `${files.length} files`
+    startUpload(uploadId, label)
 
-    xhr.onload = () => {
+    // Total bytes across all files for overall progress
+    const totalBytes = Array.from(files).reduce((s, f) => s + f.size, 0)
+    let sentBytes = 0
+
+    try {
+      for (const file of files) {
+        const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE))
+        // Per-file upload_id keeps concurrent uploads isolated
+        const fileUploadId = crypto.randomUUID()
+        let jobIds = []
+
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * CHUNK_SIZE
+          const slice = file.slice(start, start + CHUNK_SIZE)
+
+          const fd = new FormData()
+          fd.append('upload_id', fileUploadId)
+          fd.append('filename', file.name)
+          fd.append('chunk_index', i)
+          fd.append('total_chunks', totalChunks)
+          fd.append('chunk', slice)
+
+          const res = await fetch(`${base}/api/v1/cases/${caseId}/ingest/chunk`, {
+            method: 'POST',
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+            body: fd,
+          })
+
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}))
+            throw new Error(body.detail || `HTTP ${res.status}`)
+          }
+
+          sentBytes += slice.size
+          const pct = Math.round((sentBytes / totalBytes) * 100)
+          setUploadPct(pct)
+          updateUpload(uploadId, pct)
+
+          // Last chunk response contains job IDs + partial job data
+          if (i === totalChunks - 1) {
+            const r = await res.json()
+            jobIds = (r.jobs || []).map(j => j.job_id)
+            allJobData.push(...(r.jobs || []))
+          }
+        }
+
+        allJobIds.push(...jobIds)
+      }
+
+      setJobs(prev => [...allJobIds, ...prev])
+      setJobStatuses(prev => {
+        const next = { ...prev }
+        allJobIds.forEach(id => { next[id] = 'UPLOADING' })
+        return next
+      })
+      setJobDataMap(prev => {
+        const next = { ...prev }
+        allJobData.forEach(j => { next[j.job_id] = j })
+        return next
+      })
+      onComplete?.()
+    } catch (err) {
+      setError(`Upload failed: ${err.message}`)
+    } finally {
       setUploading(false)
       setUploadPct(0)
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          const r = JSON.parse(xhr.responseText)
-          const newJobIds = (r.jobs || []).map(j => j.job_id)
-          // New jobs start as PENDING — prepend them before existing jobs
-          setJobs(prev => [...newJobIds, ...prev])
-          setJobStatuses(prev => {
-            const next = { ...prev }
-            newJobIds.forEach(id => { next[id] = 'PENDING' })
-            return next
-          })
-          onComplete?.()
-        } catch {
-          setError('Unexpected response from server')
-        }
-      } else {
-        try {
-          const r = JSON.parse(xhr.responseText)
-          setError(r.detail || `Upload failed (HTTP ${xhr.status})`)
-        } catch {
-          setError(`Upload failed (HTTP ${xhr.status})`)
-        }
-      }
+      finishUpload(uploadId)
     }
-
-    xhr.onerror = () => { setUploading(false); setUploadPct(0); setError('Network error during upload') }
-    xhr.ontimeout = () => { setUploading(false); setUploadPct(0); setError('Upload timed out') }
-
-    const base = window.location.origin
-    xhr.open('POST', `${base}/api/v1/cases/${caseId}/ingest`)
-    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
-    xhr.send(formData)
   }
 
   function onDrop(e) {
@@ -244,10 +354,10 @@ export default function Ingest({ caseId, onComplete }) {
   }
 
   return (
-    <div className="p-6 max-w-2xl">
+    <div className="p-6 max-w-2xl mx-auto">
       <h2 className="text-sm font-semibold text-brand-text mb-1">Ingest Forensics Files</h2>
       <p className="text-xs text-gray-500 mb-1">
-        Supported: {ACCEPTED_TYPES.join(', ')}, {ACCEPTED_NAMES.join(', ')}
+        Supported: {ACCEPTED_TYPES.join(' ')} and common named artefacts (NTUSER.DAT, $MFT, conn.log, eve.json…)
       </p>
       <p className="text-xs text-gray-400 mb-4">
         📦 <strong>.zip</strong> archives are extracted automatically — each file inside is processed as a separate job.
@@ -321,8 +431,9 @@ export default function Ingest({ caseId, onComplete }) {
 
       {/* Jobs list */}
       {jobs.length > 0 && (() => {
-        const failedCount  = Object.values(jobStatuses).filter(s => s === 'FAILED').length
-        const activeCount  = Object.values(jobStatuses).filter(s => s === 'RUNNING' || s === 'PENDING' || s === 'UPLOADING').length
+        const failedCount   = Object.values(jobStatuses).filter(s => s === 'FAILED').length
+        const skippedCount  = Object.values(jobStatuses).filter(s => s === 'SKIPPED').length
+        const activeCount   = Object.values(jobStatuses).filter(s => s === 'RUNNING' || s === 'PENDING' || s === 'UPLOADING').length
         return (
           <div>
             <div className="flex items-center gap-3 mb-2">
@@ -335,13 +446,18 @@ export default function Ingest({ caseId, onComplete }) {
                   <AlertTriangle size={10} /> {failedCount} failed
                 </span>
               )}
+              {skippedCount > 0 && (
+                <span className="text-[10px] text-gray-400 bg-gray-100 border border-gray-200 rounded-full px-2 py-0.5">
+                  {skippedCount} skipped
+                </span>
+              )}
               {activeCount > 0 && (
                 <span className="text-[10px] text-brand-accent animate-pulse">{activeCount} running</span>
               )}
             </div>
             <div className="space-y-2">
               {jobs.map(jid => (
-                <JobCard key={jid} jobId={jid} onStatusChange={handleStatusChange} />
+                <JobCard key={jid} jobId={jid} jobData={jobDataMap[jid]} onRetry={handleRetry} />
               ))}
             </div>
           </div>

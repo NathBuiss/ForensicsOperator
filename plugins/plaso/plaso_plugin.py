@@ -38,7 +38,7 @@ class PlasoPlugin(BasePlugin):
     PLUGIN_VERSION = "1.0.0"
     DEFAULT_ARTIFACT_TYPE = "timeline"
     SUPPORTED_EXTENSIONS = [".plaso"]
-    SUPPORTED_MIME_TYPES = ["application/x-sqlite3", "application/octet-stream"]
+    SUPPORTED_MIME_TYPES = ["application/x-sqlite3"]
 
     def __init__(self, context: PluginContext) -> None:
         super().__init__(context)
@@ -246,3 +246,48 @@ class PlasoPlugin(BasePlugin):
             "records_read": self._records_read,
             "records_skipped": self._records_skipped,
         }
+
+    # ── log2timeline fallback ─────────────────────────────────────────────────
+
+    @classmethod
+    def create_from_source(cls, source_file: Path, work_dir: Path, ctx: PluginContext) -> "PlasoPlugin":
+        """
+        Run log2timeline on an arbitrary source file, produce a .plaso storage,
+        and return a PlasoPlugin instance pointing at it.
+
+        This is the fallback path used when the primary plugin fails — log2timeline
+        supports hundreds of file formats and will extract whatever it can.
+
+        Raises PluginFatalError if log2timeline is unavailable or fails.
+        """
+        plaso_path = work_dir / f"{source_file.name}.plaso"
+        cmd = [
+            "log2timeline.py",
+            "--status_view", "none",
+            "--logfile", "/dev/null",
+            str(plaso_path),
+            str(source_file),
+        ]
+        ctx.logger.info("[%s] log2timeline fallback: processing %s", ctx.job_id, source_file.name)
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=7200)
+        except FileNotFoundError as exc:
+            raise PluginFatalError("log2timeline.py not found in PATH") from exc
+        except subprocess.CalledProcessError as exc:
+            raise PluginFatalError(
+                f"log2timeline failed (exit {exc.returncode}): {exc.stderr.decode()[:500]}"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise PluginFatalError("log2timeline timed out after 2 hours") from exc
+
+        if not plaso_path.exists() or plaso_path.stat().st_size == 0:
+            raise PluginFatalError("log2timeline produced no output")
+
+        new_ctx = PluginContext(
+            case_id=ctx.case_id,
+            job_id=ctx.job_id,
+            source_file_path=plaso_path,
+            source_minio_url=ctx.source_minio_url,
+            logger=ctx.logger,
+        )
+        return cls(new_ctx)

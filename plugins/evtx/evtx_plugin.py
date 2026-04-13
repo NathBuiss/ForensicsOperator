@@ -44,10 +44,11 @@ EVTID_DESC = {
 class EvtxPlugin(BasePlugin):
 
     PLUGIN_NAME = "evtx"
+    PLUGIN_PRIORITY = 100
     PLUGIN_VERSION = "1.0.0"
     DEFAULT_ARTIFACT_TYPE = "evtx"
     SUPPORTED_EXTENSIONS = [".evtx"]
-    SUPPORTED_MIME_TYPES = ["application/x-winevt", "application/octet-stream"]
+    SUPPORTED_MIME_TYPES = ["application/x-winevt"]
 
     def __init__(self, context: PluginContext) -> None:
         super().__init__(context)

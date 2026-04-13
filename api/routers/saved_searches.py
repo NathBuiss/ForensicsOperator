@@ -3,13 +3,9 @@ import json, uuid
 from datetime import datetime
 from fastapi import APIRouter
 from pydantic import BaseModel
-import redis as redis_lib
-from config import settings
+from config import settings, get_redis as _r
 
 router = APIRouter(tags=["saved-searches"])
-
-def _r():
-    return redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
 
 class SavedSearchIn(BaseModel):
     name: str

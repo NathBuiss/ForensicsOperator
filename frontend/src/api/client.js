@@ -57,8 +57,9 @@ export const api = {
   ingest: {
     upload:   (caseId, formData) => request('POST', `/cases/${caseId}/ingest`, formData),
     listJobs: (caseId)           => request('GET',  `/cases/${caseId}/jobs`),
-    getJob:   (jobId)            => request('GET',  `/jobs/${jobId}`),
-    retryJob: (jobId)            => request('POST', `/jobs/${jobId}/retry`),
+    getJob:    (jobId)            => request('GET',  `/jobs/${jobId}`),
+    batchJobs: (jobIds)          => request('POST', '/jobs/batch', { job_ids: jobIds }),
+    retryJob:  (jobId)           => request('POST', `/jobs/${jobId}/retry`),
   },
 
   search: {
@@ -106,18 +107,26 @@ export const api = {
     delete: (caseId, id)   => request('DELETE', `/cases/${caseId}/saved-searches/${id}`),
   },
 
+  notes: {
+    get:  (caseId)       => request('GET', `/cases/${caseId}/notes`),
+    save: (caseId, body) => request('PUT', `/cases/${caseId}/notes`, { body }),
+  },
+
   alertRules: {
     list:            (caseId)         => request('GET',    `/cases/${caseId}/alert-rules`),
     create:          (caseId, data)   => request('POST',   `/cases/${caseId}/alert-rules`, data),
     delete:          (caseId, id)     => request('DELETE', `/cases/${caseId}/alert-rules/${id}`),
     check:           (caseId)         => request('POST',   `/cases/${caseId}/alert-rules/check`),
+    lastRun:         (caseId)         => request('GET',    `/cases/${caseId}/alert-rules/last-run`),
+    reanalyzeMatch:  (caseId, ruleId) => request('POST',   `/cases/${caseId}/alert-rules/last-run/analyze/${ruleId}`),
     listLibrary:     ()               => request('GET',    '/alert-rules/library'),
     createLibraryRule: (data)         => request('POST',   '/alert-rules/library', data),
     updateLibraryRule: (id, data)     => request('PUT',    `/alert-rules/library/${id}`, data),
     deleteLibraryRule: (id)           => request('DELETE', `/alert-rules/library/${id}`),
     seedLibrary:     (replace=false)  => request('POST',   `/alert-rules/library/seed?replace=${replace}`),
     runLibrary:      (caseId)         => request('POST',   `/cases/${caseId}/alert-rules/run-library`),
-    runSingleRule:   (caseId, ruleId) => request('POST',   `/cases/${caseId}/alert-rules/library/${ruleId}/run`),
+    runSingleRule:       (caseId, ruleId) => request('POST', `/cases/${caseId}/alert-rules/library/${ruleId}/run`),
+    runSingleCaseRule:   (caseId, ruleId) => request('POST', `/cases/${caseId}/alert-rules/${ruleId}/run`),
     importSigma:     (data)           => request('POST',   '/alert-rules/library/sigma', data),
     getLibraryRule:  (id)             => request('GET',    `/alert-rules/library/${id}`),
     generateRule:    (data)           => request('POST',   '/alert-rules/generate', data),
@@ -189,8 +198,19 @@ export const api = {
     importToCase: (caseId, data) => request('POST',   `/cases/${caseId}/s3-import`, data),
   },
 
+  s3Triage: {
+    getConfig:    ()             => request('GET',    '/admin/s3-triage-config'),
+    setConfig:    (data)         => request('PUT',    '/admin/s3-triage-config', data),
+    clearConfig:  ()             => request('DELETE', '/admin/s3-triage-config'),
+    testConfig:   ()             => request('POST',   '/admin/s3-triage-config/test'),
+    browse:       (prefix = '', delimiter = '/') => request('GET', `/s3-triage/browse?prefix=${encodeURIComponent(prefix)}&delimiter=${encodeURIComponent(delimiter)}`),
+    pullToCase:   (caseId, data) => request('POST',   `/cases/${caseId}/s3-triage-pull`, data),
+    scwRegions:   ()             => request('GET',    '/s3/scaleway-regions'),
+  },
+
   metrics: {
-    dashboard: () => request('GET', '/metrics/dashboard'),
+    dashboard: ()              => request('GET', '/metrics/dashboard'),
+    history:   (limit = 480)   => request('GET', `/metrics/history?limit=${limit}`),
   },
 
   cti: {
@@ -222,6 +242,28 @@ export const api = {
     get:   ()     => request('GET',    '/admin/malwoverview-config'),
     set:   (data) => request('PUT',    '/admin/malwoverview-config', data),
     clear: ()     => request('DELETE', '/admin/malwoverview-config'),
+  },
+
+  yaraRules: {
+    list:         ()         => request('GET',    '/yara-rules'),
+    get:          (id)       => request('GET',    `/yara-rules/${id}`),
+    create:       (data)     => request('POST',   '/yara-rules', data),
+    update:       (id, data) => request('PUT',    `/yara-rules/${id}`, data),
+    delete:       (id)       => request('DELETE', `/yara-rules/${id}`),
+    generateYara: (data)     => request('POST',   '/yara-rules/generate', data),
+    exportUrl: ()         => {
+      const token = getToken()
+      return `/api/v1/yara-rules/export${token ? `?_token=${encodeURIComponent(token)}` : ''}`
+    },
+  },
+
+  caseFiles: {
+    list:        (caseId)         => request('GET',  `/cases/${caseId}/files`),
+    content:     (caseId, jobId)  => request('GET',  `/cases/${caseId}/files/${jobId}/content`),
+    search:      (caseId, data)   => request('POST', `/cases/${caseId}/files/search`, data),
+    diskImages:  (caseId)         => request('GET',  `/cases/${caseId}/disk-images`),
+    browse:      (caseId, jobId, path = '/') =>
+      request('GET', `/cases/${caseId}/disk-images/${jobId}/browse?path=${encodeURIComponent(path)}`),
   },
 
   collector: {

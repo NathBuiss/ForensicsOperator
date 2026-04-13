@@ -14,74 +14,154 @@ import {
 } from 'lucide-react'
 import { api } from '../api/client'
 
-// ── Artifact definitions (shared with CollectorModal) ────────────────────────
+// ── Artifact definitions ──────────────────────────────────────────────────────
 
 const WINDOWS_ARTIFACTS = [
-  { key: 'evtx',     label: 'Event Logs (EVTX)',   desc: 'Security, System, Application, PowerShell, Sysmon and more' },
-  { key: 'registry', label: 'Registry Hives',       desc: 'SYSTEM, SOFTWARE, SAM, SECURITY, NTUSER.DAT, UsrClass.dat' },
-  { key: 'prefetch', label: 'Prefetch Files',        desc: 'Program execution evidence (up to 500 .pf files)' },
-  { key: 'lnk',      label: 'LNK / Recent Items',   desc: 'Shell link files from all user Recent folders' },
-  { key: 'browser',  label: 'Browser Artifacts',    desc: 'Chrome, Edge, Firefox — history, cookies, login data' },
-  { key: 'tasks',    label: 'Scheduled Tasks',      desc: 'Windows Task Scheduler XML from System32\\Tasks' },
-  { key: 'triage',   label: 'Live System Triage',   desc: 'systeminfo, netstat, tasklist, services, installed software' },
+  { key: 'evtx',     label: 'Event Logs (EVTX)',          desc: 'Security, System, Application, PowerShell, Sysmon and more' },
+  { key: 'registry', label: 'Registry Hives',              desc: 'SYSTEM, SOFTWARE, SAM, SECURITY, NTUSER.DAT, UsrClass.dat' },
+  { key: 'prefetch', label: 'Prefetch Files',               desc: 'Program execution evidence (up to 500 .pf files)' },
+  { key: 'lnk',      label: 'LNK / Recent Items',          desc: 'Shell link files from all user Recent folders' },
+  { key: 'browser',  label: 'Browser Artifacts',           desc: 'Chrome, Edge, Firefox — history, cookies, login data' },
+  { key: 'tasks',    label: 'Scheduled Tasks',             desc: 'Windows Task Scheduler XML from System32\\Tasks' },
+  { key: 'triage',   label: 'Live System Triage',          desc: 'systeminfo, netstat, tasklist, services, installed software' },
+  { key: 'memory',   label: 'Memory Dump',                 desc: 'Physical memory acquisition via WinPmem — 4–64 GB, requires winpmem_mini_x64_rc2.exe beside the script', warn: true },
 ]
 
 const LINUX_ARTIFACTS = [
-  { key: 'logs',    label: 'System Logs',           desc: '/var/log — auth.log, syslog, audit, journalctl export' },
-  { key: 'history', label: 'Shell Histories',       desc: '.bash_history, .zsh_history for root and all users' },
-  { key: 'config',  label: 'System Configuration',  desc: '/etc/passwd, sudoers, hosts, ssh/sshd_config and more' },
-  { key: 'cron',    label: 'Cron Jobs',             desc: 'cron.d, cron.daily, crontabs, systemd timers' },
-  { key: 'ssh',     label: 'SSH Artifacts',         desc: 'known_hosts, authorized_keys, config (no private keys)' },
-  { key: 'triage',  label: 'Live System Triage',    desc: 'ps, ss, ip, last, lsmod, services, installed packages' },
+  { key: 'logs',    label: 'System Logs',                   desc: '/var/log — auth.log, syslog, audit, journalctl export' },
+  { key: 'history', label: 'Shell Histories',               desc: '.bash_history, .zsh_history for root and all users' },
+  { key: 'config',  label: 'System Configuration',          desc: '/etc/passwd, sudoers, hosts, ssh/sshd_config and more' },
+  { key: 'cron',    label: 'Cron Jobs',                     desc: 'cron.d, cron.daily, crontabs, systemd timers' },
+  { key: 'ssh',     label: 'SSH Artifacts',                 desc: 'known_hosts, authorized_keys, config (no private keys)' },
+  { key: 'network', label: 'Network Captures',              desc: 'PCAP/tcpdump snapshots (5 min, 500 MB cap)' },
+  { key: 'triage',  label: 'Live System Triage',            desc: 'ps, ss, ip, last, lsmod, services, installed packages' },
+  { key: 'memory',  label: 'Memory Dump',                   desc: 'Physical memory via avml or /dev/fmem — 4–64 GB, requires root + avml in PATH', warn: true },
+]
+
+// Domain Controller adds AD-specific artifacts on top of Windows
+const DC_EXTRA_ARTIFACTS = [
+  { key: 'evtx',    label: 'Event Logs (EVTX)',             desc: 'Security, ADDS replication, Kerberos, NTDS audit events' },
+  { key: 'registry',label: 'Registry Hives',               desc: 'SYSTEM, SOFTWARE, SAM, SECURITY, Group Policy state' },
+  { key: 'triage',  label: 'Live AD Triage',               desc: 'nltest, netdom, Get-ADUser/Group/GPO snapshots, trust enumeration' },
+]
+
+// Proxy / Firewall artifact sets (Linux-based)
+const PROXY_ARTIFACTS = [
+  { key: 'logs',    label: 'Proxy / Access Logs',           desc: '/var/log/squid, /var/log/nginx, /var/log/haproxy, /var/log/apache2' },
+  { key: 'config',  label: 'Proxy / Firewall Config',      desc: '/etc/squid, /etc/nginx, /etc/haproxy, /etc/iptables, nftables rules' },
+  { key: 'triage',  label: 'Live Network Triage',          desc: 'Active connections, routing table, ARP cache, loaded kernel modules' },
+  { key: 'network', label: 'Live PCAP Snapshot',           desc: 'Short tcpdump capture on primary interfaces (5 min, 500 MB cap)' },
+  { key: 'ssh',     label: 'SSH Artifacts',                desc: 'known_hosts, authorized_keys, sshd_config' },
+]
+
+// DNS Nameserver artifacts
+const NS_ARTIFACTS = [
+  { key: 'logs',    label: 'DNS Query Logs',               desc: '/var/log/named, /var/log/bind, /var/log/unbound, journalctl' },
+  { key: 'config',  label: 'DNS Configuration',            desc: '/etc/named.conf, /etc/bind, zone files, resolv.conf' },
+  { key: 'triage',  label: 'Live System Triage',           desc: 'Running processes, open ports, installed packages' },
+  { key: 'ssh',     label: 'SSH Artifacts',                desc: 'known_hosts, authorized_keys, sshd_config' },
 ]
 
 const PLATFORMS = [
   {
     id: 'win',
     label: 'Windows',
+    group: 'Endpoint',
     Icon: Monitor,
     color: 'text-blue-600',
     bg: 'bg-blue-50',
     border: 'border-blue-200',
     selectedBorder: 'border-blue-500',
     selectedBg: 'bg-blue-50',
-    desc: 'Python script — run as Administrator',
-    tip: 'Requires Python 3.8+ on target. For a zero-dependency EXE build with build.bat.',
+    desc: 'Workstation or server — run as Administrator',
+    tip: 'Requires Python 3.8+ on target. Build a zero-dependency EXE with build.bat.',
     artifacts: WINDOWS_ARTIFACTS,
   },
   {
     id: 'linux',
     label: 'Linux / macOS',
+    group: 'Endpoint',
     Icon: Terminal,
     color: 'text-emerald-600',
     bg: 'bg-emerald-50',
     border: 'border-emerald-200',
     selectedBorder: 'border-emerald-500',
     selectedBg: 'bg-emerald-50',
-    desc: 'Python script — run as root',
-    tip: 'Requires Python 3.8+ on target. For a zero-dependency ELF build with ./build.sh.',
+    desc: 'Workstation or server — run as root',
+    tip: 'Requires Python 3.8+ on target. Build a zero-dependency binary with ./build.sh.',
     artifacts: LINUX_ARTIFACTS,
   },
   {
+    id: 'win',
+    label: 'Domain Controller',
+    group: 'Endpoint',
+    Icon: Monitor,
+    color: 'text-indigo-600',
+    bg: 'bg-indigo-50',
+    border: 'border-indigo-200',
+    selectedBorder: 'border-indigo-500',
+    selectedBg: 'bg-indigo-50',
+    desc: 'Windows — AD events, NTDS, GPO, trust info',
+    tip: 'Run as Domain Admin. Collects AD-specific event channels and Group Policy state.',
+    defaultCollect: ['evtx','registry','triage'],
+    artifacts: DC_EXTRA_ARTIFACTS,
+  },
+  {
+    id: 'linux',
+    label: 'Proxy / Firewall',
+    group: 'Network',
+    Icon: Terminal,
+    color: 'text-orange-600',
+    bg: 'bg-orange-50',
+    border: 'border-orange-200',
+    selectedBorder: 'border-orange-500',
+    selectedBg: 'bg-orange-50',
+    desc: 'Linux-based — Squid, Nginx, HAProxy, iptables',
+    tip: 'Run as root on the proxy or firewall host. Collects access logs, config and a PCAP snapshot.',
+    defaultCollect: ['logs','config','triage','network'],
+    artifacts: PROXY_ARTIFACTS,
+  },
+  {
+    id: 'linux',
+    label: 'Nameserver',
+    group: 'Network',
+    Icon: Terminal,
+    color: 'text-cyan-600',
+    bg: 'bg-cyan-50',
+    border: 'border-cyan-200',
+    selectedBorder: 'border-cyan-500',
+    selectedBg: 'bg-cyan-50',
+    desc: 'Linux-based — BIND, Unbound, PowerDNS',
+    tip: 'Run as root on the DNS server. Captures query logs, zone files, and config.',
+    defaultCollect: ['logs','config','triage'],
+    artifacts: NS_ARTIFACTS,
+  },
+  {
     id: 'py',
-    label: 'Python Script',
+    label: 'Generic (Python)',
+    group: 'Other',
     Icon: FileCode,
     color: 'text-violet-600',
     bg: 'bg-violet-50',
     border: 'border-violet-200',
     selectedBorder: 'border-violet-500',
     selectedBg: 'bg-violet-50',
-    desc: 'Platform-agnostic — auto-detects OS at runtime',
-    tip: 'Works on Windows, Linux & macOS. Best when the target already has Python 3.8+.',
-    artifacts: [...WINDOWS_ARTIFACTS, ...LINUX_ARTIFACTS],
+    desc: 'Auto-detects OS at runtime — Windows + Linux + macOS',
+    tip: 'Best when the target already has Python 3.8+. Manually select artifacts below.',
+    artifacts: [...WINDOWS_ARTIFACTS, ...LINUX_ARTIFACTS].filter(
+      (a, i, arr) => arr.findIndex(b => b.key === a.key) === i
+    ),
   },
 ]
+
+// Group platforms by role for Step 1 UI
+const PLATFORM_GROUPS = ['Endpoint', 'Network', 'Other']
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function Collector() {
   const [step, setStep]               = useState(1)
-  const [platform, setPlatform]       = useState(null)
+  const [platIdx, setPlatIdx]         = useState(null)   // index into PLATFORMS array
   const [selected, setSelected]       = useState(new Set())
   const [caseId, setCaseId]           = useState('')
   const [apiUrl, setApiUrl]           = useState('')
@@ -89,23 +169,27 @@ export default function Collector() {
   const [netIps, setNetIps]           = useState([])
   const [inK8s, setInK8s]             = useState(false)
   const [netLoading, setNetLoading]   = useState(false)
-  const [ipHint, setIpHint]           = useState(null)   // FO_PUBLIC_URL hint from backend
-  const [ingress, setIngress]         = useState(null)   // {status, external_ip, external_url}
+  const [ipHint, setIpHint]           = useState(null)
+  const [ingress, setIngress]         = useState(null)
   const [ingressBusy, setIngressBusy] = useState(false)
   const [downloading, setDownloading] = useState(false)
   const [downloaded, setDownloaded]   = useState(false)
 
-  const platformDef = PLATFORMS.find(p => p.id === platform)
+  const platformDef = platIdx !== null ? PLATFORMS[platIdx] : null
   const artifacts   = platformDef?.artifacts || []
 
   useEffect(() => {
     api.cases.list().then(r => setCases(r.cases || [])).catch(() => {})
   }, [])
 
-  // Pre-select all artifacts when platform chosen
+  // Pre-select artifacts when platform chosen; respect defaultCollect if defined
   useEffect(() => {
-    if (platformDef) setSelected(new Set(platformDef.artifacts.map(a => a.key)))
-  }, [platform])
+    if (!platformDef) return
+    const defaults = platformDef.defaultCollect
+      ? new Set(platformDef.defaultCollect)
+      : new Set(platformDef.artifacts.map(a => a.key))
+    setSelected(defaults)
+  }, [platIdx])
 
   function toggleArtifact(key) {
     setSelected(prev => {
@@ -191,7 +275,7 @@ export default function Collector() {
     // Embed apiUrl whenever it is filled in, regardless of whether a case is selected.
     // Without caseId the script still runs and saves a local ZIP; with both it auto-uploads.
     const url = api.collector.downloadUrl({
-      platform,
+      platform: platformDef?.id,
       caseId:  caseId   || undefined,
       apiUrl:  apiUrl   || undefined,
       collect: selected.size > 0 ? [...selected] : undefined,
@@ -260,34 +344,41 @@ export default function Collector() {
 
         {/* ── Step 1: Platform ─────────────────────────────────────────────── */}
         {step === 1 && (
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            {PLATFORMS.map(({ id, label, Icon, desc, tip, selectedBorder, selectedBg, bg, color, border }) => {
-              const active = platform === id
+          <div className="space-y-5">
+            {PLATFORM_GROUPS.map(group => {
+              const groupPlatforms = PLATFORMS.map((p, i) => ({ ...p, _idx: i })).filter(p => p.group === group)
+              if (groupPlatforms.length === 0) return null
               return (
-                <button
-                  key={id}
-                  onClick={() => setPlatform(id)}
-                  className={`card flex flex-col items-center gap-3 p-5 text-center cursor-pointer
-                              border-2 transition-all hover:shadow-md ${
-                    active ? `${selectedBorder} ${selectedBg}` : `border-transparent`
-                  }`}
-                >
-                  <div className={`w-12 h-12 rounded-xl ${bg} border ${border}
-                                   flex items-center justify-center`}>
-                    <Icon size={22} className={color} />
+                <div key={group}>
+                  <p className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-2">{group}</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {groupPlatforms.map(({ _idx, label, Icon, desc, tip, selectedBorder, selectedBg, bg, color, border }) => {
+                      const active = platIdx === _idx
+                      return (
+                        <button
+                          key={_idx}
+                          onClick={() => setPlatIdx(_idx)}
+                          className={`card flex flex-col items-start gap-2.5 p-4 text-left cursor-pointer
+                                      border-2 transition-all hover:shadow-md ${
+                            active ? `${selectedBorder} ${selectedBg}` : `border-transparent`
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5 w-full">
+                            <div className={`w-9 h-9 rounded-lg ${bg} border ${border} flex items-center justify-center flex-shrink-0`}>
+                              <Icon size={18} className={color} />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm font-semibold text-brand-text">{label}</div>
+                              <div className="text-xs text-gray-500 truncate">{desc}</div>
+                            </div>
+                            {active && <Check size={14} className="text-brand-accent flex-shrink-0" />}
+                          </div>
+                          <div className="text-[11px] text-gray-400 leading-relaxed">{tip}</div>
+                        </button>
+                      )
+                    })}
                   </div>
-                  <div>
-                    <div className="text-sm font-semibold text-brand-text mb-1">{label}</div>
-                    <div className="text-xs text-gray-500 mb-2">{desc}</div>
-                    <div className="text-[11px] text-gray-400">{tip}</div>
-                  </div>
-                  {active && (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-brand-accent
-                                     text-white text-xs rounded-full">
-                      <Check size={10} /> Selected
-                    </span>
-                  )}
-                </button>
+                </div>
               )
             })}
           </div>
@@ -318,7 +409,7 @@ export default function Collector() {
                     key={a.key}
                     className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${
                       checked
-                        ? 'border-brand-accent/40 bg-brand-accentlight'
+                        ? a.warn ? 'border-amber-400 bg-amber-50' : 'border-brand-accent/40 bg-brand-accentlight'
                         : 'border-gray-200 hover:border-gray-300'
                     }`}
                   >
@@ -329,13 +420,26 @@ export default function Collector() {
                       className="mt-0.5 accent-brand-accent cursor-pointer flex-shrink-0"
                     />
                     <div>
-                      <div className="text-sm font-medium text-brand-text">{a.label}</div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-sm font-medium text-brand-text">{a.label}</span>
+                        {a.warn && <AlertTriangle size={11} className="text-amber-500 flex-shrink-0" />}
+                      </div>
                       <div className="text-xs text-gray-500 mt-0.5">{a.desc}</div>
                     </div>
                   </label>
                 )
               })}
             </div>
+            {selected.has('memory') && (
+              <div className="mt-3 flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
+                <AlertTriangle size={13} className="flex-shrink-0 mt-0.5 text-amber-500" />
+                <div>
+                  <strong>Memory dumps are 4–64 GB and take 15–60 minutes.</strong>{' '}
+                  Upload will be large — ensure storage is sufficient and upload timeouts are generous.
+                  The script will continue to package and upload other artifacts regardless.
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -557,7 +661,7 @@ export default function Collector() {
               {downloaded && (
                 <div className="mt-3 bg-gray-950 rounded-lg p-3.5 text-[11px] font-mono text-gray-300 leading-relaxed">
                   <span className="text-gray-500"># Run on the target machine</span>{'\n'}
-                  {platform === 'win'
+                  {platformDef?.id === 'win'
                     ? 'python fo-collector.py     # as Administrator'
                     : 'python3 fo-collector.py   # as root'
                   }
@@ -629,7 +733,7 @@ export default function Collector() {
             <button
               className="btn-primary gap-1"
               onClick={() => setStep(s => s + 1)}
-              disabled={step === 1 && !platform}
+              disabled={step === 1 && platIdx === null}
             >
               Continue <ChevronRight size={14} />
             </button>

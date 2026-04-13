@@ -23,6 +23,8 @@ app.conf.update(
     task_serializer="json",
     accept_content=["json"],
     result_serializer="json",
+    task_compression="gzip",     # compress task payloads in Redis broker
+    result_compression="gzip",   # compress result payloads in Redis backend
     timezone="UTC",
     enable_utc=True,
 

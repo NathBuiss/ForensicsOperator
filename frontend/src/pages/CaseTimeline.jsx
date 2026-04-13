@@ -5,12 +5,14 @@ import {
   CheckCircle, Clock, Database, Loader2, Shield,
   Cpu, RefreshCw, Plus, Download, Play, Terminal,
   AlertCircle, ChevronDown, FileCode, ExternalLink,
-  Flag, Filter, Sparkles,
+  Flag, Filter, Sparkles, FileText,
 } from 'lucide-react'
 import { api } from '../api/client'
 import Timeline from './Timeline'
 import Ingest from './Ingest'
 import CollectorModal from '../components/CollectorModal'
+import AlertRules from './AlertRules'
+import CaseNotes from './CaseNotes'
 
 // ── Artifact badge colours ────────────────────────────────────────────────────
 const ARTIFACT_BADGE = {
@@ -317,10 +319,13 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
   const [error, setError]                   = useState(null)
 
   // YARA-specific state
-  const [yaraRules, setYaraRules]           = useState('')
-  const [yaraValidating, setYaraValidating] = useState(false)
-  const [yaraValid, setYaraValid]           = useState(null)  // null | {valid, error}
-  const yaraDebounce                        = useRef(null)
+  const [yaraRules, setYaraRules]                   = useState('')
+  const [yaraValidating, setYaraValidating]         = useState(false)
+  const [yaraValid, setYaraValid]                   = useState(null)  // null | {valid, error}
+  const [yaraLibraryRules, setYaraLibraryRules]     = useState([])
+  const [selectedYaraIds, setSelectedYaraIds]       = useState(new Set())
+  const [grepPatterns, setGrepPatterns]             = useState('')
+  const yaraDebounce                                = useRef(null)
 
   useEffect(() => {
     Promise.all([api.modules.list(), api.modules.listSources(caseId)])
@@ -332,6 +337,14 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
       })
       .catch(err => { setError(err.message); setLoading(false) })
   }, [caseId])
+
+  // Load YARA library rules when YARA module is selected
+  useEffect(() => {
+    if (selectedModule?.id !== 'yara') return
+    api.yaraRules.list()
+      .then(r => setYaraLibraryRules(r.rules || []))
+      .catch(() => {})
+  }, [selectedModule])
 
   // Validate YARA rules with debounce
   useEffect(() => {
@@ -353,6 +366,7 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
         const extList  = selectedModule.input_extensions || []
         const nameList = selectedModule.input_filenames  || []
         if (extList.length === 0 && nameList.length === 0) return true
+        if (extList.some(e => e === '*' || e === '.*')) return true
         const extMatch  = extList.some(ext => fnameLower.endsWith(ext.toLowerCase()))
         const basename  = fnameLower.split('/').pop().split('\\').pop()
         const nameMatch = nameList.some(fn => basename === fn.toLowerCase())
@@ -383,6 +397,7 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
     setSelectedJobs(new Set())
     setYaraRules('')
     setYaraValid(null)
+    setGrepPatterns('')
   }
 
   async function handleRun() {
@@ -392,8 +407,12 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
     setError(null)
     try {
       const params = {}
-      if (selectedModule.id === 'yara' && yaraRules.trim()) {
-        params.custom_rules = yaraRules.trim()
+      if (selectedModule.id === 'yara') {
+        if (yaraRules.trim()) params.custom_rules = yaraRules.trim()
+        if (selectedYaraIds.size > 0) params.selected_rule_ids = [...selectedYaraIds]
+      }
+      if (selectedModule.id === 'grep_search' && grepPatterns.trim()) {
+        params.patterns = grepPatterns.split('\n').map(p => p.trim()).filter(Boolean)
       }
       const run = await api.modules.createRun(caseId, {
         module_id: selectedModule.id,
@@ -564,6 +583,52 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
                         )}
                       </div>
                     </>
+                  )}
+
+                  {/* ── Grep search patterns ─────────────────────────────── */}
+                  {selectedModule.id === 'grep_search' && (
+                    <div className="flex-1 flex flex-col px-4 pb-4 min-h-0">
+                      <p className="section-title text-[11px] uppercase tracking-wider text-gray-400 mb-2 flex-shrink-0">
+                        Search Patterns
+                        <span className="ml-1.5 font-normal normal-case text-gray-400">(one regex per line — leave empty for built-in IOC patterns)</span>
+                      </p>
+                      <textarea
+                        value={grepPatterns}
+                        onChange={e => setGrepPatterns(e.target.value)}
+                        placeholder={"192\\.168\\.\\d+\\.\\d+\ncmd\\.exe\nbase64\\.b64decode"}
+                        spellCheck={false}
+                        className="flex-1 w-full min-h-0 px-3 py-2.5 text-[11px] font-mono border border-gray-200 bg-gray-950 text-green-300 rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-brand-accent/30 focus:border-brand-accent leading-relaxed"
+                      />
+                    </div>
+                  )}
+
+                  {/* ── YARA library rule selection ───────────────────────── */}
+                  {selectedModule.id === 'yara' && yaraLibraryRules.length > 0 && (
+                    <div className="px-4 pb-2 flex-shrink-0">
+                      <p className="section-title text-[11px] uppercase tracking-wider text-gray-400 mb-1.5">
+                        Library Rules <span className="normal-case font-normal text-gray-400 ml-1">(leave all unchecked to run all)</span>
+                      </p>
+                      <div className="max-h-32 overflow-y-auto space-y-0.5 border border-gray-200 rounded-lg p-2">
+                        {yaraLibraryRules.map(rule => (
+                          <label key={rule.id} className="flex items-center gap-2 cursor-pointer group">
+                            <input
+                              type="checkbox"
+                              checked={selectedYaraIds.has(rule.id)}
+                              onChange={e => setSelectedYaraIds(prev => {
+                                const s = new Set(prev)
+                                e.target.checked ? s.add(rule.id) : s.delete(rule.id)
+                                return s
+                              })}
+                              className="accent-brand-accent"
+                            />
+                            <span className="text-[11px] text-gray-700 truncate group-hover:text-gray-900">{rule.name}</span>
+                            {rule.tags?.length > 0 && (
+                              <span className="text-[9px] text-gray-400 flex-shrink-0">{rule.tags[0]}</span>
+                            )}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
                   )}
 
                   {/* ── YARA custom rules ─────────────────────────────────── */}
@@ -1017,6 +1082,8 @@ function ModuleRunsPanel({ caseId, onClose }) {
   const [runs, setRuns]       = useState([])
   const [loading, setLoading] = useState(true)
 
+  const [showFilters, setShowFilters]   = useState(false)
+
   // ── Level filter (hit-level) ───────────────────────────────────────────────
   const [activeLevels, setActiveLevels] = useState(new Set())
 
@@ -1121,14 +1188,22 @@ function ModuleRunsPanel({ caseId, onClose }) {
             <button onClick={fetchRuns} className="btn-ghost p-1.5 rounded-lg" title="Refresh">
               <RefreshCw size={14} />
             </button>
+            <button
+              onClick={() => setShowFilters(v => !v)}
+              title="Toggle filters"
+              className={`btn-ghost p-1.5 rounded-lg flex items-center gap-1 text-xs transition-colors ${showFilters ? 'bg-brand-accent/10 text-brand-accent' : ''}`}
+            >
+              <Filter size={13} />
+              {hasActiveFilters && <span className="w-1.5 h-1.5 rounded-full bg-brand-accent flex-shrink-0" />}
+            </button>
             <button onClick={onClose} className="btn-ghost p-1.5 rounded-lg">
               <X size={16} />
             </button>
           </div>
         </div>
 
-        {/* ── Filter panel ──────────────────────────────────────────────────── */}
-        <div className="border-b border-gray-100 bg-gray-50/60 divide-y divide-gray-100">
+        {/* ── Filter panel (collapsible) ─────────────────────────────────── */}
+        {showFilters && <div className="border-b border-gray-100 bg-gray-50/60 divide-y divide-gray-100">
 
           {/* Level filter row */}
           <div className="px-4 py-2 flex items-center gap-1.5 flex-wrap">
@@ -1385,7 +1460,7 @@ function ModuleRunsPanel({ caseId, onClose }) {
               </button>
             </div>
           )}
-        </div>
+        </div>}
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
@@ -1457,6 +1532,8 @@ export default function CaseTimeline() {
   const [showModules, setShowModules]       = useState(false)
   const [showModuleRuns, setShowModuleRuns] = useState(false)
   const [showCollector, setShowCollector]   = useState(false)
+  const [showAlertRules, setShowAlertRules] = useState(false)
+  const [showNotes, setShowNotes]           = useState(false)
 
   const loadCase = useCallback(() => {
     api.cases.get(caseId)
@@ -1547,15 +1624,19 @@ export default function CaseTimeline() {
           </button>
 
           <button
-            onClick={runAlerts}
-            disabled={runningAlerts}
-            className="btn-outline"
+            onClick={() => setShowNotes(v => !v)}
+            className={`btn-outline ${showNotes ? 'bg-brand-accentlight border-brand-accent text-brand-accent' : ''}`}
           >
-            {runningAlerts
-              ? <Loader2 size={14} className="animate-spin" />
-              : <Bell size={14} />
-            }
-            {runningAlerts ? 'Running…' : 'Run Alerts'}
+            <FileText size={14} />
+            Notes
+          </button>
+
+          <button
+            onClick={() => setShowAlertRules(v => !v)}
+            className={`btn-outline ${showAlertRules ? 'bg-yellow-50 border-yellow-300 text-yellow-700' : ''}`}
+          >
+            <Bell size={14} />
+            Alert Rules
           </button>
 
           <button
@@ -1600,6 +1681,56 @@ export default function CaseTimeline() {
           onClose={() => setShowIngest(false)}
           onComplete={() => { setShowIngest(false); loadCase() }}
         />
+      )}
+
+      {showNotes && (
+        <div className="panel-backdrop" onClick={() => setShowNotes(false)}>
+          <div
+            className="absolute right-0 top-0 h-full w-[560px] bg-white border-l border-gray-200 flex flex-col"
+            style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.10)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 flex-shrink-0">
+              <div className="flex items-center gap-2">
+                <FileText size={16} className="text-brand-accent" />
+                <span className="font-semibold text-brand-text">Investigator Notes</span>
+              </div>
+              <button onClick={() => setShowNotes(false)} className="btn-ghost p-1.5 rounded-lg">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              <CaseNotes caseId={caseId} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showAlertRules && (
+        <div className="panel-backdrop" onClick={() => setShowAlertRules(false)}>
+          <div
+            className="absolute right-0 top-0 h-full w-[760px] bg-white border-l border-gray-200 flex flex-col overflow-y-auto"
+            style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.10)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 flex-shrink-0">
+              <div className="flex items-center gap-2">
+                <Bell size={15} className="text-yellow-500" />
+                <span className="font-semibold text-brand-text text-sm">Alert Rules</span>
+              </div>
+              <button onClick={() => setShowAlertRules(false)} className="btn-ghost p-1.5 rounded-lg">
+                <X size={16} />
+              </button>
+            </div>
+            <AlertRules
+              caseId={caseId}
+              onSearchQuery={q => {
+                setShowAlertRules(false)
+                navigate(`/cases/${caseId}/search`, { state: { pivotQuery: q } })
+              }}
+            />
+          </div>
+        </div>
       )}
 
       {alertResults && (

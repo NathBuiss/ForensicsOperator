@@ -72,6 +72,7 @@ class SyslogPlugin(BasePlugin):
     """Parses Linux/UNIX syslog files (RFC 3164, RFC 5424)."""
 
     PLUGIN_NAME = "syslog"
+    PLUGIN_PRIORITY = 100
     PLUGIN_VERSION = "1.0.0"
     DEFAULT_ARTIFACT_TYPE = "syslog"
     SUPPORTED_EXTENSIONS = [".log"]

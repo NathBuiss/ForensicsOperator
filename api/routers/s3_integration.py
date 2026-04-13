@@ -1,61 +1,71 @@
 """
-External S3 Integration.
+External S3 Integration — two independent configurations.
 
-Allows connecting to an external S3-compatible bucket (AWS S3, MinIO, Wasabi, etc.)
-for artifact import and collector uploads.
+  TRIAGE UPLOAD storage  (fo:s3_triage_config)
+      Where agents push collected evidence (triage ZIPs, memory dumps, etc.).
+      Analysts browse this bucket and pull files into cases on demand.
 
-Settings stored in Redis at fo:s3_config hash.
+  CASE DATA IMPORT storage  (fo:s3_config)
+      Browse any external S3-compatible bucket and import files into a case
+      for parsing — AWS S3, MinIO, Wasabi, GCS, Scaleway Object Storage, …
+
+Both configs are stored in Redis as JSON strings.
+All file transfers stream directly: external S3 → internal MinIO, no full RAM buffer.
 """
 from __future__ import annotations
 
-import io
+import itertools
 import json
 import logging
 import uuid
 from typing import Optional
 
-import redis as redis_lib
+import redis
 from fastapi import APIRouter, HTTPException, Query
 from minio import Minio
 from pydantic import BaseModel
 
-from config import settings
+from config import settings, get_redis as _redis
 from services import storage, jobs as job_svc
 from services.cases import get_case
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["s3"])
 
-_S3_CONFIG_KEY = "fo:s3_config"
+# ── Redis keys ────────────────────────────────────────────────────────────────
+_S3_IMPORT_KEY  = "fo:s3_config"          # case data import (existing)
+_S3_TRIAGE_KEY  = "fo:s3_triage_config"   # triage upload bucket (new)
 
-# Fields that are safe to return to the frontend (secret_key is masked)
 _PUBLIC_FIELDS = ("endpoint", "access_key", "bucket", "region", "vendor", "use_ssl")
+
+# Scaleway Object Storage regions → endpoint mapping
+SCALEWAY_ENDPOINTS = {
+    "nl-ams": "s3.nl-ams.scw.cloud",   # Amsterdam
+    "fr-par": "s3.fr-par.scw.cloud",   # Paris
+    "pl-waw": "s3.pl-waw.scw.cloud",   # Warsaw
+}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _redis() -> redis_lib.Redis:
-    return redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
-
-
-def _get_config(r: redis_lib.Redis) -> dict:
-    """Load the external S3 config from Redis."""
-    raw = r.get(_S3_CONFIG_KEY)
+def _load(r: redis.Redis, key: str) -> dict:
+    raw = r.get(key)
     return json.loads(raw) if raw else {}
 
 
-def _build_external_client(cfg: dict) -> Minio:
-    """Build a Minio client from the saved external S3 config."""
-    if not cfg or not cfg.get("endpoint"):
-        raise HTTPException(status_code=400, detail="No external S3 configuration saved.")
+def _save(r: redis.Redis, key: str, cfg: dict) -> None:
+    r.set(key, json.dumps(cfg))
 
+
+def _build_client(cfg: dict) -> Minio:
+    """Build a Minio client pointing at the external S3 config."""
+    if not cfg or not cfg.get("endpoint"):
+        raise HTTPException(status_code=400, detail="No S3 configuration saved.")
     endpoint = cfg["endpoint"]
-    # Strip protocol prefix if present — Minio client expects host:port only
     for prefix in ("https://", "http://"):
         if endpoint.lower().startswith(prefix):
             endpoint = endpoint[len(prefix):]
             break
-
     return Minio(
         endpoint,
         access_key=cfg.get("access_key", ""),
@@ -65,13 +75,57 @@ def _build_external_client(cfg: dict) -> Minio:
     )
 
 
-def _dispatch_celery_task(job_id: str, case_id: str, minio_key: str, filename: str) -> None:
-    """Dispatch a Celery ingest task via direct Redis push."""
+def _stream_to_minio(ext_client: Minio, ext_bucket: str, s3_key: str, minio_key: str) -> int:
+    """
+    Stream an object from an external S3 bucket directly into internal MinIO.
+
+    Never buffers the full payload — uses MinIO multipart upload under the hood
+    for objects larger than ~5 MB. Returns the number of bytes transferred.
+    """
+    # HEAD the object to get its size (required by put_object for non-chunked streams)
+    try:
+        stat = ext_client.stat_object(ext_bucket, s3_key)
+        file_size = stat.size
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not stat '{s3_key}': {exc}")
+
+    if file_size == 0:
+        raise HTTPException(status_code=400, detail="Remote object is empty.")
+
+    response = None
+    try:
+        response = ext_client.get_object(ext_bucket, s3_key)
+        int_client = storage.get_minio()
+        storage.ensure_bucket()
+        # Stream directly: external S3 → internal MinIO, no RAM accumulation
+        int_client.put_object(
+            settings.MINIO_BUCKET,
+            minio_key,
+            response,
+            length=file_size,
+            part_size=10 * 1024 * 1024,  # 10 MB multipart chunks for large files
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Transfer failed: {exc}")
+    finally:
+        if response is not None:
+            try:
+                response.close()
+                response.release_conn()
+            except Exception:
+                pass
+
+    return file_size
+
+
+def _dispatch(job_id: str, case_id: str, minio_key: str, filename: str) -> None:
     from services.celery_dispatch import dispatch_ingest
     dispatch_ingest(job_id, case_id, minio_key, filename)
 
 
-# ── Pydantic models ──────────────────────────────────────────────────────────
+# ── Pydantic models ───────────────────────────────────────────────────────────
 
 class S3ConfigIn(BaseModel):
     endpoint: str
@@ -79,7 +133,7 @@ class S3ConfigIn(BaseModel):
     secret_key: str = ""
     bucket: str
     region: str = ""
-    vendor: str = "aws"      # aws | minio | wasabi | gcs | other
+    vendor: str = "aws"   # aws | scaleway | minio | wasabi | gcs | other
     use_ssl: bool = True
 
 
@@ -98,206 +152,244 @@ class S3ImportIn(BaseModel):
     filename: Optional[str] = None
 
 
-# ── Admin config endpoints ────────────────────────────────────────────────────
+# ── Shared config CRUD factory ────────────────────────────────────────────────
 
-@router.get("/admin/s3-config", response_model=S3ConfigOut)
-def get_s3_config():
-    """Return current external S3 configuration (secret key masked)."""
-    r = _redis()
-    cfg = _get_config(r)
-    return S3ConfigOut(
-        endpoint=cfg.get("endpoint", ""),
-        access_key=cfg.get("access_key", ""),
-        secret_key_set=bool(cfg.get("secret_key")),
-        bucket=cfg.get("bucket", ""),
-        region=cfg.get("region", ""),
-        vendor=cfg.get("vendor", "aws"),
-        use_ssl=cfg.get("use_ssl", True),
-    )
-
-
-@router.put("/admin/s3-config", response_model=S3ConfigOut)
-def update_s3_config(body: S3ConfigIn):
-    """Save external S3 configuration. If secret_key is empty, keeps the existing one."""
-    r = _redis()
-    existing = _get_config(r)
-
-    cfg = {
-        "endpoint":   body.endpoint,
-        "access_key": body.access_key,
-        "bucket":     body.bucket,
-        "region":     body.region,
-        "vendor":     body.vendor,
-        "use_ssl":    body.use_ssl,
-        # Keep existing secret key if new request sends empty string
-        "secret_key": body.secret_key if body.secret_key else existing.get("secret_key", ""),
-    }
-    r.set(_S3_CONFIG_KEY, json.dumps(cfg))
-
-    return S3ConfigOut(
-        endpoint=cfg["endpoint"],
-        access_key=cfg["access_key"],
-        secret_key_set=bool(cfg["secret_key"]),
-        bucket=cfg["bucket"],
-        region=cfg["region"],
-        vendor=cfg["vendor"],
-        use_ssl=cfg["use_ssl"],
-    )
-
-
-@router.delete("/admin/s3-config", status_code=204)
-def clear_s3_config():
-    """Remove external S3 configuration."""
-    _redis().delete(_S3_CONFIG_KEY)
-
-
-@router.post("/admin/s3-config/test")
-def test_s3_config():
+def _make_config_routes(redis_key: str, path_prefix: str, label: str):
     """
-    Test the saved external S3 connection by attempting to list the bucket.
-    Returns {"ok": true, "objects": <count>} on success, HTTP 502 on failure.
+    Return (get_fn, put_fn, delete_fn, test_fn) handlers bound to a specific
+    Redis key and URL prefix.  Avoids copy-pasting identical logic twice.
     """
-    r = _redis()
-    cfg = _get_config(r)
-    if not cfg or not cfg.get("endpoint"):
-        raise HTTPException(status_code=400, detail="No external S3 configuration saved yet.")
 
-    try:
-        client = _build_external_client(cfg)
-        # List up to 5 objects to verify the bucket is accessible
-        objects = list(client.list_objects(cfg["bucket"], max_keys=5))
-        return {
-            "ok": True,
-            "bucket": cfg["bucket"],
-            "objects": len(objects),
-            "message": f"Connected successfully. Found {len(objects)} object(s) in sample.",
+    def get_cfg():
+        r = _redis()
+        cfg = _load(r, redis_key)
+        return S3ConfigOut(
+            endpoint=cfg.get("endpoint", ""),
+            access_key=cfg.get("access_key", ""),
+            secret_key_set=bool(cfg.get("secret_key")),
+            bucket=cfg.get("bucket", ""),
+            region=cfg.get("region", ""),
+            vendor=cfg.get("vendor", "aws"),
+            use_ssl=cfg.get("use_ssl", True),
+        )
+
+    def put_cfg(body: S3ConfigIn):
+        r = _redis()
+        existing = _load(r, redis_key)
+        cfg = {
+            "endpoint":   body.endpoint,
+            "access_key": body.access_key,
+            "bucket":     body.bucket,
+            "region":     body.region,
+            "vendor":     body.vendor,
+            "use_ssl":    body.use_ssl,
+            "secret_key": body.secret_key if body.secret_key else existing.get("secret_key", ""),
         }
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"S3 connection test failed: {exc}")
+        _save(r, redis_key, cfg)
+        return S3ConfigOut(**{**cfg, "secret_key_set": bool(cfg["secret_key"])})
+
+    def delete_cfg():
+        _redis().delete(redis_key)
+
+    def test_cfg():
+        r = _redis()
+        cfg = _load(r, redis_key)
+        if not cfg or not cfg.get("endpoint"):
+            raise HTTPException(status_code=400, detail=f"No {label} S3 config saved yet.")
+        try:
+            client = _build_client(cfg)
+            objects = list(itertools.islice(client.list_objects(cfg["bucket"]), 5))
+            return {
+                "ok": True,
+                "bucket": cfg["bucket"],
+                "objects": len(objects),
+                "message": f"Connected. Found {len(objects)} object(s) in sample.",
+            }
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Connection test failed: {exc}")
+
+    return get_cfg, put_cfg, delete_cfg, test_cfg
 
 
-# ── Browse endpoint ───────────────────────────────────────────────────────────
+# ── Case Data Import endpoints (/admin/s3-config) ─────────────────────────────
+# Existing path — kept identical so current clients are not broken.
 
-@router.get("/s3/browse")
-def browse_s3(
-    prefix: str = Query("", description="Object key prefix (folder path)"),
-    delimiter: str = Query("/", description="Delimiter for folder grouping"),
-):
-    """
-    List objects in the configured external S3 bucket.
-    Supports prefix-based browsing with delimiter for virtual folder navigation.
-    """
+_imp_get, _imp_put, _imp_del, _imp_test = _make_config_routes(
+    _S3_IMPORT_KEY, "/admin/s3-config", "import"
+)
+# Give each closure a unique __name__ so FastAPI generates distinct operation IDs.
+_imp_get.__name__  = "get_s3_import_config"
+_imp_put.__name__  = "put_s3_import_config"
+_imp_del.__name__  = "delete_s3_import_config"
+_imp_test.__name__ = "test_s3_import_config"
+
+router.get("/admin/s3-config",        response_model=S3ConfigOut)(_imp_get)
+router.put("/admin/s3-config",        response_model=S3ConfigOut)(_imp_put)
+router.delete("/admin/s3-config",     status_code=204)(_imp_del)
+router.post("/admin/s3-config/test")(_imp_test)
+
+
+# ── Triage Upload S3 endpoints (/admin/s3-triage-config) ──────────────────────
+
+_tri_get, _tri_put, _tri_del, _tri_test = _make_config_routes(
+    _S3_TRIAGE_KEY, "/admin/s3-triage-config", "triage"
+)
+_tri_get.__name__  = "get_s3_triage_config"
+_tri_put.__name__  = "put_s3_triage_config"
+_tri_del.__name__  = "delete_s3_triage_config"
+_tri_test.__name__ = "test_s3_triage_config"
+
+router.get("/admin/s3-triage-config",        response_model=S3ConfigOut)(_tri_get)
+router.put("/admin/s3-triage-config",        response_model=S3ConfigOut)(_tri_put)
+router.delete("/admin/s3-triage-config",     status_code=204)(_tri_del)
+router.post("/admin/s3-triage-config/test")(_tri_test)
+
+
+# ── Browse endpoints ──────────────────────────────────────────────────────────
+
+def _browse(redis_key: str, label: str, prefix: str, delimiter: str):
     r = _redis()
-    cfg = _get_config(r)
+    cfg = _load(r, redis_key)
     if not cfg or not cfg.get("endpoint"):
-        raise HTTPException(status_code=400, detail="No external S3 configuration saved.")
-
+        raise HTTPException(status_code=400, detail=f"No {label} S3 configuration saved.")
     try:
-        client = _build_external_client(cfg)
-        result_objects = client.list_objects(
+        client = _build_client(cfg)
+        items = client.list_objects(
             cfg["bucket"],
             prefix=prefix or None,
             recursive=delimiter == "",
         )
-
-        folders = []
-        files = []
-        for obj in result_objects:
+        folders, files = [], []
+        for obj in items:
             if obj.is_dir:
-                folders.append({
-                    "key": obj.object_name,
-                    "type": "folder",
-                })
+                folders.append({"key": obj.object_name, "type": "folder"})
             else:
                 files.append({
-                    "key": obj.object_name,
-                    "type": "file",
-                    "size": obj.size,
+                    "key":           obj.object_name,
+                    "type":          "file",
+                    "size":          obj.size,
                     "last_modified": obj.last_modified.isoformat() if obj.last_modified else None,
-                    "etag": obj.etag,
+                    "etag":          obj.etag,
                 })
-
-        return {
-            "prefix": prefix,
-            "bucket": cfg["bucket"],
-            "folders": folders,
-            "files": files,
-        }
+        return {"prefix": prefix, "bucket": cfg["bucket"], "folders": folders, "files": files}
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed to browse S3: {exc}")
 
 
-# ── Import to case endpoint ──────────────────────────────────────────────────
+@router.get("/s3/browse")
+def browse_import_s3(
+    prefix: str = Query(""),
+    delimiter: str = Query("/"),
+):
+    """Browse the case-data-import S3 bucket."""
+    return _browse(_S3_IMPORT_KEY, "import", prefix, delimiter)
+
+
+@router.get("/s3-triage/browse")
+def browse_triage_s3(
+    prefix: str = Query(""),
+    delimiter: str = Query("/"),
+):
+    """Browse the triage-upload S3 bucket."""
+    return _browse(_S3_TRIAGE_KEY, "triage", prefix, delimiter)
+
+
+# ── Import: case data S3 → case ───────────────────────────────────────────────
 
 @router.post("/cases/{case_id}/s3-import")
 def import_from_s3(case_id: str, body: S3ImportIn):
     """
-    Import a file from the external S3 bucket into a case.
+    Stream a file from the case-data-import S3 bucket into a case.
 
-    1. Downloads the file from the external S3
-    2. Uploads it to internal MinIO at the case's path
-    3. Creates a job and dispatches the ingest task
-    4. Returns the job_id
+    Streams directly from external S3 to internal MinIO — no full-file
+    RAM buffer, safe for multi-GB forensic images.
     """
-    # Validate case exists
     case = get_case(case_id)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    # Load external S3 config
     r = _redis()
-    cfg = _get_config(r)
+    cfg = _load(r, _S3_IMPORT_KEY)
     if not cfg or not cfg.get("endpoint"):
-        raise HTTPException(status_code=400, detail="No external S3 configuration saved.")
+        raise HTTPException(status_code=400, detail="No import S3 configuration saved.")
 
-    # Determine filename
     filename = body.filename or body.s3_key.rsplit("/", 1)[-1] or "unknown"
+    job_id   = uuid.uuid4().hex
+    minio_key = f"cases/{case_id}/{job_id}/{filename}"
 
-    try:
-        ext_client = _build_external_client(cfg)
-        # Download object from external S3
-        response = ext_client.get_object(cfg["bucket"], body.s3_key)
-    except Exception as exc:
+    ext_client = _build_client(cfg)
+    size = _stream_to_minio(ext_client, cfg["bucket"], body.s3_key, minio_key)
+
+    job_svc.create_job(job_id, case_id, filename, minio_key, source_zip="")
+    _dispatch(job_id, case_id, minio_key, filename)
+
+    return {
+        "job_id":     job_id,
+        "case_id":    case_id,
+        "filename":   filename,
+        "s3_key":     body.s3_key,
+        "size_bytes": size,
+        "status":     "PENDING",
+    }
+
+
+# ── Pull: triage S3 → case ───────────────────────────────────────────────────
+
+@router.post("/cases/{case_id}/s3-triage-pull")
+def pull_from_triage(case_id: str, body: S3ImportIn):
+    """
+    Pull a file from the triage-upload S3 bucket into a case for processing.
+
+    Intended workflow: agents push collected archives to the triage bucket;
+    analysts open a case, browse the bucket, and pull relevant archives here.
+    Streams directly — safe for large triage ZIPs and memory dumps.
+    """
+    case = get_case(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    r = _redis()
+    cfg = _load(r, _S3_TRIAGE_KEY)
+    if not cfg or not cfg.get("endpoint"):
         raise HTTPException(
-            status_code=502,
-            detail=f"Failed to download '{body.s3_key}' from external S3: {exc}",
+            status_code=400,
+            detail="No triage S3 configuration saved. Configure it in Settings → Triage Upload Storage.",
         )
 
-    try:
-        # Read into memory (for size) then upload to internal MinIO
-        data = response.read()
-        size = len(data)
-        if size == 0:
-            raise HTTPException(status_code=400, detail="Downloaded file is empty.")
+    filename  = body.filename or body.s3_key.rsplit("/", 1)[-1] or "unknown"
+    job_id    = uuid.uuid4().hex
+    minio_key = f"cases/{case_id}/{job_id}/{filename}"
 
-        job_id = uuid.uuid4().hex
-        minio_key = f"cases/{case_id}/{job_id}/{filename}"
+    ext_client = _build_client(cfg)
+    size = _stream_to_minio(ext_client, cfg["bucket"], body.s3_key, minio_key)
 
-        storage.upload_file(minio_key, data)
+    job_svc.create_job(job_id, case_id, filename, minio_key, source_zip="")
+    _dispatch(job_id, case_id, minio_key, filename)
 
-        # Create job record in Redis
-        job_svc.create_job(job_id, case_id, filename, minio_key, source_zip="")
+    return {
+        "job_id":     job_id,
+        "case_id":    case_id,
+        "filename":   filename,
+        "s3_key":     body.s3_key,
+        "size_bytes": size,
+        "status":     "PENDING",
+    }
 
-        # Dispatch Celery ingest task
-        _dispatch_celery_task(job_id, case_id, minio_key, filename)
 
-        return {
-            "job_id": job_id,
-            "case_id": case_id,
-            "filename": filename,
-            "s3_key": body.s3_key,
-            "size_bytes": size,
-            "status": "PENDING",
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to import '{filename}' into case: {exc}",
-        )
-    finally:
-        response.close()
-        response.release_conn()
+# ── Scaleway region helper ─────────────────────────────────────────────────────
+
+@router.get("/s3/scaleway-regions")
+def scaleway_regions():
+    """Return the list of Scaleway Object Storage regions and their endpoints."""
+    return [
+        {"region": k, "endpoint": v, "label": {
+            "nl-ams": "Amsterdam (nl-ams)",
+            "fr-par": "Paris (fr-par)",
+            "pl-waw": "Warsaw (pl-waw)",
+        }[k]}
+        for k in SCALEWAY_ENDPOINTS
+    ]

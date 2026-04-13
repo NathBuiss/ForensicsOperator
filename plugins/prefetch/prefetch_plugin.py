@@ -43,7 +43,7 @@ class PrefetchPlugin(BasePlugin):
     PLUGIN_VERSION = "1.0.0"
     DEFAULT_ARTIFACT_TYPE = "prefetch"
     SUPPORTED_EXTENSIONS = [".pf"]
-    SUPPORTED_MIME_TYPES = ["application/octet-stream"]
+    SUPPORTED_MIME_TYPES = []
 
     def __init__(self, context: PluginContext) -> None:
         super().__init__(context)

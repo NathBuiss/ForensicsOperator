@@ -192,9 +192,10 @@ def list_case_sources(case_id: str):
             "plugin_used":       j.get("plugin_used", ""),
             "events_indexed":    j.get("events_indexed", 0),
             "minio_object_key":  j.get("minio_object_key", ""),
+            "skipped":           j.get("status") == "SKIPPED",
         }
         for j in jobs
-        if j.get("status") == "COMPLETED"
+        if j.get("status") in ("COMPLETED", "SKIPPED")
     ]
     return {"sources": sources}
 
@@ -224,7 +225,7 @@ def create_module_run(case_id: str, req: CreateModuleRunRequest):
         job = all_jobs.get(job_id)
         if not job:
             raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
-        if job.get("status") != "COMPLETED":
+        if job.get("status") not in ("COMPLETED", "SKIPPED"):
             raise HTTPException(
                 status_code=400,
                 detail=f"Job '{job_id}' has not completed yet (status: {job.get('status')})",

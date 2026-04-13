@@ -600,6 +600,26 @@ export default function AlertLibrary() {
   const [seedMsg, setSeedMsg]   = useState(null)
   const [showSigmaModal, setShowSigmaModal] = useState(false)
   const [search, setSearch]             = useState('')
+
+  // Standalone Sigma validator
+  const [showValidator, setShowValidator]     = useState(false)
+  const [validatorYaml, setValidatorYaml]     = useState('')
+  const [validating, setValidating]           = useState(false)
+  const [validatorResult, setValidatorResult] = useState(null)  // {ok, parsed} | {ok, msg}
+
+  async function runSigmaValidate() {
+    if (!validatorYaml.trim()) return
+    setValidating(true)
+    setValidatorResult(null)
+    try {
+      const r = await api.alertRules.parseSigma({ yaml: validatorYaml })
+      setValidatorResult({ ok: true, parsed: r })
+    } catch (err) {
+      setValidatorResult({ ok: false, msg: err.message })
+    } finally {
+      setValidating(false)
+    }
+  }
   const [artifactFilter, setArtifactFilter] = useState('all')
   const [categoryFilter, setCategoryFilter] = useState('all')
   const searchRef = useRef(null)
@@ -695,13 +715,13 @@ export default function AlertLibrary() {
   }
 
   return (
-    <div className="p-6 max-w-4xl">
+    <div className="p-6 max-w-4xl mx-auto">
 
       {/* Page header */}
       <div className="mb-6">
         <div className="flex items-center gap-2.5 mb-1">
           <Bell size={20} className="text-brand-accent" />
-          <h1 className="text-xl font-bold text-brand-text">Alert Rule Library</h1>
+          <h1 className="text-xl font-bold text-brand-text">Detection Rules</h1>
         </div>
         <p className="text-sm text-gray-500">
           Sigma-based detection rules. Use <Play size={11} className="inline" /> to run a rule on any case,
@@ -733,6 +753,12 @@ export default function AlertLibrary() {
               <Plus size={13} /> New Rule
             </button>
             <button
+              onClick={() => { setShowValidator(v => !v); setValidatorResult(null) }}
+              className={`btn-ghost text-xs ${showValidator ? 'text-brand-accent' : ''}`}
+            >
+              <Check size={13} /> Validate
+            </button>
+            <button
               onClick={() => seedDefaults(false)}
               disabled={seeding}
               className="btn-outline text-xs"
@@ -743,6 +769,45 @@ export default function AlertLibrary() {
             </button>
           </div>
         </div>
+
+        {/* ── Sigma YAML validator ──────────────────────────────────────── */}
+        {showValidator && (
+          <div className="card p-4 mb-4 border border-brand-accent/20 bg-brand-soft/30">
+            <p className="text-xs font-semibold text-gray-700 mb-2 flex items-center gap-1.5">
+              <Check size={12} className="text-brand-accent" /> Sigma YAML Validator
+            </p>
+            <textarea
+              value={validatorYaml}
+              onChange={e => { setValidatorYaml(e.target.value); setValidatorResult(null) }}
+              placeholder={`title: Example Rule\nstatus: experimental\nlogsource:\n    category: process_creation\n    product: windows\ndetection:\n    selection:\n        CommandLine|contains: 'suspicious'\n    condition: selection`}
+              spellCheck={false}
+              className="w-full font-mono text-xs bg-gray-950 text-green-400 rounded-lg p-3 h-40 resize-none outline-none focus:ring-1 focus:ring-brand-accent/40 border border-gray-200 mb-2"
+            />
+            <div className="flex items-start gap-3 flex-wrap">
+              <button
+                onClick={runSigmaValidate}
+                disabled={validating || !validatorYaml.trim()}
+                className="btn-primary text-xs flex items-center gap-1.5 disabled:opacity-50 flex-shrink-0"
+              >
+                {validating ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />}
+                {validating ? 'Parsing…' : 'Validate'}
+              </button>
+              {validatorResult && (
+                validatorResult.ok ? (
+                  <div className="text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2 space-y-0.5">
+                    <p className="flex items-center gap-1 font-semibold"><Check size={11} /> Valid Sigma rule</p>
+                    {validatorResult.parsed?.name && <p className="text-gray-600">Name: <span className="font-medium">{validatorResult.parsed.name}</span></p>}
+                    {validatorResult.parsed?.query && <code className="block text-[10px] text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded mt-1">{validatorResult.parsed.query}</code>}
+                  </div>
+                ) : (
+                  <p className="text-xs text-red-600 flex items-center gap-1.5 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                    <AlertTriangle size={11} /> {validatorResult.msg}
+                  </p>
+                )
+              )}
+            </div>
+          </div>
+        )}
 
         {/* New Sigma Rule modal */}
         {showSigmaModal && (

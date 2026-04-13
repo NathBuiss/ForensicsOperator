@@ -5,6 +5,11 @@ metadata:
   namespace: __FO_NAMESPACE__
 spec:
   replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0        # terminate one old pod first so RWO volumes are released
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: api
@@ -50,6 +55,8 @@ spec:
                 secretKeyRef:
                   name: api-auth-secret
                   key: ADMIN_PASSWORD
+            - name: CHUNK_DIR
+              value: "/app/uploads/_chunks"
           resources:
             requests:
               memory: "__FO_API_MEMORY_REQUEST__"
@@ -72,12 +79,17 @@ spec:
           volumeMounts:
             - name: plugins-volume
               mountPath: /app/plugins
+            - name: uploads-volume
+              mountPath: /app/uploads
             - name: tmp-storage
               mountPath: /tmp
       volumes:
         - name: plugins-volume
           persistentVolumeClaim:
             claimName: plugins-pvc
+        - name: uploads-volume
+          persistentVolumeClaim:
+            claimName: uploads-pvc
         - name: tmp-storage
           emptyDir:
             sizeLimit: 20Gi

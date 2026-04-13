@@ -48,6 +48,7 @@ class ZeekPlugin(BasePlugin):
     """Parses Zeek/Bro network log files (TSV format with #fields header)."""
 
     PLUGIN_NAME = "zeek"
+    PLUGIN_PRIORITY = 100
     PLUGIN_VERSION = "1.0.0"
     DEFAULT_ARTIFACT_TYPE = "zeek"
     SUPPORTED_EXTENSIONS = [".log"]

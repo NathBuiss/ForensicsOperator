@@ -11,12 +11,16 @@ WORKDIR /app
 # libjpeg-dev / zlib1g-dev → optional image libraries for ExifTool
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-dev \
+    build-essential \
     libmagic1 libmagic-dev \
-    wget curl \
+    wget curl git \
     binutils \
     perl \
     unzip \
     libimage-exiftool-perl \
+    libtsk-dev \
+    libewf-dev \
+    testdisk \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Hayabusa DFIR binary + rules (Sigma-based EVTX threat hunting) ───────────
@@ -42,8 +46,22 @@ RUN wget -q -O /tmp/regripper.zip \
     && rm /tmp/regripper.zip
 
 # ── Python deps (includes pyhindsight for the Hindsight module) ───────────────
+# Upgrade build tools first so pyproject.toml-based packages build on Ubuntu 22.04's old pip.
+RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
 COPY processor/requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
+
+# ccl_chromium_reader is required by pyhindsight but is not on PyPI.
+# Install from GitHub (has pyproject.toml so pip handles it, including its ccl_simplesnappy dep).
+RUN pip3 install --no-cache-dir \
+    "git+https://github.com/cclgroupltd/ccl_chromium_reader.git" \
+    && python3 -c "import ccl_chromium_reader; print('ccl_chromium_reader installed OK')"
+
+# Patch pyhindsight for Python < 3.11 compatibility.
+# datetime.UTC was introduced in Python 3.11; replace with datetime.timezone.utc.
+RUN python3 -c "import datetime; datetime.UTC" 2>/dev/null || \
+    find /usr/local/lib /usr/lib -name "*.py" -path "*/pyhindsight/*" -exec \
+    sed -i 's/datetime\.UTC/datetime.timezone.utc/g' {} \;
 
 # ── Processor source code ─────────────────────────────────────────────────────
 COPY processor/ .

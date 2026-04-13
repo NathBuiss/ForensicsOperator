@@ -25,6 +25,26 @@ def list_case_jobs(case_id: str):
     return {"case_id": case_id, "jobs": jobs, "total": len(jobs)}
 
 
+@router.post("/jobs/batch")
+def get_jobs_batch(body: dict):
+    """
+    Return status for up to 500 job IDs in a single request.
+
+    Accepts: {"job_ids": ["id1", "id2", ...]}
+    Returns: array of job objects (missing IDs are silently omitted).
+
+    Used by the Ingest UI to replace N individual polling calls with one,
+    preventing ERR_INSUFFICIENT_RESOURCES when a ZIP produces hundreds of jobs.
+    """
+    job_ids = body.get("job_ids", [])[:500]
+    results = []
+    for jid in job_ids:
+        job = job_svc.get_job(jid)
+        if job:
+            results.append(job)
+    return results
+
+
 @router.post("/jobs/{job_id}/retry")
 def retry_job(job_id: str):
     """

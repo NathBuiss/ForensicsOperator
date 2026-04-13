@@ -16,6 +16,7 @@ const WINDOWS_ARTIFACTS = [
   { key: 'browser',  label: 'Browser Artifacts',    desc: 'Chrome, Edge, Firefox — history, cookies, login data' },
   { key: 'tasks',    label: 'Scheduled Tasks',      desc: 'Windows Task Scheduler XML files from System32\\Tasks' },
   { key: 'triage',   label: 'Live System Triage',   desc: 'systeminfo, netstat, tasklist, services, installed software' },
+  { key: 'memory',   label: 'Memory Dump',          desc: 'Physical memory via WinPmem — requires winpmem_mini_x64_rc2.exe beside the script', warn: true },
 ]
 
 const LINUX_ARTIFACTS = [
@@ -24,7 +25,9 @@ const LINUX_ARTIFACTS = [
   { key: 'config',  label: 'System Configuration',  desc: '/etc/passwd, sudoers, hosts, ssh/sshd_config and more' },
   { key: 'cron',    label: 'Cron Jobs',             desc: 'cron.d, cron.daily, crontabs, systemd timers' },
   { key: 'ssh',     label: 'SSH Artifacts',         desc: 'known_hosts, authorized_keys, config (no private keys)' },
+  { key: 'network', label: 'Network Captures',      desc: 'PCAP/tcpdump snapshots (5 min, 500 MB cap)' },
   { key: 'triage',  label: 'Live System Triage',    desc: 'ps, ss, ip, last, lsmod, services, installed packages' },
+  { key: 'memory',  label: 'Memory Dump',           desc: 'Physical memory via avml or /dev/fmem — requires root + avml in PATH', warn: true },
 ]
 
 const PLATFORMS = [
@@ -50,7 +53,9 @@ const PLATFORMS = [
     Icon: FileCode,
     desc: 'Platform-agnostic — auto-detects OS at runtime',
     tip: 'Works on Windows, Linux & macOS. Use this when the target already has Python 3.8+.',
-    artifacts: [...WINDOWS_ARTIFACTS, ...LINUX_ARTIFACTS],
+    artifacts: [...WINDOWS_ARTIFACTS, ...LINUX_ARTIFACTS].filter(
+      (a, i, arr) => arr.findIndex(b => b.key === a.key) === i
+    ),
   },
 ]
 

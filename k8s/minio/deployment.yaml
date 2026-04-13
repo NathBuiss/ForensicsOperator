@@ -55,17 +55,6 @@ spec:
             claimName: minio-pvc
 ---
 apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: minio-pvc
-  namespace: __FO_NAMESPACE__
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: __FO_MINIO_STORAGE__
----
-apiVersion: v1
 kind: Secret
 metadata:
   name: minio-secret

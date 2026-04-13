@@ -153,11 +153,38 @@ export default function Modules() {
     return modules.filter(m => {
       const textMatch = !q ||
         (m.name || '').toLowerCase().includes(q) ||
-        (m.description || '').toLowerCase().includes(q)
+        (m.description || '').toLowerCase().includes(q) ||
+        (m.category || '').toLowerCase().includes(q)
       const availabilityMatch = showUnavailable || m.available
       return textMatch && availabilityMatch
     })
   }, [modules, search, showUnavailable])
+
+  // Group filtered modules by category, available-first within each group
+  const CATEGORY_ORDER = [
+    'Threat Hunting', 'Windows', 'Disk Forensics', 'Browser Forensics',
+    'Memory Forensics', 'Network', 'Binary Analysis', 'Malware Detection',
+    'Threat Intelligence', 'Metadata Extraction',
+  ]
+  const groupedModules = useMemo(() => {
+    const groups = {}
+    filteredModules.forEach(m => {
+      const cat = m.category || 'Other'
+      if (!groups[cat]) groups[cat] = []
+      groups[cat].push(m)
+    })
+    // Sort within each group: available first
+    Object.values(groups).forEach(arr => arr.sort((a, b) => (b.available ? 1 : 0) - (a.available ? 1 : 0)))
+    // Return sorted by CATEGORY_ORDER, then alphabetically for any uncategorised
+    return Object.entries(groups).sort(([a], [b]) => {
+      const ai = CATEGORY_ORDER.indexOf(a)
+      const bi = CATEGORY_ORDER.indexOf(b)
+      if (ai !== -1 && bi !== -1) return ai - bi
+      if (ai !== -1) return -1
+      if (bi !== -1) return 1
+      return a.localeCompare(b)
+    })
+  }, [filteredModules])
 
   const available   = filteredModules.filter(m => m.available)
   const unavailable = filteredModules.filter(m => !m.available)
@@ -243,40 +270,39 @@ export default function Modules() {
 
       {!loading && !error && (
         <>
-          {/* ── Available ────────────────────────────────────────────────────── */}
-          <section className="mb-8">
-            <div className="flex items-center gap-2 mb-3">
-              <h2 className="section-title">Available</h2>
+          {/* ── Stats bar ───────────────────────────────────────────────────── */}
+          {filteredModules.length > 0 && (
+            <div className="flex items-center gap-3 mb-5 flex-wrap">
               <span className="badge bg-green-50 text-green-700 border border-green-200">
-                {available.length}
+                <CheckCircle size={9} className="mr-1" /> {available.length} available
               </span>
-            </div>
-            {available.length === 0 ? (
-              <p className="text-xs text-gray-400 italic">No modules available yet.</p>
-            ) : (
-              <div className="space-y-2">
-                {available.map(mod => (
-                  <ModuleCard key={mod.id} mod={mod} onEdit={openInStudio} />
-                ))}
-              </div>
-            )}
-          </section>
-
-          {/* ── Coming soon / unavailable ───────────────────────────────────── */}
-          {unavailable.length > 0 && (
-            <section className="mb-8">
-              <div className="flex items-center gap-2 mb-3">
-                <h2 className="section-title">Coming Soon</h2>
-                <span className="badge bg-gray-100 text-gray-500 border border-gray-200">
-                  {unavailable.length}
+              {unavailable.length > 0 && (
+                <span className="badge bg-gray-100 text-gray-400 border border-gray-200">
+                  <XCircle size={9} className="mr-1" /> {unavailable.length} unavailable
                 </span>
-              </div>
-              <div className="space-y-2">
-                {unavailable.map(mod => (
-                  <ModuleCard key={mod.id} mod={mod} />
-                ))}
-              </div>
-            </section>
+              )}
+            </div>
+          )}
+
+          {/* ── Category groups ─────────────────────────────────────────────── */}
+          {groupedModules.length === 0 ? (
+            <p className="text-xs text-gray-400 italic py-8 text-center">No modules match your filter.</p>
+          ) : (
+            groupedModules.map(([category, mods]) => (
+              <section key={category} className="mb-8">
+                <div className="flex items-center gap-2 mb-3">
+                  <h2 className="section-title">{category}</h2>
+                  <span className="badge bg-gray-100 text-gray-500 border border-gray-200">
+                    {mods.filter(m => m.available).length}/{mods.length}
+                  </span>
+                </div>
+                <div className="space-y-2">
+                  {mods.map(mod => (
+                    <ModuleCard key={mod.id} mod={mod} onEdit={openInStudio} />
+                  ))}
+                </div>
+              </section>
+            ))
           )}
 
           {/* ── How modules work ─────────────────────────────────────────────── */}
