@@ -47,12 +47,13 @@ RUN wget -q -O /tmp/regripper.zip \
     && rm /tmp/regripper.zip
 
 # ── de4dot (.NET assembly deobfuscator, runs under Mono) ─────────────────────
-ARG DE4DOT_VERSION=3.1.41.3631
+# Uses kant2002/de4dot v3.2.0 net48 build (Mono-compatible Linux binary).
 RUN wget -q -O /tmp/de4dot.zip \
-         "https://github.com/de4dot/de4dot/releases/download/v${DE4DOT_VERSION}/de4dot.zip" \
+         "https://github.com/kant2002/de4dot/releases/download/v3.2.0/de4dot-net48.zip" \
     && unzip -q /tmp/de4dot.zip -d /tmp/de4dot_extracted \
     && mkdir -p /usr/local/lib/de4dot \
-    && cp /tmp/de4dot_extracted/de4dot/de4dot.exe /usr/local/lib/de4dot/de4dot.exe \
+    && EXE=$(find /tmp/de4dot_extracted -name "de4dot.exe" -type f | head -1) \
+    && cp "$EXE" /usr/local/lib/de4dot/de4dot.exe \
     && printf '#!/bin/sh\nexec mono /usr/local/lib/de4dot/de4dot.exe "$@"\n' \
          > /usr/local/bin/de4dot \
     && chmod +x /usr/local/bin/de4dot \
