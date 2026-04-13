@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libtsk-dev \
     libewf-dev \
     testdisk \
+    mono-runtime \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Hayabusa DFIR binary + rules (Sigma-based EVTX threat hunting) ───────────
@@ -44,6 +45,18 @@ RUN wget -q -O /tmp/regripper.zip \
     && mv /opt/RegRipper3.0-master /opt/regripper \
     && chmod +x /opt/regripper/rip.pl \
     && rm /tmp/regripper.zip
+
+# ── de4dot (.NET assembly deobfuscator, runs under Mono) ─────────────────────
+ARG DE4DOT_VERSION=3.1.41.3631
+RUN wget -q -O /tmp/de4dot.zip \
+         "https://github.com/de4dot/de4dot/releases/download/v${DE4DOT_VERSION}/de4dot.zip" \
+    && unzip -q /tmp/de4dot.zip -d /tmp/de4dot_extracted \
+    && mkdir -p /usr/local/lib/de4dot \
+    && cp /tmp/de4dot_extracted/de4dot/de4dot.exe /usr/local/lib/de4dot/de4dot.exe \
+    && printf '#!/bin/sh\nexec mono /usr/local/lib/de4dot/de4dot.exe "$@"\n' \
+         > /usr/local/bin/de4dot \
+    && chmod +x /usr/local/bin/de4dot \
+    && rm -rf /tmp/de4dot.zip /tmp/de4dot_extracted
 
 # ── Python deps (includes pyhindsight for the Hindsight module) ───────────────
 # Upgrade build tools first so pyproject.toml-based packages build on Ubuntu 22.04's old pip.

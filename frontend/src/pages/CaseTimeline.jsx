@@ -11,17 +11,17 @@ import {
 } from 'lucide-react'
 
 const MOD_CATEGORY_ICONS = {
-  'Threat Hunting':     <Shield     size={11} className="text-red-500     flex-shrink-0" />,
-  'Malware Detection':  <Bug        size={11} className="text-red-400     flex-shrink-0" />,
-  'Binary Analysis':    <Binary     size={11} className="text-orange-500  flex-shrink-0" />,
-  'Windows':            <Monitor    size={11} className="text-sky-500     flex-shrink-0" />,
-  'Memory Forensics':   <Brain      size={11} className="text-purple-500  flex-shrink-0" />,
-  'Disk Forensics':     <HardDrive  size={11} className="text-amber-500   flex-shrink-0" />,
-  'Browser Forensics':  <Globe      size={11} className="text-blue-500    flex-shrink-0" />,
-  'Network':            <Network    size={11} className="text-teal-500    flex-shrink-0" />,
-  'Threat Intelligence':<Tag        size={11} className="text-pink-500    flex-shrink-0" />,
-  'Metadata Extraction':<FileImage  size={11} className="text-indigo-500  flex-shrink-0" />,
-  'Search':             <TextSearch size={11} className="text-gray-400    flex-shrink-0" />,
+  'Threat Hunting':     <Shield     size={13} className="text-red-500     flex-shrink-0" />,
+  'Malware Detection':  <Bug        size={13} className="text-red-400     flex-shrink-0" />,
+  'Binary Analysis':    <Binary     size={13} className="text-orange-500  flex-shrink-0" />,
+  'Windows':            <Monitor    size={13} className="text-sky-500     flex-shrink-0" />,
+  'Memory Forensics':   <Brain      size={13} className="text-purple-500  flex-shrink-0" />,
+  'Disk Forensics':     <HardDrive  size={13} className="text-amber-500   flex-shrink-0" />,
+  'Browser Forensics':  <Globe      size={13} className="text-blue-500    flex-shrink-0" />,
+  'Network':            <Network    size={13} className="text-teal-500    flex-shrink-0" />,
+  'Threat Intelligence':<Tag        size={13} className="text-pink-500    flex-shrink-0" />,
+  'Metadata Extraction':<FileImage  size={13} className="text-indigo-500  flex-shrink-0" />,
+  'Search':             <TextSearch size={13} className="text-gray-400    flex-shrink-0" />,
 }
 const MOD_CATEGORY_ORDER = [
   'Threat Hunting', 'Malware Detection', 'Binary Analysis', 'Windows',
@@ -516,15 +516,20 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
   return (
     <div className="panel-backdrop" onClick={onClose}>
       <div
-        className="absolute right-0 top-0 h-full w-[800px] bg-white border-l border-gray-200 flex flex-col"
-        style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.10)' }}
+        className="absolute right-0 top-0 h-full w-[860px] bg-white border-l border-gray-200 flex flex-col"
+        style={{ boxShadow: '-4px 0 32px rgba(0,0,0,0.12)' }}
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
-          <div className="flex items-center gap-2">
-            <Play size={15} className="text-brand-accent" />
-            <span className="font-semibold text-brand-text">Run Analysis Module</span>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 bg-gray-50/60">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-xl bg-brand-accent/10 flex items-center justify-center">
+              <Play size={15} className="text-brand-accent" />
+            </div>
+            <div>
+              <p className="font-bold text-brand-text text-base leading-tight">Run Analysis Module</p>
+              <p className="text-[11px] text-gray-400 leading-tight mt-0.5">Select a module, pick source files, launch</p>
+            </div>
           </div>
           <button onClick={onClose} className="btn-ghost p-1.5 rounded-lg">
             <X size={16} />
@@ -539,68 +544,74 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
           <div className="flex-1 flex overflow-hidden">
 
             {/* ── Left: module list ──────────────────────────────────────── */}
-            <div className="w-[280px] flex-shrink-0 border-r border-gray-100 flex flex-col bg-gray-50/50">
+            <div className="w-[320px] flex-shrink-0 border-r border-gray-100 flex flex-col bg-gray-50/60">
               {/* Search bar */}
               <div className="px-3 pt-3 pb-2 flex-shrink-0">
                 <div className="relative">
-                  <Search size={11} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                  <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
                   <input
                     ref={moduleSearchRef}
                     value={moduleSearch}
                     onChange={e => setModuleSearch(e.target.value)}
                     placeholder="Search modules…"
-                    className="input w-full text-xs py-1.5 pl-7 pr-6 bg-white"
+                    className="input w-full text-xs py-2 pl-8 pr-7 bg-white rounded-xl"
                   />
                   {moduleSearch && (
                     <button onClick={() => setModuleSearch('')}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
-                      <X size={10} />
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                      <X size={11} />
                     </button>
                   )}
                 </div>
               </div>
 
               {/* Categorized module list */}
-              <div className="flex-1 overflow-y-auto px-3 pb-4">
+              <div className="flex-1 overflow-y-auto px-2.5 pb-4">
                 {groupedModules.length === 0 ? (
-                  <p className="text-[10px] text-gray-400 italic text-center py-6">No modules match</p>
+                  <p className="text-xs text-gray-400 italic text-center py-8">No modules match</p>
                 ) : groupedModules.map(([category, mods]) => (
-                  <div key={category} className="mb-3">
+                  <div key={category} className="mb-4">
                     {/* Category header */}
-                    <div className="flex items-center gap-1.5 px-1 py-1.5 sticky top-0 bg-gray-50/90 backdrop-blur-sm z-10">
-                      {MOD_CATEGORY_ICONS[category]}
-                      <span className="text-[9px] font-semibold uppercase tracking-wider text-gray-400">
-                        {category}
+                    <div className="flex items-center gap-2 px-1 pt-3 pb-2 sticky top-0 bg-gray-50/95 backdrop-blur-sm z-10">
+                      <span className="flex items-center gap-1.5">
+                        {MOD_CATEGORY_ICONS[category]}
+                        <span className="text-[11px] font-bold uppercase tracking-widest text-gray-500">
+                          {category}
+                        </span>
                       </span>
+                      <div className="flex-1 h-px bg-gray-200" />
+                      <span className="text-[10px] text-gray-400 flex-shrink-0">{mods.length}</span>
                     </div>
                     {/* Module cards in this category */}
                     <div className="space-y-1">
                       {mods.map(mod => {
                         const isSelected = selectedModule?.id === mod.id
-                        const allTags = [...(mod.input_extensions || []), ...(mod.input_filenames || [])]
                         return (
                           <button
                             key={mod.id}
                             onClick={() => selectModule(mod)}
-                            className={`w-full text-left px-2.5 py-2 rounded-lg border transition-all ${
+                            className={`w-full text-left px-3 py-2.5 rounded-xl border transition-all ${
                               isSelected
                                 ? 'border-brand-accent bg-brand-accentlight shadow-sm'
                                 : 'border-transparent hover:bg-white hover:border-gray-200 hover:shadow-sm'
                             }`}
                           >
-                            <p className={`font-semibold text-xs ${isSelected ? 'text-brand-accent' : 'text-brand-text'}`}>
+                            <p className={`font-semibold text-sm leading-tight ${isSelected ? 'text-brand-accent' : 'text-brand-text'}`}>
                               {mod.name}
                             </p>
-                            {!isSelected && (
-                              <p className="text-[10px] text-gray-400 mt-0.5 line-clamp-1 leading-relaxed">
-                                {mod.description}
-                              </p>
-                            )}
-                            {isSelected && allTags.length > 0 && allTags[0] !== '*' && (
-                              <p className="text-[9px] text-brand-accent/70 mt-0.5 font-mono truncate">
-                                {allTags.slice(0, 5).join(' ')}
-                                {allTags.length > 5 && ` +${allTags.length - 5}`}
-                              </p>
+                            <p className={`text-[11px] mt-1 line-clamp-2 leading-relaxed ${isSelected ? 'text-brand-accent/70' : 'text-gray-500'}`}>
+                              {mod.description}
+                            </p>
+                            {(mod.tags || []).length > 0 && (
+                              <div className="flex flex-wrap gap-1 mt-1.5">
+                                {mod.tags.slice(0, 4).map(tag => (
+                                  <span key={tag} className={`px-1.5 py-px rounded text-[9px] font-medium ${
+                                    isSelected ? 'bg-brand-accent/10 text-brand-accent/80' : 'bg-gray-100 text-gray-500'
+                                  }`}>
+                                    {tag}
+                                  </span>
+                                ))}
+                              </div>
                             )}
                           </button>
                         )

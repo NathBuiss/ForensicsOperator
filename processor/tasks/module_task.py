@@ -1883,7 +1883,6 @@ rule DataStaging_Exfil {
         $z1 = "7z.exe"        ascii nocase
         $z2 = "WinRAR"        ascii nocase
         $z3 = ".7z"           ascii nocase
-        $n1 = "\\\\\\\\*"     ascii
         $f1 = "passwords"     ascii nocase
         $f2 = "credentials"   ascii nocase
         $f3 = "sensitive"     ascii nocase
@@ -3495,10 +3494,25 @@ def _run_de4dot(
     elif mono_bin and Path(de4dot_exe).exists():
         cmd_prefix = [mono_bin, de4dot_exe]
     else:
-        raise RuntimeError(
-            "de4dot binary not found. Install de4dot (Linux build) or Mono + de4dot.exe. "
-            "See the Studio docs for setup instructions."
+        # Binary not available — return an informational hit instead of failing the run.
+        # The file is still stored and available for other analysis.
+        msg = (
+            "de4dot is not installed on this server. "
+            "To enable .NET deobfuscation, place the Linux build of de4dot on PATH "
+            "(e.g. /usr/local/bin/de4dot), or install Mono and de4dot.exe at "
+            "/usr/local/bin/de4dot.exe."
         )
+        tool_meta["stderr"] += msg + "\n"
+        return [{
+            "id":          str(uuid.uuid4()),
+            "timestamp":   "",
+            "level":       "informational",
+            "level_int":   LEVEL_INT.get("informational", 0),
+            "rule_title":  "de4dot not installed",
+            "computer":    "server",
+            "details_raw": "{}",
+            "message":     msg,
+        }]
 
     results: list[dict] = []
 
