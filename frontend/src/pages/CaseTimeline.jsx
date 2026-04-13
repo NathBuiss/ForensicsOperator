@@ -9,10 +9,10 @@ import {
 } from 'lucide-react'
 import { api } from '../api/client'
 import Timeline from './Timeline'
-import Ingest from './Ingest'
 import CollectorModal from '../components/CollectorModal'
 import AlertRules from './AlertRules'
 import CaseNotes from './CaseNotes'
+import IngestPanel from '../components/IngestPanel'
 
 // ── Artifact badge colours ────────────────────────────────────────────────────
 const ARTIFACT_BADGE = {
@@ -48,34 +48,6 @@ const MODULE_NAMES = {
   exiftool:    'ExifTool',
   bulk_extractor: 'Bulk Extractor',
   capa:        'CAPA',
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// IngestModal
-// ─────────────────────────────────────────────────────────────────────────────
-function IngestModal({ caseId, onClose, onComplete }) {
-  return (
-    <div className="panel-backdrop" onClick={onClose}>
-      <div
-        className="absolute right-0 top-0 h-full w-[520px] bg-white border-l border-gray-200 flex flex-col"
-        style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.10)' }}
-        onClick={e => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
-          <div className="flex items-center gap-2">
-            <Upload size={16} className="text-brand-accent" />
-            <span className="font-semibold text-brand-text">Add Evidence</span>
-          </div>
-          <button onClick={onClose} className="btn-ghost p-1.5 rounded-lg">
-            <X size={16} />
-          </button>
-        </div>
-        <div className="flex-1 overflow-y-auto">
-          <Ingest caseId={caseId} onComplete={onComplete} />
-        </div>
-      </div>
-    </div>
-  )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1676,10 +1648,10 @@ export default function CaseTimeline() {
 
       {/* ── Modals / Panels ───────────────────────────────────────────────── */}
       {showIngest && (
-        <IngestModal
+        <IngestPanel
           caseId={caseId}
           onClose={() => setShowIngest(false)}
-          onComplete={() => { setShowIngest(false); loadCase() }}
+          onComplete={() => loadCase()}
         />
       )}
 

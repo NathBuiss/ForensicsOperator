@@ -196,6 +196,7 @@ export const api = {
     testConfig:   ()             => request('POST',   '/admin/s3-config/test'),
     browse:       (prefix = '', delimiter = '/') => request('GET', `/s3/browse?prefix=${encodeURIComponent(prefix)}&delimiter=${encodeURIComponent(delimiter)}`),
     importToCase: (caseId, data) => request('POST',   `/cases/${caseId}/s3-import`, data),
+    importBatch:  (caseId, keys) => request('POST',   `/cases/${caseId}/s3-import-batch`, { keys }),
   },
 
   s3Triage: {
@@ -205,6 +206,7 @@ export const api = {
     testConfig:   ()             => request('POST',   '/admin/s3-triage-config/test'),
     browse:       (prefix = '', delimiter = '/') => request('GET', `/s3-triage/browse?prefix=${encodeURIComponent(prefix)}&delimiter=${encodeURIComponent(delimiter)}`),
     pullToCase:   (caseId, data) => request('POST',   `/cases/${caseId}/s3-triage-pull`, data),
+    importBatch:  (caseId, keys) => request('POST',   `/cases/${caseId}/s3-triage-pull-batch`, { keys }),
     scwRegions:   ()             => request('GET',    '/s3/scaleway-regions'),
   },
 

@@ -152,6 +152,10 @@ class S3ImportIn(BaseModel):
     filename: Optional[str] = None
 
 
+class S3BatchImportIn(BaseModel):
+    keys: list[str]
+
+
 # ── Shared config CRUD factory ────────────────────────────────────────────────
 
 def _make_config_routes(redis_key: str, path_prefix: str, label: str):
@@ -378,6 +382,62 @@ def pull_from_triage(case_id: str, body: S3ImportIn):
         "size_bytes": size,
         "status":     "PENDING",
     }
+
+
+# ── Batch import helpers ──────────────────────────────────────────────────────
+
+def _batch_transfer(case_id: str, cfg: dict, keys: list[str]) -> dict:
+    """Transfer multiple S3 objects into MinIO and dispatch ingest jobs.
+
+    Streams each object individually — no full-file RAM buffer.
+    Returns {'jobs': [...], 'errors': [...]} so callers can surface partial failures.
+    """
+    ext_client = _build_client(cfg)
+    jobs, errors = [], []
+    for s3_key in keys:
+        filename  = s3_key.rsplit("/", 1)[-1] or "unknown"
+        job_id    = uuid.uuid4().hex
+        minio_key = f"cases/{case_id}/{job_id}/{filename}"
+        try:
+            size = _stream_to_minio(ext_client, cfg["bucket"], s3_key, minio_key)
+            job_svc.create_job(job_id, case_id, filename, minio_key, source_zip="")
+            _dispatch(job_id, case_id, minio_key, filename)
+            jobs.append({
+                "job_id":     job_id,
+                "filename":   filename,
+                "s3_key":     s3_key,
+                "size_bytes": size,
+                "status":     "PENDING",
+            })
+        except Exception as exc:
+            logger.warning("Batch import failed for %s: %s", s3_key, exc)
+            errors.append({"s3_key": s3_key, "error": str(exc)})
+    return {"jobs": jobs, "errors": errors}
+
+
+@router.post("/cases/{case_id}/s3-import-batch")
+def import_batch_from_s3(case_id: str, body: S3BatchImportIn):
+    """Stream multiple objects from the import S3 bucket into a case."""
+    if not get_case(case_id):
+        raise HTTPException(status_code=404, detail="Case not found")
+    cfg = _load(_redis(), _S3_IMPORT_KEY)
+    if not cfg or not cfg.get("endpoint"):
+        raise HTTPException(status_code=400, detail="No import S3 configuration saved.")
+    return _batch_transfer(case_id, cfg, body.keys)
+
+
+@router.post("/cases/{case_id}/s3-triage-pull-batch")
+def pull_batch_from_triage(case_id: str, body: S3BatchImportIn):
+    """Pull multiple objects from the triage S3 bucket into a case."""
+    if not get_case(case_id):
+        raise HTTPException(status_code=404, detail="Case not found")
+    cfg = _load(_redis(), _S3_TRIAGE_KEY)
+    if not cfg or not cfg.get("endpoint"):
+        raise HTTPException(
+            status_code=400,
+            detail="No triage S3 configuration saved. Configure it in Settings → Triage Upload Storage.",
+        )
+    return _batch_transfer(case_id, cfg, body.keys)
 
 
 # ── Scaleway region helper ─────────────────────────────────────────────────────
