@@ -138,9 +138,10 @@ export const api = {
     csv: (caseId, params = {}) => {
       const q     = new URLSearchParams(params).toString()
       const token = getToken()
-      // Append token as query param since this opens in a new tab (no headers)
-      const auth  = token ? `&_token=${encodeURIComponent(token)}` : ''
-      return `/api/v1/cases/${caseId}/export/csv${q ? '?' + q : ''}${auth}`
+      const auth  = token ? `_token=${encodeURIComponent(token)}` : ''
+      // Build query string: params first, then token — always uses ? before first param
+      const qs    = [q, auth].filter(Boolean).join('&')
+      return `/api/v1/cases/${caseId}/export/csv${qs ? '?' + qs : ''}`
     },
   },
 

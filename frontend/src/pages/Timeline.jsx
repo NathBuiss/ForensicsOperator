@@ -300,6 +300,18 @@ export default function Timeline({ caseId, artifactTypes }) {
     }
   }
 
+  function downloadSelectedJSON() {
+    const selectedEvs = events.filter(e => checkedFoIds.has(e.fo_id))
+    if (!selectedEvs.length) return
+    const blob = new Blob([JSON.stringify(selectedEvs, null, 2)], { type: 'application/json' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href     = url
+    a.download = `events-${caseId}-${Date.now()}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   // Explain selected events with LLM
   async function explainSelected() {
     const selectedEvs = events.filter(e => checkedFoIds.has(e.fo_id))
@@ -650,9 +662,16 @@ export default function Timeline({ caseId, artifactTypes }) {
               {checkedFoIds.size} event{checkedFoIds.size !== 1 ? 's' : ''} selected
             </span>
             <button
+              onClick={downloadSelectedJSON}
+              className="ml-auto btn-ghost text-xs text-gray-600 hover:text-gray-800 border border-gray-200 rounded-lg px-2.5 py-1 flex items-center gap-1.5"
+              title="Download selected events as JSON"
+            >
+              <Download size={11} /> Download
+            </button>
+            <button
               onClick={explainSelected}
               disabled={explaining}
-              className="ml-auto btn-ghost text-xs text-purple-600 hover:text-purple-800 border border-purple-200 rounded-lg px-2.5 py-1 flex items-center gap-1.5"
+              className="btn-ghost text-xs text-purple-600 hover:text-purple-800 border border-purple-200 rounded-lg px-2.5 py-1 flex items-center gap-1.5"
             >
               {explaining
                 ? <><Loader2 size={11} className="animate-spin" /> Analyzing…</>
@@ -799,6 +818,7 @@ export default function Timeline({ caseId, artifactTypes }) {
       {/* Event detail panel */}
       {selectedEvent && (
         <EventDetail
+          key={selectedEvent.fo_id}
           event={selectedEvent}
           caseId={caseId}
           onClose={() => setSelectedEvent(null)}

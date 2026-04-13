@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { X, Flag, Tag, Plus, Minus, Save, Search, Shield, AlertTriangle, Brain, Loader2, Clock } from 'lucide-react'
+import { X, Flag, Tag, Plus, Minus, Save, Search, Shield, AlertTriangle, Brain, Loader2, Clock, Download, FileText } from 'lucide-react'
 import { api } from '../../api/client'
 import { extractIocs, iocSearchQuery } from '../../utils/ioc'
 import { getMitre, TACTIC_COLORS } from '../../utils/mitre'
@@ -136,6 +136,16 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
             {explaining ? <Loader2 size={12} className="animate-spin" /> : <Brain size={12} />}
             {explaining ? 'Analyzing…' : 'Explain'}
           </button>
+          {event.ingest_job_id && (
+            <a
+              href={api.caseFiles.downloadUrl(caseId, event.ingest_job_id)}
+              download={artifactData.filename || event.ingest_job_id}
+              className="btn-ghost text-xs flex items-center gap-1"
+              title="Download original source file"
+            >
+              <Download size={12} /> Download
+            </a>
+          )}
         </div>
 
         {/* Time window pivot */}
@@ -288,8 +298,32 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
           onFilterOut={onFilterOut}
         />
 
-        {/* Artifact-specific fields */}
-        {Object.keys(artifactData).length > 0 && (
+        {/* Artifact-specific rendering */}
+        {(event.artifact_type === 'strings' || event.artifact_type === 'file') ? (
+          // Binary/text files — show extracted content in a scrollable code block
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-1">
+                <FileText size={9} />
+                {event.artifact_type === 'strings' ? 'Extracted Strings' : 'File Content'}
+                {artifactData.count != null && (
+                  <span className="normal-case font-normal text-gray-400 ml-1">
+                    ({Number(artifactData.count).toLocaleString()} strings)
+                  </span>
+                )}
+              </p>
+            </div>
+            {artifactData.filename && (
+              <p className="text-[10px] text-gray-400 font-mono mb-1.5 truncate" title={artifactData.filename}>
+                {artifactData.filename}
+              </p>
+            )}
+            <pre className="bg-gray-50 border border-gray-200 rounded-lg p-2 text-[10px] font-mono text-gray-700 overflow-auto max-h-72 leading-relaxed whitespace-pre-wrap break-all">
+              {artifactData.content || '—'}
+            </pre>
+          </div>
+        ) : Object.keys(artifactData).length > 0 && (
+          // Generic artifact fields for all other types
           <FieldGroup
             title={event.artifact_type?.toUpperCase()}
             fields={Object.fromEntries(
