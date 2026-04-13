@@ -115,7 +115,7 @@ class BrowserPlugin(BasePlugin):
     PLUGIN_NAME = "browser"
     PLUGIN_VERSION = "1.0.0"
     DEFAULT_ARTIFACT_TYPE = "browser"
-    SUPPORTED_EXTENSIONS = [".sqlite", ".db", ".sqlite3"]
+    SUPPORTED_EXTENSIONS: list[str] = []  # Claim only by exact filename — no broad extension matching
     SUPPORTED_MIME_TYPES: list[str] = []
 
     @classmethod

@@ -6,7 +6,28 @@ import {
   Cpu, RefreshCw, Plus, Download, Play, Terminal,
   AlertCircle, ChevronDown, FileCode, ExternalLink,
   Flag, Filter, Sparkles, FileText,
+  Monitor, HardDrive, Globe, Brain,
+  Binary, Bug, Network, FileImage, TextSearch, Tag,
 } from 'lucide-react'
+
+const MOD_CATEGORY_ICONS = {
+  'Threat Hunting':     <Shield     size={11} className="text-red-500     flex-shrink-0" />,
+  'Malware Detection':  <Bug        size={11} className="text-red-400     flex-shrink-0" />,
+  'Binary Analysis':    <Binary     size={11} className="text-orange-500  flex-shrink-0" />,
+  'Windows':            <Monitor    size={11} className="text-sky-500     flex-shrink-0" />,
+  'Memory Forensics':   <Brain      size={11} className="text-purple-500  flex-shrink-0" />,
+  'Disk Forensics':     <HardDrive  size={11} className="text-amber-500   flex-shrink-0" />,
+  'Browser Forensics':  <Globe      size={11} className="text-blue-500    flex-shrink-0" />,
+  'Network':            <Network    size={11} className="text-teal-500    flex-shrink-0" />,
+  'Threat Intelligence':<Tag        size={11} className="text-pink-500    flex-shrink-0" />,
+  'Metadata Extraction':<FileImage  size={11} className="text-indigo-500  flex-shrink-0" />,
+  'Search':             <TextSearch size={11} className="text-gray-400    flex-shrink-0" />,
+}
+const MOD_CATEGORY_ORDER = [
+  'Threat Hunting', 'Malware Detection', 'Binary Analysis', 'Windows',
+  'Memory Forensics', 'Disk Forensics', 'Browser Forensics', 'Network',
+  'Threat Intelligence', 'Metadata Extraction', 'Search',
+]
 import { api } from '../api/client'
 import Timeline from './Timeline'
 import CollectorModal from '../components/CollectorModal'
@@ -288,7 +309,11 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
   const [sourceSearch, setSourceSearch]     = useState('')
   const [loading, setLoading]               = useState(true)
   const [running, setRunning]               = useState(false)
+  const [runningAll, setRunningAll]         = useState(false)
+  const [runAllProgress, setRunAllProgress] = useState(null)  // null | {done, total}
   const [error, setError]                   = useState(null)
+  const [moduleSearch, setModuleSearch]     = useState('')
+  const moduleSearchRef                     = useRef(null)
 
   // YARA-specific state
   const [yaraRules, setYaraRules]                   = useState('')
@@ -352,6 +377,33 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
       )
     : compatibleSources
 
+  // Group modules by category for the left panel
+  const groupedModules = useMemo(() => {
+    const q = moduleSearch.toLowerCase().trim()
+    const filtered = q
+      ? modules.filter(m =>
+          (m.name || '').toLowerCase().includes(q) ||
+          (m.description || '').toLowerCase().includes(q) ||
+          (m.category || '').toLowerCase().includes(q) ||
+          (m.tags || []).some(t => t.toLowerCase().includes(q))
+        )
+      : modules
+    const groups = {}
+    filtered.forEach(m => {
+      const cat = m.category || 'Other'
+      if (!groups[cat]) groups[cat] = []
+      groups[cat].push(m)
+    })
+    return Object.entries(groups).sort(([a], [b]) => {
+      const ai = MOD_CATEGORY_ORDER.indexOf(a)
+      const bi = MOD_CATEGORY_ORDER.indexOf(b)
+      if (ai !== -1 && bi !== -1) return ai - bi
+      if (ai !== -1) return -1
+      if (bi !== -1) return 1
+      return a.localeCompare(b)
+    })
+  }, [modules, moduleSearch])
+
   function toggleJob(jobId) {
     setSelectedJobs(prev => {
       const next = new Set(prev)
@@ -398,8 +450,68 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
     }
   }
 
+  async function handleRunAll() {
+    if (runningAll || sources.length === 0) return
+    const eligible = modules.filter(m => {
+      // Skip modules that need custom config (YARA custom rules, grep patterns)
+      // but allow them if they have library/default behaviour
+      const extList  = m.input_extensions || []
+      const nameList = m.input_filenames  || []
+      const acceptsAll = extList.length === 0 && nameList.length === 0
+      if (acceptsAll) return sources.length > 0
+      const hasCompatible = sources.some(s => {
+        const fnameLower = (s.original_filename || '').toLowerCase()
+        if (extList.some(e => e === '*' || e === '.*')) return true
+        const extMatch  = extList.some(ext => fnameLower.endsWith(ext.toLowerCase()))
+        const basename  = fnameLower.split('/').pop().split('\\').pop()
+        const nameMatch = nameList.some(fn => basename === fn.toLowerCase())
+        return extMatch || nameMatch
+      })
+      return hasCompatible
+    })
+    if (eligible.length === 0) return
+    if (!window.confirm(
+      `Launch all ${eligible.length} applicable module${eligible.length > 1 ? 's' : ''} against their compatible files?\n\n` +
+      eligible.map(m => `• ${m.name}`).join('\n')
+    )) return
+
+    setRunningAll(true)
+    setRunAllProgress({ done: 0, total: eligible.length })
+    setError(null)
+
+    let done = 0
+    for (const mod of eligible) {
+      const extList  = mod.input_extensions || []
+      const nameList = mod.input_filenames  || []
+      const acceptsAll = extList.length === 0 && nameList.length === 0
+      const jobIds = sources
+        .filter(s => {
+          if (acceptsAll) return true
+          if (extList.some(e => e === '*' || e === '.*')) return true
+          const fnameLower = (s.original_filename || '').toLowerCase()
+          const extMatch  = extList.some(ext => fnameLower.endsWith(ext.toLowerCase()))
+          const basename  = fnameLower.split('/').pop().split('\\').pop()
+          const nameMatch = nameList.some(fn => basename === fn.toLowerCase())
+          return extMatch || nameMatch
+        })
+        .map(s => s.job_id)
+      if (jobIds.length === 0) { done++; setRunAllProgress({ done, total: eligible.length }); continue }
+      try {
+        const run = await api.modules.createRun(caseId, { module_id: mod.id, job_ids: jobIds, params: {} })
+        onRunCreated(run)
+      } catch {
+        // best-effort — don't abort remaining modules on one failure
+      }
+      done++
+      setRunAllProgress({ done, total: eligible.length })
+    }
+    setRunningAll(false)
+    setRunAllProgress(null)
+    onClose()
+  }
+
   const yaraInvalid = selectedModule?.id === 'yara' && yaraValid && !yaraValid.valid
-  const canRun = selectedModule && selectedJobs.size > 0 && !running && !yaraInvalid
+  const canRun = selectedModule && selectedJobs.size > 0 && !running && !yaraInvalid && !runningAll
 
   return (
     <div className="panel-backdrop" onClick={onClose}>
@@ -428,43 +540,74 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
 
             {/* ── Left: module list ──────────────────────────────────────── */}
             <div className="w-[280px] flex-shrink-0 border-r border-gray-100 flex flex-col bg-gray-50/50">
-              <div className="px-4 pt-4 pb-2">
-                <p className="section-title text-[11px] uppercase tracking-wider text-gray-400">Modules</p>
-              </div>
-              <div className="flex-1 overflow-y-auto px-3 pb-4 space-y-1.5">
-                {modules.map(mod => {
-                  const isSelected = selectedModule?.id === mod.id
-                  return (
-                    <button
-                      key={mod.id}
-                      onClick={() => selectModule(mod)}
-                      className={`w-full text-left p-3 rounded-xl border-2 transition-all ${
-                        isSelected
-                          ? 'border-brand-accent bg-brand-accentlight shadow-sm'
-                          : 'border-transparent bg-white hover:border-gray-200 hover:shadow-sm'
-                      }`}
-                    >
-                      <div className="flex items-start gap-2">
-                        <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 ${
-                          isSelected ? 'bg-brand-accent text-white' : 'bg-gray-100 text-gray-500'
-                        }`}>
-                          <Cpu size={13} />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="font-semibold text-xs text-brand-text">{mod.name}</p>
-                          <p className="text-[10px] text-gray-400 mt-0.5 line-clamp-2 leading-relaxed">
-                            {mod.description}
-                          </p>
-                          {(mod.input_extensions?.length > 0 || mod.input_filenames?.length > 0) && (
-                            <p className="text-[9px] text-gray-400 mt-1 font-mono truncate">
-                              {[...(mod.input_extensions || []), ...(mod.input_filenames || [])].slice(0, 6).join(' ')}
-                            </p>
-                          )}
-                        </div>
-                      </div>
+              {/* Search bar */}
+              <div className="px-3 pt-3 pb-2 flex-shrink-0">
+                <div className="relative">
+                  <Search size={11} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                  <input
+                    ref={moduleSearchRef}
+                    value={moduleSearch}
+                    onChange={e => setModuleSearch(e.target.value)}
+                    placeholder="Search modules…"
+                    className="input w-full text-xs py-1.5 pl-7 pr-6 bg-white"
+                  />
+                  {moduleSearch && (
+                    <button onClick={() => setModuleSearch('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                      <X size={10} />
                     </button>
-                  )
-                })}
+                  )}
+                </div>
+              </div>
+
+              {/* Categorized module list */}
+              <div className="flex-1 overflow-y-auto px-3 pb-4">
+                {groupedModules.length === 0 ? (
+                  <p className="text-[10px] text-gray-400 italic text-center py-6">No modules match</p>
+                ) : groupedModules.map(([category, mods]) => (
+                  <div key={category} className="mb-3">
+                    {/* Category header */}
+                    <div className="flex items-center gap-1.5 px-1 py-1.5 sticky top-0 bg-gray-50/90 backdrop-blur-sm z-10">
+                      {MOD_CATEGORY_ICONS[category]}
+                      <span className="text-[9px] font-semibold uppercase tracking-wider text-gray-400">
+                        {category}
+                      </span>
+                    </div>
+                    {/* Module cards in this category */}
+                    <div className="space-y-1">
+                      {mods.map(mod => {
+                        const isSelected = selectedModule?.id === mod.id
+                        const allTags = [...(mod.input_extensions || []), ...(mod.input_filenames || [])]
+                        return (
+                          <button
+                            key={mod.id}
+                            onClick={() => selectModule(mod)}
+                            className={`w-full text-left px-2.5 py-2 rounded-lg border transition-all ${
+                              isSelected
+                                ? 'border-brand-accent bg-brand-accentlight shadow-sm'
+                                : 'border-transparent hover:bg-white hover:border-gray-200 hover:shadow-sm'
+                            }`}
+                          >
+                            <p className={`font-semibold text-xs ${isSelected ? 'text-brand-accent' : 'text-brand-text'}`}>
+                              {mod.name}
+                            </p>
+                            {!isSelected && (
+                              <p className="text-[10px] text-gray-400 mt-0.5 line-clamp-1 leading-relaxed">
+                                {mod.description}
+                              </p>
+                            )}
+                            {isSelected && allTags.length > 0 && allTags[0] !== '*' && (
+                              <p className="text-[9px] text-brand-accent/70 mt-0.5 font-mono truncate">
+                                {allTags.slice(0, 5).join(' ')}
+                                {allTags.length > 5 && ` +${allTags.length - 5}`}
+                              </p>
+                            )}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
 
@@ -649,13 +792,30 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
 
         {/* Footer */}
         <div className="border-t border-gray-200 px-5 py-3.5 flex items-center gap-3 bg-gray-50/50">
+          {/* Launch all modules button */}
+          <button
+            onClick={handleRunAll}
+            disabled={runningAll || running || sources.length === 0}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl font-medium text-xs border transition-all ${
+              runningAll || running || sources.length === 0
+                ? 'border-gray-200 text-gray-400 cursor-not-allowed bg-white'
+                : 'border-gray-300 text-gray-600 hover:border-brand-accent hover:text-brand-accent bg-white'
+            }`}
+            title="Launch every applicable module against its compatible files"
+          >
+            {runningAll
+              ? <><Loader2 size={12} className="animate-spin" /> {runAllProgress ? `${runAllProgress.done}/${runAllProgress.total}` : 'Launching…'}</>
+              : <><Sparkles size={12} /> Launch all modules</>
+            }
+          </button>
+
           {error && (
             <p className="flex-1 text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2 truncate" title={error}>
               {error}
             </p>
           )}
           <div className="ml-auto flex items-center gap-2">
-            {selectedModule && selectedJobs.size === 0 && (
+            {selectedModule && selectedJobs.size === 0 && !runningAll && (
               <p className="text-xs text-gray-400">Select at least one file</p>
             )}
             <button

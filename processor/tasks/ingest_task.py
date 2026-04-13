@@ -153,7 +153,31 @@ def process_artifact(
                 stats["fallback_reason"] = str(plugin_exc)
             except Exception as plaso_exc:
                 logger.error("[%s] Plaso fallback also failed: %s", job_id, plaso_exc)
-                raise plugin_exc  # surface the original error
+                # ── Strings last resort ──────────────────────────────────────
+                # Both the primary plugin and plaso failed.  Run strings
+                # extraction as the final safety net so the job always
+                # completes rather than failing.  Even for stub/empty files
+                # this produces 0 events but marks the job COMPLETED, keeping
+                # the file available for module analysis.
+                logger.warning(
+                    "[%s] Trying strings fallback as last resort", job_id
+                )
+                update_job_status(r, job_id, plugin_used="strings (fallback)")
+                try:
+                    from plugins.strings_fallback.strings_fallback_plugin import StringsFallbackPlugin
+                    strings_fb = StringsFallbackPlugin(ctx)
+                    strings_fb.setup()
+                    events_indexed = _run_plugin_and_index(
+                        strings_fb, indexer, r, job_id, case_id, source_url, ingested_at
+                    )
+                    strings_fb.teardown()
+                    stats = strings_fb.get_stats()
+                    stats["fallback_reason"] = str(plugin_exc)
+                except Exception as strings_exc:
+                    logger.error(
+                        "[%s] Strings fallback also failed: %s", job_id, strings_exc
+                    )
+                    raise plugin_exc  # surface the original error
         else:
             plugin.teardown()
 
