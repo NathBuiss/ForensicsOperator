@@ -3,6 +3,7 @@ import json, uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+import redis as redis_lib
 from config import settings, get_redis as _r
 from services.elasticsearch import _request as es_req
 

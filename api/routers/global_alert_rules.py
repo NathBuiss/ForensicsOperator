@@ -22,6 +22,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+import redis as redis_lib
 
 try:
     import yaml  # type: ignore

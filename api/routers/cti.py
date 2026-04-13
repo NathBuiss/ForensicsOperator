@@ -19,6 +19,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
+import redis as redis_lib
 
 from config import settings, get_redis as _redis
 from services.elasticsearch import _request as es_req
