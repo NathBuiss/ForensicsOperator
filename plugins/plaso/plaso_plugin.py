@@ -191,17 +191,25 @@ class PlasoPlugin(BasePlugin):
         columns = [row[1] for row in cursor.fetchall()]
         self.log.info("event_data columns: %s", columns)
         
+        # Plaso uses _timestamp (with underscore) in newer versions
+        timestamp_col = "_timestamp" if "_timestamp" in columns else "timestamp" if "timestamp" in columns else None
+        self.log.info("Using timestamp column: %s", timestamp_col)
+        
         # Build SELECT based on available columns
         select_cols = []
-        for col in ["timestamp", "timestamp_desc", "parser", "message", "hostname", 
-                    "username", "data_type", "_identifier", "display_name", "filename"]:
+        for col in ["parser", "message", "hostname", "username", "data_type", 
+                    "_identifier", "display_name", "filename", "timestamp_desc", "pathspec"]:
             if col in columns:
                 select_cols.append(col)
+        
+        # Add timestamp column if it exists
+        if timestamp_col:
+            select_cols.insert(0, timestamp_col)
         
         if not select_cols:
             select_cols = ["*"]
         
-        query = f"SELECT {', '.join(select_cols)} FROM event_data ORDER BY timestamp ASC LIMIT 500000"
+        query = f"SELECT {', '.join(select_cols)} FROM event_data ORDER BY {timestamp_col or 'rowid'} ASC LIMIT 500000"
         self.log.info("Executing: %s", query)
         rows = cursor.execute(query)
 
@@ -210,8 +218,10 @@ class PlasoPlugin(BasePlugin):
                 d = dict(row)
                 parser = d.get("parser", "") or ""
                 artifact_type = self._resolve_artifact_type(parser)
+                
                 # Plaso timestamps are in microseconds since epoch
-                ts_micro = d.get("timestamp", 0) or 0
+                ts_micro = d.get(timestamp_col, 0) if timestamp_col else 0
+                ts_micro = ts_micro or 0
                 timestamp = ""
                 if ts_micro:
                     try:
