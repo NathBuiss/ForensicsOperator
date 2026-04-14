@@ -60,20 +60,18 @@ RUN wget -q -O /tmp/de4dot.zip \
     && rm -rf /tmp/de4dot.zip /tmp/de4dot_extracted
 
 # ── Plaso (log2timeline/psort) — required for .plaso file parsing ────────────
-# Install plaso from PyPI (includes psort.py and log2timeline.py)
+# Install from GIFT PPA with proper GPG key handling
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libewf-dev \
-    libvhdi-dev \
-    libvmdk-dev \
-    libvslvm-dev \
-    libtsk-dev \
-    libbde-dev \
-    python3-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install plaso and dependencies from PyPI
-RUN pip3 install --no-cache-dir \
-    plaso \
+    gnupg gnupg-agent software-properties-common \
+    && export GNUPGHOME="$(mktemp -d)" \
+    && gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys 3ED1EAECE81894B171D7DA5B5E80511B10C598B8 \
+    && gpg --batch --export > /etc/apt/trusted.gpg.d/gift.gpg \
+    && rm -rf "$GNUPGHOME" \
+    && add-apt-repository -y ppa:gift/stable \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        plaso-tools \
+    && rm -rf /var/lib/apt/lists/* \
     && log2timeline.py --version \
     && psort.py --version
 
