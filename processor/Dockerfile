@@ -61,10 +61,10 @@ RUN wget -q -O /tmp/de4dot.zip \
 # ── Plaso (log2timeline/psort) — required for .plaso file parsing ────────────
 # Try latest plaso versions from PyPI until one installs successfully
 RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel && \
-    (pip3 install --no-cache-dir plaso==20260119 || \
-     pip3 install --no-cache-dir plaso==20250918 || \
-     pip3 install --no-cache-dir plaso==20240826 || \
-     pip3 install --no-cache-dir plaso==20240308)
+    (pip3 install --no-cache-dir --break-system-packages plaso==20260119 || \
+     pip3 install --no-cache-dir --break-system-packages plaso==20250918 || \
+     pip3 install --no-cache-dir --break-system-packages plaso==20240826 || \
+     pip3 install --no-cache-dir --break-system-packages plaso==20240308)
 
 # ── Python deps (includes pyhindsight for the Hindsight module) ───────────────
 # Upgrade build tools first so pyproject.toml-based packages build on Ubuntu 22.04's old pip.
