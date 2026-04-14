@@ -1,6 +1,8 @@
 """
 Plaso Plugin — parses Plaso storage files (.plaso).
-Dynamically detects schema and extracts ALL available fields.
+Handles both:
+- Modern schema: event_data table with serialized _data blobs
+- Legacy schema: event table with denormalized columns
 """
 from __future__ import annotations
 
@@ -52,7 +54,7 @@ def _format_timestamp(ts_micro: int) -> str:
 class PlasoPlugin(BasePlugin):
 
     PLUGIN_NAME = "plaso"
-    PLUGIN_VERSION = "3.0.0"
+    PLUGIN_VERSION = "3.1.0"
     DEFAULT_ARTIFACT_TYPE = "timeline"
     SUPPORTED_EXTENSIONS = [".plaso"]
     SUPPORTED_MIME_TYPES = ["application/x-sqlite3"]
@@ -128,121 +130,56 @@ class PlasoPlugin(BasePlugin):
             tables = [row[0] for row in cursor.fetchall()]
             self.log.info("ALL TABLES: %s", tables)
             
-            # Find event table
+            # PREFER "event" table over "event_data" - it has denormalized columns!
             event_table = None
-            for t in ["event_data", "events", "event", "timeline"]:
-                if t in tables:
-                    event_table = t
-                    break
-            
-            if not event_table:
-                # Use first table that looks like it has events
-                for t in tables:
-                    if "event" in t.lower() or "timeline" in t.lower():
-                        event_table = t
-                        break
-            
-            if not event_table:
+            if "event" in tables:
+                event_table = "event"
+                self.log.info("Using 'event' table (denormalized)")
+            elif "event_data" in tables:
+                event_table = "event_data"
+                self.log.info("Using 'event_data' table (serialized blobs)")
+            else:
                 raise PluginFatalError(f"No event table found. Tables: {tables}")
             
-            self.log.info("Using table: %s", event_table)
-            
-            # Get ALL columns with detailed info
+            # Get column info
             cursor.execute(f"PRAGMA table_info({event_table})")
             columns_info = cursor.fetchall()
-            
-            self.log.info("=" * 80)
-            self.log.info("COLUMN SCHEMA for %s:", event_table)
-            for col in columns_info:
-                # cid, name, type, notnull, default_value, pk
-                self.log.info("  %s: %s (notnull=%s, pk=%s)", col[1], col[2], col[3], col[5])
-            self.log.info("=" * 80)
-            
             column_names = [col[1] for col in columns_info]
+            
+            self.log.info("Columns in %s: %s", event_table, column_names)
             
             # Get row count
             cursor.execute(f"SELECT COUNT(*) FROM {event_table}")
             count = cursor.fetchone()[0]
             self.log.info("Total rows: %d", count)
             
-            # Get FIRST 10 rows with ALL data
-            cursor.execute(f"SELECT * FROM {event_table} LIMIT 10")
-            rows = cursor.fetchall()
+            # Sample first 3 rows
+            cursor.execute(f"SELECT * FROM {event_table} LIMIT 3")
+            for i, row in enumerate(cursor.fetchall()):
+                self.log.info("Sample row %d: %s", i, dict(row))
             
-            self.log.info("=" * 80)
-            self.log.info("SAMPLE DATA (first 10 rows):")
-            self.log.info("=" * 80)
-            
-            for i, row in enumerate(rows):
-                self.log.info("--- ROW %d ---", i)
-                d = dict(row)
-                for key, value in d.items():
-                    if value is None:
-                        self.log.info("  %s: NULL", key)
-                    elif isinstance(value, bytes):
-                        # Try to show what kind of bytes
-                        if len(value) < 200:
-                            try:
-                                decoded = value.decode("utf-8", errors="replace")
-                                self.log.info("  %s: <bytes:%d> '%s'", key, len(value), decoded[:100])
-                            except Exception:
-                                self.log.info("  %s: <bytes:%d> (binary)", key, len(value))
-                        else:
-                            self.log.info("  %s: <bytes:%d> (large blob)", key, len(value))
-                    elif isinstance(value, (int, float)):
-                        # Check if it looks like a timestamp
-                        if value > 1000000000000000 and value < 2000000000000000:
-                            # Likely microseconds timestamp
-                            try:
-                                dt = datetime.fromtimestamp(value / 1_000_000, tz=timezone.utc)
-                                self.log.info("  %s: %d (%s) <- TIMESTAMP?", key, value, dt.isoformat())
-                            except Exception:
-                                self.log.info("  %s: %d", key, value)
-                        else:
-                            self.log.info("  %s: %d", key, value)
-                    else:
-                        val_str = str(value)[:200]
-                        self.log.info("  %s: %s", key, val_str)
-            
-            self.log.info("=" * 80)
-            self.log.info("END SAMPLE DATA")
-            self.log.info("=" * 80)
-            
-            # Now find the actual columns we need by inspecting the data
+            # Find columns
             timestamp_col = None
+            for c in ["_timestamp", "timestamp", "time"]:
+                if c in column_names:
+                    timestamp_col = c
+                    break
+            
             parser_col = None
-            message_cols = []
-            
-            # Common timestamp column names
-            for candidate in ["_timestamp", "timestamp", "event_timestamp", "time", "ts"]:
-                if candidate in column_names:
-                    timestamp_col = candidate
-                    self.log.info("Found timestamp column: %s", timestamp_col)
+            for c in ["data_type", "parser", "source_short"]:
+                if c in column_names:
+                    parser_col = c
                     break
             
-            # Common parser/data_type column names
-            for candidate in ["data_type", "parser", "type", "event_type", "source"]:
-                if candidate in column_names:
-                    parser_col = candidate
-                    self.log.info("Found parser column: %s", parser_col)
-                    break
+            message_cols = [c for c in ["message", "description", "unicode_string", "string", "display_name"] if c in column_names]
+            filename_cols = [c for c in ["filename", "display_name", "pathspec"] if c in column_names]
             
-            # Common message column names
-            for candidate in ["message", "description", "text", "string", "unicode_string", "content", "body"]:
-                if candidate in column_names:
-                    message_cols.append(candidate)
+            self.log.info("timestamp_col=%s, parser_col=%s, message_cols=%s, filename_cols=%s", 
+                         timestamp_col, parser_col, message_cols, filename_cols)
             
-            # Common filename/path columns
-            filename_cols = []
-            for candidate in ["filename", "display_name", "path", "filepath", "location", "pathspec"]:
-                if candidate in column_names:
-                    filename_cols.append(candidate)
-            
-            self.log.info("Message columns found: %s", message_cols)
-            self.log.info("Filename columns found: %s", filename_cols)
-            
-            # Yield all events
-            cursor.execute(f"SELECT * FROM {event_table} ORDER BY {timestamp_col or 'rowid'} ASC LIMIT 500000")
+            # Execute query
+            order_by = timestamp_col if timestamp_col else "rowid"
+            cursor.execute(f"SELECT * FROM {event_table} ORDER BY {order_by} ASC LIMIT 500000")
             
             while True:
                 rows = cursor.fetchmany(10000)
@@ -252,15 +189,13 @@ class PlasoPlugin(BasePlugin):
                 for row in rows:
                     try:
                         d = dict(row)
-                        event = self._sqlite_row_to_event(
-                            d, column_names, timestamp_col, parser_col, message_cols, filename_cols
-                        )
+                        event = self._row_to_event(d, column_names, timestamp_col, parser_col, message_cols, filename_cols)
                         if event:
                             self._records_read += 1
                             yield event
                     except Exception as exc:
                         self._records_skipped += 1
-                        self.log.error("Skipped row: %s", exc)
+                        self.log.error("Skipped: %s", exc)
                 
                 if self._records_read % 50000 == 0 and self._records_read > 0:
                     self.log.info("Processed %d events...", self._records_read)
@@ -268,22 +203,16 @@ class PlasoPlugin(BasePlugin):
         finally:
             conn.close()
 
-    def _sqlite_row_to_event(self, d: dict, all_cols: list, timestamp_col: str | None, 
-                             parser_col: str | None, message_cols: list, filename_cols: list) -> dict[str, Any]:
-        """Convert any sqlite row to event, using discovered columns."""
-        
-        # Get parser/data_type
+    def _row_to_event(self, d: dict, all_cols: list, timestamp_col: str | None, 
+                      parser_col: str | None, message_cols: list, filename_cols: list) -> dict[str, Any]:
+        # Get parser
         parser = ""
-        if parser_col and parser_col in d:
-            val = d[parser_col]
-            if val:
-                parser = str(val)
-        
-        # If no parser column found, try to find one in the data
+        if parser_col and parser_col in d and d[parser_col]:
+            parser = str(d[parser_col])
         if not parser:
-            for col in ["data_type", "parser", "type", "source_short"]:
-                if col in d and d[col]:
-                    parser = str(d[col])
+            for c in ["data_type", "parser", "source_short"]:
+                if c in d and d[c]:
+                    parser = str(d[c])
                     break
         
         artifact_type = self._resolve_artifact_type(parser) if parser else "timeline"
@@ -297,87 +226,63 @@ class PlasoPlugin(BasePlugin):
                     ts_val = int.from_bytes(ts_val, 'little')
                 except Exception:
                     ts_val = 0
-            if ts_val:
-                timestamp = _format_timestamp(ts_val)
+            if ts_val and isinstance(ts_val, (int, float)):
+                timestamp = _format_timestamp(int(ts_val))
         
-        # Get message - try all discovered message columns
+        # Get message
         message = ""
         for col in message_cols:
-            if col in d:
+            if col in d and d[col]:
                 val = d[col]
-                if val:
-                    if isinstance(val, bytes):
-                        val = val.decode("utf-8", errors="replace")
-                    message = str(val).strip()
-                    if message:
-                        break
-        
-        # If still no message, try filename columns
-        if not message:
-            for col in filename_cols:
-                if col in d:
-                    val = d[col]
-                    if val:
-                        if isinstance(val, bytes):
-                            val = val.decode("utf-8", errors="replace")
-                        message = f"{col}: {val}"
-                        break
-        
-        # If still nothing, scan ALL columns for something useful
-        if not message:
-            for col, val in d.items():
-                if val is None:
-                    continue
-                if col in ["_identifier", "rowid", "store_number", "store_index", "inode"]:
-                    continue  # Skip ID fields
-                if isinstance(val, (int, float)) and val > 1000000000000000:
-                    continue  # Skip timestamps
                 if isinstance(val, bytes):
-                    if len(val) < 500:
-                        try:
-                            decoded = val.decode("utf-8", errors="replace").strip()
-                            if decoded and len(decoded) > 3:
-                                message = f"{col}: {decoded[:200]}"
-                                break
-                        except Exception:
-                            pass
-                    continue
-                val_str = str(val).strip()
-                if val_str and len(val_str) > 2:
-                    message = f"{col}: {val_str[:200]}"
+                    val = val.decode("utf-8", errors="replace")
+                message = str(val).strip()
+                if message:
                     break
         
-        # Final fallback
+        # Get filename
+        if not message:
+            for col in filename_cols:
+                if col in d and d[col]:
+                    val = d[col]
+                    if isinstance(val, bytes):
+                        val = val.decode("utf-8", errors="replace")
+                    message = f"{col}: {val}"
+                    break
+        
+        # Scan all columns
+        if not message:
+            for col, val in d.items():
+                if val is None or col.startswith("_"):
+                    continue
+                if isinstance(val, bytes):
+                    try:
+                        decoded = val.decode("utf-8", errors="replace").strip()
+                        if decoded and len(decoded) > 3:
+                            message = f"{col}: {decoded[:200]}"
+                            break
+                    except Exception:
+                        pass
+                elif isinstance(val, str) and val.strip():
+                    message = f"{col}: {val[:200]}"
+                    break
+        
         if not message:
             message = f"[{parser}] Event" if parser else "Plaso event"
         
-        # Get hostname/username if available
-        hostname = ""
-        username = ""
-        for col in ["hostname", "computer_name", "machine"]:
-            if col in d and d[col]:
-                hostname = str(d[col]) if not isinstance(d[col], bytes) else d[col].decode("utf-8", errors="replace")
-                break
-        for col in ["username", "user", "sid"]:
-            if col in d and d[col]:
-                username = str(d[col]) if not isinstance(d[col], bytes) else d[col].decode("utf-8", errors="replace")
-                break
+        # Hostname/username
+        hostname = str(d.get("hostname", "") or "")
+        username = str(d.get("username", "") or "")
         
-        # Build plaso metadata from ALL columns
+        # Build plaso metadata
         plaso_meta = {"parser": parser, "data_type": parser}
         for col in all_cols:
-            if col in ["_identifier", "rowid"] or col.startswith("_"):
-                continue  # Skip internal IDs
+            if col.startswith("_") or col in ["rowid"]:
+                continue
             if col in d:
                 val = d[col]
                 if isinstance(val, bytes):
-                    if len(val) > 1000:
-                        val = f"<blob:{len(val)}>"
-                    else:
-                        try:
-                            val = val.decode("utf-8", errors="replace")
-                        except Exception:
-                            val = f"<bytes:{len(val)}>"
+                    val = f"<blob:{len(val)}>" if len(val) > 100 else val.decode("utf-8", errors="replace")
                 plaso_meta[col] = val
         
         return {
@@ -386,8 +291,8 @@ class PlasoPlugin(BasePlugin):
             "timestamp": timestamp if timestamp else None,
             "timestamp_desc": "Event Time",
             "message": message[:2000],
-            "host": {"hostname": str(hostname)},
-            "user": {"name": str(username)},
+            "host": {"hostname": hostname},
+            "user": {"name": username},
             "plaso": plaso_meta,
             "raw": _sanitize_for_json(d),
         }
@@ -396,9 +301,7 @@ class PlasoPlugin(BasePlugin):
         parser = data.get("data_type", "") or data.get("parser", "") or "unknown"
         artifact_type = self._resolve_artifact_type(parser)
         timestamp = data.get("datetime", "") or data.get("timestamp", "") or ""
-        message = data.get("message", "") or data.get("description", "") or data.get("display_name", "") or ""
-        if not message:
-            message = f"[{parser}] Event"
+        message = data.get("message", "") or data.get("description", "") or data.get("display_name", "") or f"[{parser}] Event"
         
         return {
             "fo_id": str(uuid.uuid4()),
@@ -437,4 +340,4 @@ class PlasoPlugin(BasePlugin):
             raise PluginFatalError("log2timeline timed out") from exc
         if not plaso_path.exists() or plaso_path.stat().st_size == 0:
             raise PluginFatalError("log2timeline produced no output")
-        return cls(PluginContext(ctx.case_id, ctx.job_id, plaso_path, ctx.source_minio_url, ctx.logger))
+        return cls(PluginContext(ctx.case_id, ctx.job_id, plaso_path, ctx.source_minio_url, logger=ctx.logger))
