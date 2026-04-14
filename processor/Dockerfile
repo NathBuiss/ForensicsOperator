@@ -60,40 +60,11 @@ RUN wget -q -O /tmp/de4dot.zip \
     && rm -rf /tmp/de4dot.zip /tmp/de4dot_extracted
 
 # ── Plaso (log2timeline/psort) — required for .plaso file parsing ────────────
-# Install latest working plaso from PyPI
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    python3-dev \
-    pkg-config \
-    libewf-dev \
-    libvhdi-dev \
-    libvmdk-dev \
-    libvslvm-dev \
-    libbde-dev \
-    libqcow-dev \
-    libmsiecf-dev \
-    libolecf-dev \
-    libregf-dev \
-    liblnk-dev \
-    libfwsi-dev \
-    libfwnt-dev \
-    libluksde-dev \
-    libvshadow-dev \
-    libsigscan-dev \
-    libfsntfs-dev \
-    libfsapfs-dev \
-    libfsext-dev \
-    libfshfs-dev \
-    libexif-dev \
-    liblzma-dev \
-    libz-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install plaso from PyPI (latest version with working metadata)
-RUN pip3 install --no-cache-dir plaso
-
-# Verify installation
-RUN log2timeline.py --version && psort.py --version
+RUN add-apt-repository -y ppa:gift/dev && apt-get update && apt-get install -y --no-install-recommends \
+    plaso-tools \
+    && rm -rf /var/lib/apt/lists/* \
+    && log2timeline.py --version \
+    && psort.py --version
 
 # ── Python deps (includes pyhindsight for the Hindsight module) ───────────────
 # Upgrade build tools first so pyproject.toml-based packages build on Ubuntu 22.04's old pip.
