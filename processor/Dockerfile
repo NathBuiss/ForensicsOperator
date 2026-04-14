@@ -21,7 +21,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libtsk-dev \
     testdisk \
     mono-runtime \
+    software-properties-common \
     && rm -rf /var/lib/apt/lists/*
+
+# Add GIFT PPA for plaso packages (Ubuntu 24.04 = noble)
+RUN add-apt-repository -y ppa:gift/stable && apt-get update
 
 # ── Hayabusa DFIR binary + rules (Sigma-based EVTX threat hunting) ───────────
 # Extract to a temp location, then normalize: copy the *contents* of the
@@ -59,22 +63,15 @@ RUN wget -q -O /tmp/de4dot.zip \
     && rm -rf /tmp/de4dot.zip /tmp/de4dot_extracted
 
 # ── Plaso (log2timeline/psort) — required for .plaso file parsing ────────────
-# Try latest plaso versions from PyPI until one installs successfully
-RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel && \
-    (pip3 install --no-cache-dir --break-system-packages plaso==20260119 || \
-     pip3 install --no-cache-dir --break-system-packages plaso==20250918 || \
-     pip3 install --no-cache-dir --break-system-packages plaso==20240826 || \
-     pip3 install --no-cache-dir --break-system-packages plaso==20240308)
+RUN apt-get update && apt-get install -y --no-install-recommends plaso-tools python3-plaso
 
 # ── Python deps (includes pyhindsight for the Hindsight module) ───────────────
-# Upgrade build tools first so pyproject.toml-based packages build on Ubuntu 22.04's old pip.
-RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
 COPY processor/requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
 # ccl_chromium_reader is required by pyhindsight but is not on PyPI.
 # Install from GitHub (has pyproject.toml so pip handles it, including its ccl_simplesnappy dep).
-RUN pip3 install --no-cache-dir \
+RUN pip3 install --no-cache-dir --break-system-packages \
     "git+https://github.com/cclgroupltd/ccl_chromium_reader.git" \
     && python3 -c "import ccl_chromium_reader; print('ccl_chromium_reader installed OK')"
 
