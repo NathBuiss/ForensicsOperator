@@ -10,7 +10,7 @@ WORKDIR /app
 # libimage-exiftool-perl → ExifTool metadata extractor
 # libjpeg-dev / zlib1g-dev → optional image libraries for ExifTool
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-dev \
+    python3 python3-pip python3-dev python3-venv \
     build-essential \
     libmagic1 libmagic-dev \
     wget curl git \
@@ -24,8 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     software-properties-common \
     && rm -rf /var/lib/apt/lists/*
 
-# Add GIFT PPA for plaso packages (Ubuntu 24.04 = noble)
-RUN add-apt-repository -y ppa:gift/stable && apt-get update
+# Add GIFT PPA for plaso (Ubuntu 24.04 = noble)
+RUN add-apt-repository -y ppa:gift/stable
 
 # ── Hayabusa DFIR binary + rules (Sigma-based EVTX threat hunting) ───────────
 # Extract to a temp location, then normalize: copy the *contents* of the
@@ -63,22 +63,27 @@ RUN wget -q -O /tmp/de4dot.zip \
     && rm -rf /tmp/de4dot.zip /tmp/de4dot_extracted
 
 # ── Plaso (log2timeline/psort) — required for .plaso file parsing ────────────
-RUN apt-get update && apt-get install -y --no-install-recommends plaso-tools python3-plaso
+RUN apt-get update && apt-get install -y --no-install-recommends plaso-tools
+
+# ── Python venv for additional packages ──────────────────────────────────────
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 # ── Python deps (includes pyhindsight for the Hindsight module) ───────────────
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 COPY processor/requirements.txt .
-RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # ccl_chromium_reader is required by pyhindsight but is not on PyPI.
 # Install from GitHub (has pyproject.toml so pip handles it, including its ccl_simplesnappy dep).
-RUN pip3 install --no-cache-dir --break-system-packages \
+RUN pip install --no-cache-dir \
     "git+https://github.com/cclgroupltd/ccl_chromium_reader.git" \
     && python3 -c "import ccl_chromium_reader; print('ccl_chromium_reader installed OK')"
 
 # Patch pyhindsight for Python < 3.11 compatibility.
 # datetime.UTC was introduced in Python 3.11; replace with datetime.timezone.utc.
 RUN python3 -c "import datetime; datetime.UTC" 2>/dev/null || \
-    find /usr/local/lib /usr/lib -name "*.py" -path "*/pyhindsight/*" -exec \
+    find /opt/venv/lib -name "*.py" -path "*/pyhindsight/*" -exec \
     sed -i 's/datetime\.UTC/datetime.timezone.utc/g' {} \;
 
 # ── Processor source code ─────────────────────────────────────────────────────
