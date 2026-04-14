@@ -1,11 +1,6 @@
 """
 Plaso Plugin — parses Plaso storage files (.plaso).
-Plaso files are SQLite databases. This plugin dynamically detects the schema
-and extracts all events with proper field mapping.
-
-Supports:
-- Modern schema (20200227+): event_data table with _timestamp, data_type, attributes
-- Legacy schema: events table with timestamp, parser, unicode_string
+Dynamically detects schema and extracts ALL available fields.
 """
 from __future__ import annotations
 
@@ -21,26 +16,15 @@ from typing import Any, Generator
 
 from plugins.base_plugin import BasePlugin, PluginContext, PluginFatalError
 
-# Maps Plaso data_type/parser name → artifact_type for routing
 PLASO_PARSER_TO_ARTIFACT = {
-    "winevt": "evtx",
-    "winevtx": "evtx",
-    "winprefetch": "prefetch",
-    "mft": "mft",
-    "msiecf": "lnk",
-    "lnk": "lnk",
-    "winreg": "registry",
-    "filestat": "filesystem",
-    "sqlite": "browser",
-    "chrome_history": "browser",
+    "winevt": "evtx", "winevtx": "evtx", "winprefetch": "prefetch",
+    "mft": "mft", "msiecf": "lnk", "lnk": "lnk", "winreg": "registry",
+    "filestat": "filesystem", "sqlite": "browser", "chrome_history": "browser",
     "firefox_history": "browser",
-    "macos_keychain": "browser",
-    "macos_security": "filesystem",
 }
 
 
 def _sanitize_for_json(obj: Any) -> Any:
-    """Recursively convert an object to be JSON-serializable."""
     if isinstance(obj, bytes):
         try:
             return obj.decode("utf-8", errors="replace")
@@ -56,7 +40,6 @@ def _sanitize_for_json(obj: Any) -> Any:
 
 
 def _format_timestamp(ts_micro: int) -> str:
-    """Convert Plaso microsecond timestamp to ISO8601."""
     if not ts_micro:
         return ""
     try:
@@ -66,25 +49,10 @@ def _format_timestamp(ts_micro: int) -> str:
         return ""
 
 
-def _deserialize_blob(blob: bytes | None) -> Any:
-    """Deserialize a Plaso pathspec or attributes blob."""
-    if not blob:
-        return None
-    try:
-        # Plaso uses pickle for pathspec and attributes
-        return pickle.loads(blob)
-    except Exception:
-        try:
-            # Fallback: try UTF-8 decode
-            return blob.decode("utf-8", errors="replace")
-        except Exception:
-            return str(blob)
-
-
 class PlasoPlugin(BasePlugin):
 
     PLUGIN_NAME = "plaso"
-    PLUGIN_VERSION = "2.1.0"
+    PLUGIN_VERSION = "3.0.0"
     DEFAULT_ARTIFACT_TYPE = "timeline"
     SUPPORTED_EXTENSIONS = [".plaso"]
     SUPPORTED_MIME_TYPES = ["application/x-sqlite3"]
@@ -95,439 +63,353 @@ class PlasoPlugin(BasePlugin):
         self._records_skipped = 0
 
     def parse(self) -> Generator[dict[str, Any], None, None]:
-        """Try psort first, then fall back to direct SQLite reading."""
         if self._psort_available():
-            self.log.info("Using psort for parsing")
             yield from self._parse_with_psort()
         else:
-            self.log.warning("psort not found, falling back to direct SQLite parsing")
+            self.log.warning("psort not found, using direct SQLite parsing")
             yield from self._parse_sqlite_direct()
 
     def _psort_available(self) -> bool:
         try:
-            result = subprocess.run(
-                ["psort.py", "--version"],
-                capture_output=True, timeout=5
-            )
+            result = subprocess.run(["psort.py", "--version"], capture_output=True, timeout=5)
             return result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
 
     def _parse_with_psort(self) -> Generator[dict[str, Any], None, None]:
-        """Export via psort to JSON Lines, then parse."""
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=True) as tmp:
             tmp_path = tmp.name
 
-        cmd = [
-            "psort.py",
-            "--output-time-zone", "UTC",
-            "-o", "json_line",
-            "-w", tmp_path,
-            str(self.ctx.source_file_path),
-        ]
+        cmd = ["psort.py", "--output-time-zone", "UTC", "-o", "json_line", "-w", tmp_path, str(self.ctx.source_file_path)]
         self.log.info("Running: %s", " ".join(cmd))
 
         try:
-            result = subprocess.run(cmd, check=True, capture_output=True, timeout=3600)
-            if result.stdout:
-                self.log.info("psort stdout: %s", result.stdout.decode()[:500])
-            if result.stderr:
-                self.log.warning("psort stderr: %s", result.stderr.decode()[:500])
+            subprocess.run(cmd, check=True, capture_output=True, timeout=3600)
         except subprocess.CalledProcessError as exc:
-            raise PluginFatalError(
-                f"psort failed (exit {exc.returncode}): {exc.stderr.decode()[:500] if exc.stderr else 'no output'}"
-            ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise PluginFatalError("psort timed out after 1 hour") from exc
+            raise PluginFatalError(f"psort failed: {exc.stderr.decode()[:500] if exc.stderr else 'no output'}") from exc
+        except subprocess.TimeoutExpired:
+            raise PluginFatalError("psort timed out") from exc
 
         output_file = Path(tmp_path)
         if not output_file.exists():
-            raise PluginFatalError("psort produced no output file")
+            raise PluginFatalError("psort produced no output")
 
-        self.log.info("Reading psort output: %s (%d bytes)", tmp_path, output_file.stat().st_size)
-        
         with output_file.open() as f:
-            for i, line in enumerate(f):
+            for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     data = json.loads(line)
-                    event = self._psort_event_to_fo(data)
+                    event = self._event_to_fo(data)
                     self._records_read += 1
                     yield event
-                    if i > 0 and i % 100000 == 0:
-                        self.log.info("Processed %d events", i)
-                except (json.JSONDecodeError, KeyError, ValueError) as exc:
+                except Exception as exc:
                     self._records_skipped += 1
-                    self.log.debug("Skipped line %d: %s", i, exc)
+                    self.log.debug("Skipped: %s", exc)
 
         output_file.unlink(missing_ok=True)
 
-    def _psort_event_to_fo(self, data: dict) -> dict[str, Any]:
-        """Convert a psort JSON Line event to a ForensicEvent dict."""
-        # Modern plaso uses data_type, older uses parser
+    def _parse_sqlite_direct(self) -> Generator[dict[str, Any], None, None]:
+        db_path = str(self.ctx.source_file_path)
+        self.log.info("Opening: %s", db_path)
+
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+        except sqlite3.DatabaseError as exc:
+            raise PluginFatalError(f"Cannot open SQLite: {exc}") from exc
+
+        try:
+            cursor = conn.cursor()
+            
+            # Get ALL tables
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [row[0] for row in cursor.fetchall()]
+            self.log.info("ALL TABLES: %s", tables)
+            
+            # Find event table
+            event_table = None
+            for t in ["event_data", "events", "event", "timeline"]:
+                if t in tables:
+                    event_table = t
+                    break
+            
+            if not event_table:
+                # Use first table that looks like it has events
+                for t in tables:
+                    if "event" in t.lower() or "timeline" in t.lower():
+                        event_table = t
+                        break
+            
+            if not event_table:
+                raise PluginFatalError(f"No event table found. Tables: {tables}")
+            
+            self.log.info("Using table: %s", event_table)
+            
+            # Get ALL columns with detailed info
+            cursor.execute(f"PRAGMA table_info({event_table})")
+            columns_info = cursor.fetchall()
+            
+            self.log.info("=" * 80)
+            self.log.info("COLUMN SCHEMA for %s:", event_table)
+            for col in columns_info:
+                # cid, name, type, notnull, default_value, pk
+                self.log.info("  %s: %s (notnull=%s, pk=%s)", col[1], col[2], col[3], col[5])
+            self.log.info("=" * 80)
+            
+            column_names = [col[1] for col in columns_info]
+            
+            # Get row count
+            cursor.execute(f"SELECT COUNT(*) FROM {event_table}")
+            count = cursor.fetchone()[0]
+            self.log.info("Total rows: %d", count)
+            
+            # Get FIRST 10 rows with ALL data
+            cursor.execute(f"SELECT * FROM {event_table} LIMIT 10")
+            rows = cursor.fetchall()
+            
+            self.log.info("=" * 80)
+            self.log.info("SAMPLE DATA (first 10 rows):")
+            self.log.info("=" * 80)
+            
+            for i, row in enumerate(rows):
+                self.log.info("--- ROW %d ---", i)
+                d = dict(row)
+                for key, value in d.items():
+                    if value is None:
+                        self.log.info("  %s: NULL", key)
+                    elif isinstance(value, bytes):
+                        # Try to show what kind of bytes
+                        if len(value) < 200:
+                            try:
+                                decoded = value.decode("utf-8", errors="replace")
+                                self.log.info("  %s: <bytes:%d> '%s'", key, len(value), decoded[:100])
+                            except Exception:
+                                self.log.info("  %s: <bytes:%d> (binary)", key, len(value))
+                        else:
+                            self.log.info("  %s: <bytes:%d> (large blob)", key, len(value))
+                    elif isinstance(value, (int, float)):
+                        # Check if it looks like a timestamp
+                        if value > 1000000000000000 and value < 2000000000000000:
+                            # Likely microseconds timestamp
+                            try:
+                                dt = datetime.fromtimestamp(value / 1_000_000, tz=timezone.utc)
+                                self.log.info("  %s: %d (%s) <- TIMESTAMP?", key, value, dt.isoformat())
+                            except Exception:
+                                self.log.info("  %s: %d", key, value)
+                        else:
+                            self.log.info("  %s: %d", key, value)
+                    else:
+                        val_str = str(value)[:200]
+                        self.log.info("  %s: %s", key, val_str)
+            
+            self.log.info("=" * 80)
+            self.log.info("END SAMPLE DATA")
+            self.log.info("=" * 80)
+            
+            # Now find the actual columns we need by inspecting the data
+            timestamp_col = None
+            parser_col = None
+            message_cols = []
+            
+            # Common timestamp column names
+            for candidate in ["_timestamp", "timestamp", "event_timestamp", "time", "ts"]:
+                if candidate in column_names:
+                    timestamp_col = candidate
+                    self.log.info("Found timestamp column: %s", timestamp_col)
+                    break
+            
+            # Common parser/data_type column names
+            for candidate in ["data_type", "parser", "type", "event_type", "source"]:
+                if candidate in column_names:
+                    parser_col = candidate
+                    self.log.info("Found parser column: %s", parser_col)
+                    break
+            
+            # Common message column names
+            for candidate in ["message", "description", "text", "string", "unicode_string", "content", "body"]:
+                if candidate in column_names:
+                    message_cols.append(candidate)
+            
+            # Common filename/path columns
+            filename_cols = []
+            for candidate in ["filename", "display_name", "path", "filepath", "location", "pathspec"]:
+                if candidate in column_names:
+                    filename_cols.append(candidate)
+            
+            self.log.info("Message columns found: %s", message_cols)
+            self.log.info("Filename columns found: %s", filename_cols)
+            
+            # Yield all events
+            cursor.execute(f"SELECT * FROM {event_table} ORDER BY {timestamp_col or 'rowid'} ASC LIMIT 500000")
+            
+            while True:
+                rows = cursor.fetchmany(10000)
+                if not rows:
+                    break
+                
+                for row in rows:
+                    try:
+                        d = dict(row)
+                        event = self._sqlite_row_to_event(
+                            d, column_names, timestamp_col, parser_col, message_cols, filename_cols
+                        )
+                        if event:
+                            self._records_read += 1
+                            yield event
+                    except Exception as exc:
+                        self._records_skipped += 1
+                        self.log.error("Skipped row: %s", exc)
+                
+                if self._records_read % 50000 == 0 and self._records_read > 0:
+                    self.log.info("Processed %d events...", self._records_read)
+                    
+        finally:
+            conn.close()
+
+    def _sqlite_row_to_event(self, d: dict, all_cols: list, timestamp_col: str | None, 
+                             parser_col: str | None, message_cols: list, filename_cols: list) -> dict[str, Any]:
+        """Convert any sqlite row to event, using discovered columns."""
+        
+        # Get parser/data_type
+        parser = ""
+        if parser_col and parser_col in d:
+            val = d[parser_col]
+            if val:
+                parser = str(val)
+        
+        # If no parser column found, try to find one in the data
+        if not parser:
+            for col in ["data_type", "parser", "type", "source_short"]:
+                if col in d and d[col]:
+                    parser = str(d[col])
+                    break
+        
+        artifact_type = self._resolve_artifact_type(parser) if parser else "timeline"
+        
+        # Get timestamp
+        timestamp = ""
+        if timestamp_col and timestamp_col in d:
+            ts_val = d[timestamp_col]
+            if isinstance(ts_val, bytes):
+                try:
+                    ts_val = int.from_bytes(ts_val, 'little')
+                except Exception:
+                    ts_val = 0
+            if ts_val:
+                timestamp = _format_timestamp(ts_val)
+        
+        # Get message - try all discovered message columns
+        message = ""
+        for col in message_cols:
+            if col in d:
+                val = d[col]
+                if val:
+                    if isinstance(val, bytes):
+                        val = val.decode("utf-8", errors="replace")
+                    message = str(val).strip()
+                    if message:
+                        break
+        
+        # If still no message, try filename columns
+        if not message:
+            for col in filename_cols:
+                if col in d:
+                    val = d[col]
+                    if val:
+                        if isinstance(val, bytes):
+                            val = val.decode("utf-8", errors="replace")
+                        message = f"{col}: {val}"
+                        break
+        
+        # If still nothing, scan ALL columns for something useful
+        if not message:
+            for col, val in d.items():
+                if val is None:
+                    continue
+                if col in ["_identifier", "rowid", "store_number", "store_index", "inode"]:
+                    continue  # Skip ID fields
+                if isinstance(val, (int, float)) and val > 1000000000000000:
+                    continue  # Skip timestamps
+                if isinstance(val, bytes):
+                    if len(val) < 500:
+                        try:
+                            decoded = val.decode("utf-8", errors="replace").strip()
+                            if decoded and len(decoded) > 3:
+                                message = f"{col}: {decoded[:200]}"
+                                break
+                        except Exception:
+                            pass
+                    continue
+                val_str = str(val).strip()
+                if val_str and len(val_str) > 2:
+                    message = f"{col}: {val_str[:200]}"
+                    break
+        
+        # Final fallback
+        if not message:
+            message = f"[{parser}] Event" if parser else "Plaso event"
+        
+        # Get hostname/username if available
+        hostname = ""
+        username = ""
+        for col in ["hostname", "computer_name", "machine"]:
+            if col in d and d[col]:
+                hostname = str(d[col]) if not isinstance(d[col], bytes) else d[col].decode("utf-8", errors="replace")
+                break
+        for col in ["username", "user", "sid"]:
+            if col in d and d[col]:
+                username = str(d[col]) if not isinstance(d[col], bytes) else d[col].decode("utf-8", errors="replace")
+                break
+        
+        # Build plaso metadata from ALL columns
+        plaso_meta = {"parser": parser, "data_type": parser}
+        for col in all_cols:
+            if col in ["_identifier", "rowid"] or col.startswith("_"):
+                continue  # Skip internal IDs
+            if col in d:
+                val = d[col]
+                if isinstance(val, bytes):
+                    if len(val) > 1000:
+                        val = f"<blob:{len(val)}>"
+                    else:
+                        try:
+                            val = val.decode("utf-8", errors="replace")
+                        except Exception:
+                            val = f"<bytes:{len(val)}>"
+                plaso_meta[col] = val
+        
+        return {
+            "fo_id": str(uuid.uuid4()),
+            "artifact_type": artifact_type,
+            "timestamp": timestamp if timestamp else None,
+            "timestamp_desc": "Event Time",
+            "message": message[:2000],
+            "host": {"hostname": str(hostname)},
+            "user": {"name": str(username)},
+            "plaso": plaso_meta,
+            "raw": _sanitize_for_json(d),
+        }
+
+    def _event_to_fo(self, data: dict) -> dict[str, Any]:
         parser = data.get("data_type", "") or data.get("parser", "") or "unknown"
         artifact_type = self._resolve_artifact_type(parser)
-        
         timestamp = data.get("datetime", "") or data.get("timestamp", "") or ""
-        hostname = data.get("hostname", "") or ""
-        username = data.get("username", "") or ""
-        
-        # Message can be in multiple fields
-        message = (
-            data.get("message", "") or 
-            data.get("description", "") or 
-            data.get("display_name", "") or 
-            data.get("filename", "") or 
-            ""
-        )
-        
-        source_short = data.get("source_short", "") or ""
-        source_long = data.get("source_long", "") or ""
-        
-        if not message and (source_short or source_long):
-            message = f"{source_short}: {source_long}"
+        message = data.get("message", "") or data.get("description", "") or data.get("display_name", "") or ""
         if not message:
             message = f"[{parser}] Event"
-
+        
         return {
             "fo_id": str(uuid.uuid4()),
             "artifact_type": artifact_type,
             "timestamp": timestamp,
             "timestamp_desc": data.get("timestamp_desc", "") or "Event Time",
             "message": message,
-            "host": {"hostname": hostname},
-            "user": {"name": username},
-            "plaso": {
-                "parser": parser,
-                "data_type": parser,
-                "source_short": source_short,
-                "source_long": source_long,
-                "filename": data.get("filename", "") or "",
-                "display_name": data.get("display_name", "") or "",
-                "pathspec": data.get("pathspec", ""),
-            },
+            "host": {"hostname": data.get("hostname", "") or ""},
+            "user": {"name": data.get("username", "") or ""},
+            "plaso": {"parser": parser, "data_type": parser},
             "raw": _sanitize_for_json(data),
-        }
-
-    def _parse_sqlite_direct(self) -> Generator[dict[str, Any], None, None]:
-        """Directly query the Plaso SQLite storage file with dynamic schema detection."""
-        db_path = str(self.ctx.source_file_path)
-        self.log.info("Opening plaso file: %s", db_path)
-
-        try:
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-        except sqlite3.DatabaseError as exc:
-            raise PluginFatalError(f"Cannot open as SQLite: {exc}") from exc
-
-        try:
-            cursor = conn.cursor()
-            
-            # Get all tables
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            tables = [row[0] for row in cursor.fetchall()]
-            self.log.info("Tables in plaso file: %s", tables)
-
-            # Find the event table (could be event_data or events)
-            event_table = None
-            if "event_data" in tables:
-                event_table = "event_data"
-            elif "events" in tables:
-                event_table = "events"
-            
-            if not event_table:
-                raise PluginFatalError(
-                    f"No event table found. Available tables: {tables}"
-                )
-
-            self.log.info("Using event table: %s", event_table)
-            
-            # Get column info
-            cursor.execute(f"PRAGMA table_info({event_table})")
-            columns = {row[1]: {"cid": row[0], "type": row[2], "notnull": row[3]} for row in cursor.fetchall()}
-            column_names = list(columns.keys())
-            
-            self.log.info("Columns in %s (%d): %s", event_table, len(column_names), column_names)
-            
-            # Log row count
-            cursor.execute(f"SELECT COUNT(*) FROM {event_table}")
-            row_count = cursor.fetchone()[0]
-            self.log.info("Total rows in %s: %d", event_table, row_count)
-            
-            # Log sample rows to understand the data
-            cursor.execute(f"SELECT * FROM {event_table} LIMIT 5")
-            for i, row in enumerate(cursor.fetchall()):
-                row_dict = dict(row)
-                sample = {}
-                for k, v in row_dict.items():
-                    if isinstance(v, bytes):
-                        sample[k] = f"<bytes:{len(v)}>"
-                    elif v is None:
-                        sample[k] = None
-                    else:
-                        sample[k] = repr(v)[:100]
-                self.log.info("Sample row %d: %s", i, sample)
-            
-            # Identify timestamp column
-            timestamp_col = None
-            for candidate in ["_timestamp", "timestamp", "event_timestamp"]:
-                if candidate in column_names:
-                    timestamp_col = candidate
-                    self.log.info("Using timestamp column: %s", timestamp_col)
-                    break
-            
-            if not timestamp_col:
-                self.log.warning("No timestamp column found!")
-            
-            # Yield events
-            if event_table == "event_data":
-                yield from self._read_event_data(conn, column_names, timestamp_col)
-            else:
-                yield from self._read_events(conn, column_names, timestamp_col)
-                
-        finally:
-            conn.close()
-
-    def _read_event_data(self, conn: sqlite3.Connection, columns: list[str], timestamp_col: str | None) -> Generator[dict[str, Any], None, None]:
-        """Read from modern event_data table."""
-        cursor = conn.cursor()
-        
-        # Build SELECT with all available important columns
-        important_cols = [
-            "_timestamp", "timestamp", "timestamp_desc", "data_type", "parser",
-            "message", "description", "display_name", "filename", "hostname", 
-            "username", "pathspec", "attributes", "source_short", "source_long",
-            "store_number", "inode", "unicode_string", "string"
-        ]
-        
-        select_cols = [c for c in important_cols if c in columns]
-        if not select_cols:
-            select_cols = ["*"]
-        
-        order_by = timestamp_col if timestamp_col else "rowid"
-        limit = 500000
-        query = f"SELECT {', '.join(select_cols)} FROM event_data ORDER BY {order_by} ASC LIMIT {limit}"
-        self.log.info("Executing: %s", query)
-        
-        cursor.execute(query)
-        
-        while True:
-            rows = cursor.fetchmany(10000)
-            if not rows:
-                break
-                
-            for row in rows:
-                try:
-                    d = dict(row)
-                    event = self._row_to_event_modern(d, timestamp_col)
-                    if event:
-                        self._records_read += 1
-                        yield event
-                except Exception as exc:
-                    self._records_skipped += 1
-                    self.log.error("Skipped row: %s", exc)
-                    
-            if self._records_read % 50000 == 0 and self._records_read > 0:
-                self.log.info("Processed %d events...", self._records_read)
-
-    def _read_events(self, conn: sqlite3.Connection, columns: list[str], timestamp_col: str | None) -> Generator[dict[str, Any], None, None]:
-        """Read from legacy events table."""
-        cursor = conn.cursor()
-        
-        important_cols = [
-            "_timestamp", "timestamp", "timestamp_desc", "parser", "data_type",
-            "source_short", "source_long", "display_name", "pathspec", "inode",
-            "filename", "unicode_string", "string", "message", "data"
-        ]
-        
-        select_cols = [c for c in important_cols if c in columns]
-        if not select_cols:
-            select_cols = ["*"]
-        
-        order_by = timestamp_col if timestamp_col else "rowid"
-        query = f"SELECT {', '.join(select_cols)} FROM events ORDER BY {order_by} ASC LIMIT 500000"
-        self.log.info("Executing: %s", query)
-        
-        cursor.execute(query)
-        
-        while True:
-            rows = cursor.fetchmany(10000)
-            if not rows:
-                break
-                
-            for row in rows:
-                try:
-                    d = dict(row)
-                    event = self._row_to_event_legacy(d, timestamp_col)
-                    if event:
-                        self._records_read += 1
-                        yield event
-                except Exception as exc:
-                    self._records_skipped += 1
-                    self.log.error("Skipped events row: %s", exc)
-                    
-            if self._records_read % 50000 == 0 and self._records_read > 0:
-                self.log.info("Processed %d events...", self._records_read)
-
-    def _row_to_event_modern(self, d: dict, timestamp_col: str | None) -> dict[str, Any]:
-        """Convert a row from modern event_data table to ForensicEvent."""
-        # Parser is in data_type (modern) or parser (older)
-        parser = d.get("data_type", "") or d.get("parser", "") or ""
-        parser_str = str(parser) if parser else ""
-        artifact_type = self._resolve_artifact_type(parser_str) if parser_str else "timeline"
-        
-        # Timestamp
-        ts_val = d.get(timestamp_col, 0) if timestamp_col else 0
-        if isinstance(ts_val, bytes):
-            try:
-                ts_val = int.from_bytes(ts_val, 'little')
-            except Exception:
-                ts_val = 0
-        timestamp = _format_timestamp(ts_val) if ts_val else ""
-        
-        # Message - try many fields in order of preference
-        message = ""
-        for field in ["message", "description", "unicode_string", "string", "display_name"]:
-            val = d.get(field, "")
-            if val:
-                if isinstance(val, bytes):
-                    val = val.decode("utf-8", errors="replace")
-                message = str(val).strip()
-                if message:
-                    break
-        
-        # If still no message, build from filename/pathspec
-        if not message:
-            filename = d.get("filename", "")
-            if filename:
-                if isinstance(filename, bytes):
-                    filename = filename.decode("utf-8", errors="replace")
-                message = f"File: {filename}"
-            
-            if not message:
-                pathspec_blob = d.get("pathspec")
-                if pathspec_blob:
-                    pathspec = _deserialize_blob(pathspec_blob if isinstance(pathspec_blob, bytes) else None)
-                    if pathspec:
-                        if isinstance(pathspec, dict):
-                            location = pathspec.get("location", "") or pathspec.get("filename", "")
-                            if location:
-                                message = f"Path: {location}"
-                        elif isinstance(pathspec, str):
-                            message = f"Path: {pathspec}"
-        
-        # Final fallback
-        if not message:
-            message = f"[{parser_str}] Event" if parser_str else "Plaso event"
-        
-        # Hostname and username
-        hostname = d.get("hostname", "") or ""
-        if isinstance(hostname, bytes):
-            hostname = hostname.decode("utf-8", errors="replace")
-            
-        username = d.get("username", "") or ""
-        if isinstance(username, bytes):
-            username = username.decode("utf-8", errors="replace")
-        
-        # Timestamp description
-        timestamp_desc = d.get("timestamp_desc", "") or "Event Time"
-        if isinstance(timestamp_desc, bytes):
-            timestamp_desc = timestamp_desc.decode("utf-8", errors="replace")
-        
-        # Build plaso metadata
-        filename = d.get("filename", "") or ""
-        if isinstance(filename, bytes):
-            filename = filename.decode("utf-8", errors="replace")
-            
-        display_name = d.get("display_name", "") or ""
-        if isinstance(display_name, bytes):
-            display_name = display_name.decode("utf-8", errors="replace")
-        
-        pathspec_blob = d.get("pathspec")
-        pathspec_str = ""
-        if pathspec_blob:
-            pathspec = _deserialize_blob(pathspec_blob if isinstance(pathspec_blob, bytes) else None)
-            if pathspec:
-                pathspec_str = str(pathspec)
-        
-        return {
-            "fo_id": str(uuid.uuid4()),
-            "artifact_type": artifact_type,
-            "timestamp": timestamp if timestamp else None,
-            "timestamp_desc": str(timestamp_desc),
-            "message": message,
-            "host": {"hostname": str(hostname)},
-            "user": {"name": str(username)},
-            "plaso": {
-                "parser": parser_str,
-                "data_type": parser_str,
-                "display_name": display_name,
-                "filename": filename,
-                "pathspec": pathspec_str[:2000] if pathspec_str else "",
-                "source_short": str(d.get("source_short", "") or ""),
-                "source_long": str(d.get("source_long", "") or ""),
-            },
-            "raw": _sanitize_for_json(d),
-        }
-
-    def _row_to_event_legacy(self, d: dict, timestamp_col: str | None) -> dict[str, Any]:
-        """Convert a row from legacy events table to ForensicEvent."""
-        parser = d.get("parser", "") or d.get("data_type", "") or ""
-        parser_str = str(parser) if parser else ""
-        artifact_type = self._resolve_artifact_type(parser_str) if parser_str else "timeline"
-        
-        ts_val = d.get(timestamp_col, 0) if timestamp_col else 0
-        if isinstance(ts_val, bytes):
-            try:
-                ts_val = int.from_bytes(ts_val, 'little')
-            except Exception:
-                ts_val = 0
-        timestamp = _format_timestamp(ts_val) if ts_val else ""
-        
-        # Legacy uses unicode_string primarily
-        message = ""
-        for field in ["unicode_string", "string", "message", "display_name"]:
-            val = d.get(field, "")
-            if val:
-                if isinstance(val, bytes):
-                    val = val.decode("utf-8", errors="replace")
-                message = str(val).strip()
-                if message:
-                    break
-        
-        if not message:
-            source_short = d.get("source_short", "") or ""
-            source_long = d.get("source_long", "") or ""
-            if isinstance(source_short, bytes):
-                source_short = source_short.decode("utf-8", errors="replace")
-            if isinstance(source_long, bytes):
-                source_long = source_long.decode("utf-8", errors="replace")
-            if source_short or source_long:
-                message = f"{source_short}: {source_long}"
-            elif parser_str:
-                message = f"[{parser_str}] Event"
-            else:
-                message = "Plaso event"
-        
-        return {
-            "fo_id": str(uuid.uuid4()),
-            "artifact_type": artifact_type,
-            "timestamp": timestamp if timestamp else None,
-            "timestamp_desc": str(d.get("timestamp_desc", "") or "Event Time"),
-            "message": message,
-            "host": {"hostname": ""},
-            "user": {"name": ""},
-            "plaso": {
-                "parser": parser_str,
-                "data_type": parser_str,
-                "source_short": str(d.get("source_short", "") or ""),
-                "source_long": str(d.get("source_long", "") or ""),
-                "display_name": str(d.get("display_name", "") or ""),
-                "filename": str(d.get("filename", "") or ""),
-            },
-            "raw": _sanitize_for_json(d),
         }
 
     def _resolve_artifact_type(self, parser: str) -> str:
@@ -538,43 +420,21 @@ class PlasoPlugin(BasePlugin):
         return self.DEFAULT_ARTIFACT_TYPE
 
     def get_stats(self) -> dict[str, Any]:
-        return {
-            "records_read": self._records_read,
-            "records_skipped": self._records_skipped,
-        }
+        return {"records_read": self._records_read, "records_skipped": self._records_skipped}
 
     @classmethod
     def create_from_source(cls, source_file: Path, work_dir: Path, ctx: PluginContext) -> "PlasoPlugin":
-        """Run log2timeline on source file to create plaso storage."""
         plaso_path = work_dir / f"{source_file.name}.plaso"
-        cmd = [
-            "log2timeline.py",
-            "--status_view", "none",
-            "--logfile", "/dev/null",
-            str(plaso_path),
-            str(source_file),
-        ]
-        ctx.logger.info("[%s] log2timeline: processing %s", ctx.job_id, source_file.name)
+        cmd = ["log2timeline.py", "--status_view", "none", "--logfile", "/dev/null", str(plaso_path), str(source_file)]
+        ctx.logger.info("[%s] log2timeline: %s", ctx.job_id, source_file.name)
         try:
-            result = subprocess.run(cmd, check=True, capture_output=True, timeout=7200)
-            if result.stderr:
-                ctx.logger.info("log2timeline stderr: %s", result.stderr.decode()[:500])
+            subprocess.run(cmd, check=True, capture_output=True, timeout=7200)
         except FileNotFoundError as exc:
-            raise PluginFatalError("log2timeline.py not found in PATH") from exc
+            raise PluginFatalError("log2timeline.py not found") from exc
         except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr.decode()[:500] if exc.stderr else "no output"
-            raise PluginFatalError(f"log2timeline failed (exit {exc.returncode}): {stderr}") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise PluginFatalError("log2timeline timed out after 2 hours") from exc
-
+            raise PluginFatalError(f"log2timeline failed: {exc.stderr.decode()[:500] if exc.stderr else 'no output'}") from exc
+        except subprocess.TimeoutExpired:
+            raise PluginFatalError("log2timeline timed out") from exc
         if not plaso_path.exists() or plaso_path.stat().st_size == 0:
             raise PluginFatalError("log2timeline produced no output")
-
-        new_ctx = PluginContext(
-            case_id=ctx.case_id,
-            job_id=ctx.job_id,
-            source_file_path=plaso_path,
-            source_minio_url=ctx.source_minio_url,
-            logger=ctx.logger,
-        )
-        return cls(new_ctx)
+        return cls(PluginContext(ctx.case_id, ctx.job_id, plaso_path, ctx.source_minio_url, ctx.logger))
