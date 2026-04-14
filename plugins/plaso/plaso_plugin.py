@@ -1,12 +1,10 @@
 """
-Plaso Plugin — parses Plaso storage files (.plaso).
-
-NOTE: Modern Plaso files serialize all event data into BLOBs.
-This plugin extracts timestamps from the event table, but for full
-parsing you MUST install psort or plaso libraries.
+Plaso Plugin — parses Plaso storage files (.plaso) using psort.
 """
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 import subprocess
 import tempfile
@@ -38,7 +36,7 @@ def _format_timestamp(ts_micro: int) -> str:
 class PlasoPlugin(BasePlugin):
 
     PLUGIN_NAME = "plaso"
-    PLUGIN_VERSION = "4.0.0"
+    PLUGIN_VERSION = "5.0.0"
     DEFAULT_ARTIFACT_TYPE = "timeline"
     SUPPORTED_EXTENSIONS = [".plaso"]
     SUPPORTED_MIME_TYPES = ["application/x-sqlite3"]
@@ -49,48 +47,74 @@ class PlasoPlugin(BasePlugin):
         self._records_skipped = 0
 
     def parse(self) -> Generator[dict[str, Any], None, None]:
-        # ALWAYS try psort first - it's REQUIRED for modern plaso files
         if self._psort_available():
-            self.log.info("Using psort for parsing (required for modern plaso files)")
-            yield from self._parse_with_psort()
-        else:
-            # Fallback: extract what we can from SQLite directly
-            self.log.error(
-                "psort.py NOT FOUND! Modern plaso files require psort for full parsing. "
-                "Install plaso-tools or use: apt-get install plaso-tools / pip install plaso"
-            )
-            yield from self._parse_sqlite_fallback()
+            self.log.info("psort found, attempting parsing")
+            try:
+                yield from self._parse_with_psort()
+                return
+            except Exception as exc:
+                self.log.error("psort parsing failed: %s", exc)
+                self.log.info("Falling back to SQLite direct reading")
+        
+        # Fallback to SQLite
+        yield from self._parse_sqlite_direct()
 
     def _psort_available(self) -> bool:
         try:
             result = subprocess.run(["psort.py", "--version"], capture_output=True, timeout=5)
-            return result.returncode == 0
+            if result.returncode == 0:
+                self.log.info("psort version: %s", result.stdout.decode().strip() or result.stderr.decode().strip())
+                return True
+            return False
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
 
     def _parse_with_psort(self) -> Generator[dict[str, Any], None, None]:
-        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=True) as tmp:
-            tmp_path = tmp.name
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_file = Path(tmpdir) / "output.jsonl"
+            
+            # Try with explicit dynamic_output module
+            cmd = [
+                "psort.py",
+                "--output-time-zone", "UTC",
+                "-o", "dynamic_output",
+                "--dynamic_output", "json_line",
+                "-w", str(output_file),
+                str(self.ctx.source_file_path),
+            ]
+            self.log.info("Running: %s", " ".join(cmd))
+            
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    timeout=3600,
+                    env={**os.environ, "PYTHONUNBUFFERED": "1", "LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"}
+                )
+                
+                self.log.info("psort exit code: %d", result.returncode)
+                if result.stdout:
+                    self.log.info("psort stdout: %s", result.stdout.decode()[:1000])
+                if result.stderr:
+                    self.log.warning("psort stderr: %s", result.stderr.decode()[:1000])
+                
+                if result.returncode == 0 and output_file.exists() and output_file.stat().st_size > 0:
+                    self.log.info("Success! Output: %d bytes", output_file.stat().st_size)
+                    yield from self._read_psort_output(output_file)
+                    return
+                elif result.returncode == 0:
+                    self.log.warning("psort succeeded but output file is empty or missing")
+                    raise PluginFatalError("psort produced no output")
+                else:
+                    stderr_msg = result.stderr.decode()[:500] if result.stderr else "no error output"
+                    raise PluginFatalError(f"psort failed (exit {result.returncode}): {stderr_msg}")
+                        
+            except subprocess.TimeoutExpired:
+                self.log.error("psort timed out after 1 hour")
+                raise PluginFatalError("psort timed out")
 
-        cmd = ["psort.py", "--output-time-zone", "UTC", "-o", "json_line", "-w", tmp_path, str(self.ctx.source_file_path)]
-        self.log.info("Running: %s", " ".join(cmd))
-
-        try:
-            result = subprocess.run(cmd, check=True, capture_output=True, timeout=3600)
-            if result.stdout:
-                self.log.info("psort: %s", result.stdout.decode()[:300])
-            if result.stderr:
-                self.log.warning("psort: %s", result.stderr.decode()[:300])
-        except subprocess.CalledProcessError as exc:
-            raise PluginFatalError(f"psort failed: {exc.stderr.decode()[:500] if exc.stderr else 'no output'}") from exc
-        except subprocess.TimeoutExpired:
-            raise PluginFatalError("psort timed out") from exc
-
-        output_file = Path(tmp_path)
-        if not output_file.exists():
-            raise PluginFatalError("psort produced no output")
-
-        self.log.info("Reading psort output: %s (%d bytes)", tmp_path, output_file.stat().st_size)
+    def _read_psort_output(self, output_file: Path) -> Generator[dict[str, Any], None, None]:
+        self.log.info("Reading psort output: %s", output_file)
         
         with output_file.open() as f:
             for i, line in enumerate(f):
@@ -98,21 +122,21 @@ class PlasoPlugin(BasePlugin):
                 if not line:
                     continue
                 try:
-                    data = self._json_loads(line)
+                    data = json.loads(line)
                     event = self._event_to_fo(data)
                     self._records_read += 1
                     yield event
                     if i > 0 and i % 100000 == 0:
                         self.log.info("Processed %d events", i)
+                except json.JSONDecodeError as exc:
+                    self._records_skipped += 1
+                    self.log.debug("JSON decode error line %d: %s", i, exc)
                 except Exception as exc:
                     self._records_skipped += 1
                     self.log.debug("Skipped line %d: %s", i, exc)
-
-        output_file.unlink(missing_ok=True)
-
-    def _json_loads(self, line: str) -> dict:
-        import json
-        return json.loads(line)
+        
+        self.log.info("Finished reading psort output: %d events, %d skipped", 
+                     self._records_read, self._records_skipped)
 
     def _event_to_fo(self, data: dict) -> dict[str, Any]:
         parser = data.get("data_type", "") or data.get("parser", "") or "unknown"
@@ -155,13 +179,10 @@ class PlasoPlugin(BasePlugin):
             "raw": data,
         }
 
-    def _parse_sqlite_fallback(self) -> Generator[dict[str, Any], None, None]:
-        """
-        Fallback when psort is not available.
-        Extracts timestamps from the event table, but data is limited.
-        """
+    def _parse_sqlite_direct(self) -> Generator[dict[str, Any], None, None]:
+        """Extract timestamps from SQLite when psort fails."""
         db_path = str(self.ctx.source_file_path)
-        self.log.info("Opening: %s", db_path)
+        self.log.info("Direct SQLite parse: %s", db_path)
 
         try:
             conn = sqlite3.connect(db_path)
@@ -172,32 +193,17 @@ class PlasoPlugin(BasePlugin):
         try:
             cursor = conn.cursor()
             
-            # Check for event table
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = [row[0] for row in cursor.fetchall()]
             self.log.info("Tables: %s", tables)
             
-            # Use event table if available (has _timestamp column)
             if "event" not in tables:
-                raise PluginFatalError(
-                    "No 'event' table found. This plaso file format is not supported without psort. "
-                    "Install plaso-tools: apt-get install plaso-tools"
-                )
+                raise PluginFatalError("No 'event' table found")
             
-            # Get timestamp from event table
-            self.log.info("Extracting timestamps from 'event' table")
             cursor.execute("SELECT COUNT(*) FROM event")
             count = cursor.fetchone()[0]
             self.log.info("Total events: %d", count)
             
-            # Sample first timestamp
-            cursor.execute("SELECT _timestamp FROM event LIMIT 1")
-            sample = cursor.fetchone()
-            if sample:
-                ts = sample[0]
-                self.log.info("Sample timestamp: %d (%s)", ts, _format_timestamp(ts) if ts else "NULL")
-            
-            # Extract all events with timestamps only
             cursor.execute("SELECT _identifier, _timestamp FROM event ORDER BY _timestamp ASC LIMIT 500000")
             
             while True:
@@ -209,7 +215,6 @@ class PlasoPlugin(BasePlugin):
                     try:
                         event_id = row[0]
                         ts_micro = row[1]
-                        
                         timestamp = _format_timestamp(ts_micro) if ts_micro else ""
                         
                         self._records_read += 1
@@ -218,13 +223,13 @@ class PlasoPlugin(BasePlugin):
                             "artifact_type": "timeline",
                             "timestamp": timestamp if timestamp else None,
                             "timestamp_desc": "Event Time",
-                            "message": f"[Plaso Event #{event_id}] Data requires psort for extraction",
+                            "message": f"[Plaso Event #{event_id}]",
                             "host": {"hostname": ""},
                             "user": {"name": ""},
                             "plaso": {
                                 "parser": "unknown",
                                 "data_type": "unknown",
-                                "note": "Full event data is serialized - install psort.py to extract",
+                                "note": "Full data requires psort",
                                 "event_id": event_id,
                             },
                             "raw": {"_identifier": event_id, "_timestamp": ts_micro},
@@ -235,13 +240,6 @@ class PlasoPlugin(BasePlugin):
                 
                 if self._records_read % 50000 == 0 and self._records_read > 0:
                     self.log.info("Processed %d events...", self._records_read)
-            
-            self.log.warning(
-                "Extracted %d events with TIMESTAMPS ONLY. "
-                "For full event data (messages, filenames, etc.), install psort: "
-                "apt-get install plaso-tools  OR  pip install plaso",
-                self._records_read
-            )
                     
         finally:
             conn.close()
