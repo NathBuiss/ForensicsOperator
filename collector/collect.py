@@ -53,9 +53,11 @@ BANNER = f"""
 ╚══════════════════════════════════════════════════════════╝"""
 
 # Default collection sets — all enabled when nothing is specified
-DEFAULT_WINDOWS = {"evtx", "registry", "prefetch", "lnk", "browser", "tasks", "triage"}
+DEFAULT_WINDOWS = {"evtx", "registry", "prefetch", "lnk", "browser", "tasks", "mft", "triage"}
 DEFAULT_LINUX   = {"logs", "history", "config", "cron", "ssh", "triage", "network", "suricata", "zeek"}
-DEFAULT_MACOS   = {"logs", "history", "config", "launchagents", "browser", "triage", "network"}
+DEFAULT_MACOS   = {"logs", "history", "config", "launchagents", "browser", "plist", "triage", "network"}
+# "pe" and "documents" are opt-in — they can be large and broad in scope.
+# Add explicitly: --collect pe,documents,evtx
 # "memory" is intentionally NOT in the defaults — dumps are multi-GB.
 # Add explicitly with --collect memory or --collect memory,evtx,...
 
@@ -67,6 +69,9 @@ ARTIFACT_LABELS = {
     "lnk":          "LNK / Recent Items",
     "browser":      "Browser Artifacts",
     "tasks":        "Scheduled Tasks",
+    "mft":          "Master File Table ($MFT)",
+    "pe":           "PE / Executable Binaries",
+    "documents":    "Office Documents & PDFs",
     "triage":       "System Triage (live)",
     "logs":         "System Logs",
     "history":      "Shell Histories",
@@ -74,6 +79,7 @@ ARTIFACT_LABELS = {
     "cron":         "Cron Jobs",
     "ssh":          "SSH Artifacts",
     "launchagents": "Launch Agents / Daemons",
+    "plist":        "macOS Preference Plists",
     "network":      "PCAP / Network Captures",
     "suricata":     "Suricata IDS Logs (EVE JSON)",
     "zeek":         "Zeek / Bro Network Logs",
@@ -183,14 +189,17 @@ class Collector:
 class WindowsCollector(Collector):
 
     def collect_all(self) -> None:
-        if self._want("evtx"):     self._evtx()
-        if self._want("registry"): self._registry()
-        if self._want("prefetch"): self._prefetch()
-        if self._want("lnk"):      self._lnk()
-        if self._want("browser"):  self._browser()
-        if self._want("tasks"):    self._scheduled_tasks()
-        if self._want("triage"):   self._system_triage()
-        if self._want("memory"):   self._memory()
+        if self._want("evtx"):      self._evtx()
+        if self._want("registry"):  self._registry()
+        if self._want("prefetch"):  self._prefetch()
+        if self._want("lnk"):       self._lnk()
+        if self._want("browser"):   self._browser()
+        if self._want("tasks"):     self._scheduled_tasks()
+        if self._want("mft"):       self._mft()
+        if self._want("pe"):        self._pe_binaries()
+        if self._want("documents"): self._documents()
+        if self._want("triage"):    self._system_triage()
+        if self._want("memory"):    self._memory()
 
     def _evtx(self) -> None:
         print("  [*] Event Logs (EVTX)")
@@ -341,6 +350,180 @@ class WindowsCollector(Collector):
                 if self._add(p, f"scheduled_tasks/{rel}"):
                     count += 1
 
+    def _mft(self) -> None:
+        """Raw-copy $MFT from all NTFS volumes via Windows kernel API (requires Admin)."""
+        print("  [*] Master File Table ($MFT)")
+        try:
+            import ctypes, ctypes.wintypes, struct
+        except ImportError:
+            self._warn("$MFT: ctypes not available")
+            return
+
+        # Detect lettered NTFS drives
+        bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+        drives = [chr(65 + i) for i in range(26) if bitmask & (1 << i)]
+
+        for drive in drives:
+            dest = self.staging / f"{drive}_MFT"
+            try:
+                h = ctypes.windll.kernel32.CreateFileW(
+                    f"\\\\.\\{drive}:",
+                    0x80000000,           # GENERIC_READ
+                    0x00000001 | 0x00000002,  # FILE_SHARE_READ | FILE_SHARE_WRITE
+                    None, 3, 0, None,     # OPEN_EXISTING, no flags
+                )
+                INVALID = ctypes.c_void_p(-1).value
+                if h == INVALID or h == 0:
+                    self._warn(f"$MFT ({drive}:): cannot open volume — run as Administrator")
+                    continue
+
+                try:
+                    # ── Read NTFS boot sector ────────────────────────────────
+                    buf = ctypes.create_string_buffer(512)
+                    n   = ctypes.wintypes.DWORD(0)
+                    ctypes.windll.kernel32.ReadFile(h, buf, 512, ctypes.byref(n), None)
+                    bs  = buf.raw
+
+                    if bs[3:7] != b'NTFS':
+                        self._log(f"{drive}: not NTFS — skipping")
+                        continue
+
+                    bps      = struct.unpack_from('<H', bs, 11)[0]   # bytes/sector
+                    spc      = struct.unpack_from('<B', bs, 13)[0]   # sectors/cluster
+                    mft_lcn  = struct.unpack_from('<Q', bs, 48)[0]   # MFT first LCN
+                    cls_sz   = bps * spc
+
+                    # MFT record size (boot sector offset 64)
+                    rs_raw   = struct.unpack_from('<b', bs, 64)[0]
+                    mft_rs   = cls_sz * (2 ** rs_raw) if rs_raw >= 0 else 2 ** (-rs_raw)
+                    mft_rs   = max(512, min(int(mft_rs), 65536))
+
+                    # ── Seek to MFT start, read first FILE record ────────────
+                    mft_off  = mft_lcn * cls_sz
+                    ctypes.windll.kernel32.SetFilePointerEx(
+                        h, ctypes.c_longlong(mft_off), None, 0,  # FILE_BEGIN
+                    )
+                    rec0 = ctypes.create_string_buffer(mft_rs)
+                    ctypes.windll.kernel32.ReadFile(h, rec0, mft_rs, ctypes.byref(n), None)
+
+                    if rec0.raw[:4] != b'FILE':
+                        self._warn(f"$MFT ({drive}:): first record has no FILE signature")
+                        continue
+
+                    # ── Parse attributes to find $DATA total size ────────────
+                    attr_p     = struct.unpack_from('<H', rec0.raw, 20)[0]
+                    total_size = 0
+                    while attr_p + 8 < mft_rs:
+                        at = struct.unpack_from('<I', rec0.raw, attr_p)[0]
+                        al = struct.unpack_from('<I', rec0.raw, attr_p + 4)[0]
+                        if at == 0xFFFFFFFF or al == 0:
+                            break
+                        if at == 0x80 and rec0.raw[attr_p + 8]:  # non-resident $DATA
+                            total_size = struct.unpack_from('<Q', rec0.raw, attr_p + 0x30)[0]
+                            break
+                        attr_p += al
+
+                    if total_size == 0 or total_size > 30 * 1024 ** 3:
+                        total_size = 512 * 1024 * 1024  # 512 MB safety cap
+                        self._log(f"$MFT ({drive}:): size unknown, capping at 512 MB")
+
+                    # ── Re-seek and stream out the full MFT ──────────────────
+                    ctypes.windll.kernel32.SetFilePointerEx(
+                        h, ctypes.c_longlong(mft_off), None, 0,
+                    )
+                    CHUNK     = 4 * 1024 * 1024  # 4 MB
+                    remaining = total_size
+                    with open(dest, "wb") as out_f:
+                        while remaining > 0:
+                            to_read   = min(CHUNK, remaining)
+                            cbuf      = ctypes.create_string_buffer(to_read)
+                            ok        = ctypes.windll.kernel32.ReadFile(
+                                h, cbuf, to_read, ctypes.byref(n), None,
+                            )
+                            if not ok or n.value == 0:
+                                break
+                            out_f.write(cbuf.raw[:n.value])
+                            remaining -= n.value
+
+                    self._add(dest, f"mft/{drive}_$MFT")
+                    sz_mb = dest.stat().st_size / 1024 / 1024
+                    print(f"      {drive}:\\$MFT  ({sz_mb:.1f} MB)")
+
+                finally:
+                    ctypes.windll.kernel32.CloseHandle(h)
+
+            except Exception as exc:
+                self._warn(f"$MFT ({drive}:): {exc}")
+
+    def _pe_binaries(self) -> None:
+        """Collect PE executables from high-risk staging locations."""
+        print("  [*] PE / Executable Binaries")
+        users_dir  = Path(os.environ.get("SystemDrive", "C:")) / "Users"
+        system_tmp = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "Temp"
+        PE_EXTS    = {".exe", ".dll", ".scr", ".bat", ".ps1", ".vbs", ".js", ".msi", ".hta"}
+        MAX_FILE   = 200 * 1024 * 1024   # 200 MB
+        MAX_TOTAL  = 2 * 1024 ** 3       # 2 GB total
+        MAX_FILES  = 1000
+
+        dirs: list[Path] = [system_tmp]
+        if users_dir.exists():
+            for ud in sorted(users_dir.iterdir()):
+                if not ud.is_dir():
+                    continue
+                for rel in [
+                    r"AppData\Local\Temp",
+                    r"AppData\Roaming",
+                    r"Downloads",
+                    r"Desktop",
+                    r"AppData\Local\Microsoft\Windows\INetCache",
+                ]:
+                    dirs.append(ud / rel)
+
+        count = 0
+        total = 0
+        for d in dirs:
+            if not d.exists():
+                continue
+            for p in sorted(d.rglob("*")):
+                if count >= MAX_FILES or total >= MAX_TOTAL:
+                    break
+                if not p.is_file() or p.suffix.lower() not in PE_EXTS:
+                    continue
+                sz = p.stat().st_size
+                if sz == 0 or sz > MAX_FILE:
+                    continue
+                rel = p.relative_to(d.parent) if d.parent in p.parents else Path(d.name) / p.name
+                if self._add(p, f"pe/{rel}"):
+                    count += 1
+                    total += sz
+
+    def _documents(self) -> None:
+        """Collect Office documents and PDFs from user directories."""
+        print("  [*] Office Documents & PDFs")
+        users_dir = Path(os.environ.get("SystemDrive", "C:")) / "Users"
+        DOC_EXTS  = {".doc", ".docx", ".docm", ".xls", ".xlsx", ".xlsm",
+                     ".ppt", ".pptx", ".pptm", ".rtf", ".pdf", ".odt", ".ods"}
+        MAX_FILE  = 100 * 1024 * 1024  # 100 MB
+        MAX_FILES = 500
+
+        count = 0
+        for ud in (sorted(users_dir.iterdir()) if users_dir.exists() else []):
+            if not ud.is_dir():
+                continue
+            for rel in ["Documents", "Downloads", "Desktop"]:
+                d = ud / rel
+                if not d.exists():
+                    continue
+                for p in sorted(d.rglob("*")):
+                    if count >= MAX_FILES:
+                        break
+                    if not p.is_file() or p.suffix.lower() not in DOC_EXTS:
+                        continue
+                    if p.stat().st_size == 0 or p.stat().st_size > MAX_FILE:
+                        continue
+                    if self._add(p, f"documents/{ud.name}/{rel}/{p.name}"):
+                        count += 1
+
     def _system_triage(self) -> None:
         print("  [*] System Triage (live commands)")
         lines: list[str] = []
@@ -429,16 +612,18 @@ class WindowsCollector(Collector):
 class LinuxCollector(Collector):
 
     def collect_all(self) -> None:
-        if self._want("logs"):     self._logs()
-        if self._want("history"):  self._shell_history()
-        if self._want("config"):   self._system_config()
-        if self._want("cron"):     self._cron()
-        if self._want("ssh"):      self._ssh_artifacts()
-        if self._want("network"):  self._network_captures()
-        if self._want("suricata"): self._suricata_logs()
-        if self._want("zeek"):     self._zeek_logs()
-        if self._want("triage"):   self._system_triage()
-        if self._want("memory"):   self._memory()
+        if self._want("logs"):      self._logs()
+        if self._want("history"):   self._shell_history()
+        if self._want("config"):    self._system_config()
+        if self._want("cron"):      self._cron()
+        if self._want("ssh"):       self._ssh_artifacts()
+        if self._want("network"):   self._network_captures()
+        if self._want("suricata"):  self._suricata_logs()
+        if self._want("zeek"):      self._zeek_logs()
+        if self._want("pe"):        self._pe_binaries()
+        if self._want("documents"): self._documents()
+        if self._want("triage"):    self._system_triage()
+        if self._want("memory"):    self._memory()
 
     def _logs(self) -> None:
         print("  [*] System Logs")
@@ -596,6 +781,67 @@ class LinuxCollector(Collector):
             if count > 0:
                 break  # Found logs in this dir, no need to check others
 
+    def _pe_binaries(self) -> None:
+        """Collect suspicious ELF/PE binaries dropped in volatile locations."""
+        print("  [*] PE / Executable Binaries")
+        SEARCH_DIRS = [Path("/tmp"), Path("/var/tmp"), Path("/dev/shm"),
+                       Path("/var/www"), Path("/opt"), Path("/root")]
+        ELF_MAGIC   = b'\x7fELF'
+        PE_MAGIC    = b'MZ'
+        MAX_FILE    = 50 * 1024 * 1024   # 50 MB
+        MAX_FILES   = 500
+
+        count = 0
+        for d in SEARCH_DIRS:
+            if not d.exists():
+                continue
+            for p in sorted(d.rglob("*")):
+                if count >= MAX_FILES:
+                    break
+                if not p.is_file():
+                    continue
+                sz = p.stat().st_size
+                if sz < 4 or sz > MAX_FILE:
+                    continue
+                try:
+                    magic = p.read_bytes()[:4]
+                except (PermissionError, OSError):
+                    continue
+                if not (magic[:4] == ELF_MAGIC or magic[:2] == PE_MAGIC):
+                    continue
+                rel = p.relative_to(d.parent) if d.parent in p.parents else Path(d.name) / p.name
+                if self._add(p, f"pe/{rel}"):
+                    count += 1
+
+    def _documents(self) -> None:
+        """Collect Office documents and PDFs from home directories."""
+        print("  [*] Office Documents & PDFs")
+        DOC_EXTS  = {".doc", ".docx", ".docm", ".xls", ".xlsx", ".xlsm",
+                     ".ppt", ".pptx", ".pptm", ".rtf", ".pdf", ".odt", ".ods"}
+        MAX_FILE  = 100 * 1024 * 1024
+        MAX_FILES = 500
+        candidates = [Path("/root")]
+        if Path("/home").exists():
+            candidates += sorted(Path("/home").iterdir())
+
+        count = 0
+        for user_dir in candidates:
+            if not user_dir.is_dir():
+                continue
+            for rel in ["Documents", "Downloads", "Desktop"]:
+                d = user_dir / rel
+                if not d.exists():
+                    continue
+                for p in sorted(d.rglob("*")):
+                    if count >= MAX_FILES:
+                        break
+                    if not p.is_file() or p.suffix.lower() not in DOC_EXTS:
+                        continue
+                    if p.stat().st_size == 0 or p.stat().st_size > MAX_FILE:
+                        continue
+                    if self._add(p, f"documents/{user_dir.name}/{rel}/{p.name}"):
+                        count += 1
+
     def _system_triage(self) -> None:
         print("  [*] System Triage (live commands)")
         lines: list[str] = []
@@ -690,6 +936,10 @@ class MacOSCollector(Collector):
         if self._want("config"):       self._system_config()
         if self._want("launchagents"): self._launch_agents()
         if self._want("browser"):      self._browser()
+        if self._want("plist"):        self._plist_preferences()
+        if self._want("network"):      self._network_captures()
+        if self._want("pe"):           self._pe_binaries()
+        if self._want("documents"):    self._documents()
         if self._want("triage"):       self._system_triage()
         if self._want("memory"):       self._memory()
 
@@ -814,6 +1064,142 @@ class MacOSCollector(Collector):
             # Quarantine database (file download history)
             quarantine = lib / "Preferences" / "com.apple.LaunchServices.QuarantineEventsV2"
             self._add(quarantine, f"browser/{user_dir.name}/quarantine_events.sqlite")
+
+    # ── Plist preferences ─────────────────────────────────────────────────────
+
+    def _plist_preferences(self) -> None:
+        """Collect plist files from system and per-user preference directories."""
+        print("  [*] macOS Preference Plists")
+        PREF_DIRS = [
+            Path("/Library/Preferences"),
+            Path("/Library/Application Support"),
+            Path("/System/Library/Preferences"),
+        ]
+        home = Path.home().parent  # /Users
+        if home.exists():
+            for user_dir in sorted(home.iterdir()):
+                if user_dir.is_dir():
+                    PREF_DIRS.append(user_dir / "Library" / "Preferences")
+                    PREF_DIRS.append(user_dir / "Library" / "Application Support")
+
+        MAX_FILES = 5000
+        count = 0
+        for d in PREF_DIRS:
+            if not d.exists():
+                continue
+            for p in sorted(d.rglob("*.plist"))[:MAX_FILES - count]:
+                if count >= MAX_FILES:
+                    break
+                try:
+                    rel = p.relative_to(d.parent)
+                except ValueError:
+                    rel = Path(d.name) / p.name
+                if self._add(p, f"plist/{rel}"):
+                    count += 1
+
+    # ── Network captures ──────────────────────────────────────────────────────
+
+    def _network_captures(self) -> None:
+        """Collect PCAP/PCAPNG files or run a short live capture via tcpdump."""
+        print("  [*] PCAP / Network Captures")
+        SEARCH_DIRS = [
+            Path("/var/log"), Path("/tmp"), Path.home().parent,
+            Path("/Library/Logs"), Path("/var/capture"),
+        ]
+        MAX_SIZE = 500 * 1024 * 1024  # 500 MB per file
+        count = 0
+        for d in SEARCH_DIRS:
+            if not d.exists():
+                continue
+            for p in sorted(d.rglob("*.pcap")) + sorted(d.rglob("*.pcapng")) + sorted(d.rglob("*.cap")):
+                if count >= 10:
+                    break
+                if p.stat().st_size <= MAX_SIZE:
+                    if self._add(p, f"network/{p.name}"):
+                        count += 1
+            if count >= 10:
+                break
+
+        if count == 0 and shutil.which("tcpdump"):
+            cap_path = self.staging / f"live-{HOSTNAME}-{TS_NOW}.pcap"
+            print("      Live capture: 30 s via tcpdump (requires sudo)")
+            try:
+                subprocess.run(
+                    ["tcpdump", "-i", "any", "-w", str(cap_path), "-G", "30", "-W", "1"],
+                    timeout=35, capture_output=True,
+                )
+                self._add(cap_path, f"network/{cap_path.name}")
+            except Exception as exc:
+                self._log(f"tcpdump: {exc}")
+
+    # ── PE binaries ───────────────────────────────────────────────────────────
+
+    def _pe_binaries(self) -> None:
+        """Collect suspicious binaries from temp/download locations."""
+        print("  [*] PE / Executable Binaries")
+        home = Path.home().parent
+        SEARCH_DIRS = [Path("/tmp"), Path("/var/tmp")]
+        if home.exists():
+            for user_dir in sorted(home.iterdir()):
+                if user_dir.is_dir():
+                    SEARCH_DIRS += [
+                        user_dir / "Downloads",
+                        user_dir / "Desktop",
+                    ]
+
+        ELF_MAGIC = b'\x7fELF'
+        PE_MAGIC  = b'MZ'
+        MAX_FILE  = 50 * 1024 * 1024
+        MAX_FILES = 500
+        count = 0
+        for d in SEARCH_DIRS:
+            if not d.exists():
+                continue
+            for p in sorted(d.rglob("*")):
+                if count >= MAX_FILES:
+                    break
+                if not p.is_file():
+                    continue
+                sz = p.stat().st_size
+                if sz < 4 or sz > MAX_FILE:
+                    continue
+                try:
+                    magic = p.read_bytes()[:4]
+                except (PermissionError, OSError):
+                    continue
+                if not (magic[:4] == ELF_MAGIC or magic[:2] == PE_MAGIC):
+                    continue
+                if self._add(p, f"pe/{d.name}/{p.name}"):
+                    count += 1
+
+    # ── Office documents ──────────────────────────────────────────────────────
+
+    def _documents(self) -> None:
+        """Collect Office documents and PDFs from user directories."""
+        print("  [*] Office Documents & PDFs")
+        DOC_EXTS  = {".doc", ".docx", ".docm", ".xls", ".xlsx", ".xlsm",
+                     ".ppt", ".pptx", ".pptm", ".rtf", ".pdf", ".odt", ".ods",
+                     ".pages", ".numbers", ".key"}
+        MAX_FILE  = 100 * 1024 * 1024
+        MAX_FILES = 500
+        home = Path.home().parent
+        count = 0
+        for user_dir in (sorted(home.iterdir()) if home.exists() else []):
+            if not user_dir.is_dir():
+                continue
+            for rel in ["Documents", "Downloads", "Desktop"]:
+                d = user_dir / rel
+                if not d.exists():
+                    continue
+                for p in sorted(d.rglob("*")):
+                    if count >= MAX_FILES:
+                        break
+                    if not p.is_file() or p.suffix.lower() not in DOC_EXTS:
+                        continue
+                    if p.stat().st_size == 0 or p.stat().st_size > MAX_FILE:
+                        continue
+                    if self._add(p, f"documents/{user_dir.name}/{rel}/{p.name}"):
+                        count += 1
 
     # ── System triage ─────────────────────────────────────────────────────────
 
@@ -976,14 +1362,15 @@ def main() -> None:
     # "memory" is opt-in only (large dumps) so it's never added by default,
     # but is always accepted when the user explicitly names it.
     raw_collect = cfg.get("collect", [])
+    _OPT_IN = {"memory", "pe", "documents"}  # never added by default — must be explicit
     if IS_WINDOWS:
-        allowed = DEFAULT_WINDOWS | {"memory"}
+        allowed = DEFAULT_WINDOWS | _OPT_IN
         collect_set = (set(raw_collect) & allowed) if raw_collect else DEFAULT_WINDOWS
     elif IS_MACOS:
-        allowed = DEFAULT_MACOS | {"memory"}
+        allowed = DEFAULT_MACOS | _OPT_IN
         collect_set = (set(raw_collect) & allowed) if raw_collect else DEFAULT_MACOS
     else:
-        allowed = DEFAULT_LINUX | {"memory"}
+        allowed = DEFAULT_LINUX | _OPT_IN
         collect_set = (set(raw_collect) & allowed) if raw_collect else DEFAULT_LINUX
 
     print(BANNER)

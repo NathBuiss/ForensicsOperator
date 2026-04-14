@@ -324,7 +324,34 @@ def run_module(
                 run_id, case_id, module_id, work_dir, source_files, params, tool_meta
             )
 
-        # ── 3a. For Hayabusa: also index into Elasticsearch so hits appear in Timeline ──
+        # ── 3a. Upload module output artifacts (e.g. de4dot deobfuscated binaries) ────
+        artifact_key_map: dict[str, str] = {}
+        for spec in tool_meta.get("output_uploads", []):
+            fpath = Path(spec.get("path", ""))
+            if not fpath.is_file():
+                continue
+            art_key = f"cases/{case_id}/modules/{run_id}/artifacts/{spec['filename']}"
+            try:
+                _minio_op(lambda k=art_key, p=fpath: minio.fput_object(MINIO_BUCKET, k, str(p)))
+                artifact_key_map[spec["filename"]] = art_key
+                logger.info("[%s] Uploaded artifact: %s", run_id, spec["filename"])
+            except Exception as _art_exc:
+                logger.warning("[%s] Artifact upload failed for %s: %s", run_id, spec["filename"], _art_exc)
+
+        # Patch results with download_key so the frontend can offer download
+        if artifact_key_map:
+            for hit in results:
+                try:
+                    det = json.loads(hit.get("details_raw", "{}"))
+                    deob = det.get("deobfuscated")
+                    if deob and deob in artifact_key_map:
+                        det["download_key"]  = artifact_key_map[deob]
+                        det["download_name"] = deob
+                        hit["details_raw"]   = json.dumps(det)
+                except Exception:
+                    pass
+
+        # ── 3c. For Hayabusa: also index into Elasticsearch so hits appear in Timeline ──
         if module_id == "hayabusa" and results:
             ingested_at = datetime.now(timezone.utc).isoformat()
             try:
@@ -3565,6 +3592,10 @@ def _run_de4dot(
 
             if success:
                 tool_meta["stdout"] += f"  → Deobfuscated output: {out_path.name}\n"
+                # Queue for upload by the main task (work_dir still exists there)
+                tool_meta.setdefault("output_uploads", []).append(
+                    {"path": str(out_path), "filename": out_path.name}
+                )
             else:
                 tool_meta["stderr"] += f"  Deobfuscation may have failed (exit {proc.returncode})\n"
 

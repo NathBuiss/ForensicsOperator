@@ -17,25 +17,33 @@ import { api } from '../api/client'
 // ── Artifact definitions ──────────────────────────────────────────────────────
 
 const WINDOWS_ARTIFACTS = [
-  { key: 'evtx',     label: 'Event Logs (EVTX)',          desc: 'Security, System, Application, PowerShell, Sysmon and more' },
-  { key: 'registry', label: 'Registry Hives',              desc: 'SYSTEM, SOFTWARE, SAM, SECURITY, NTUSER.DAT, UsrClass.dat' },
-  { key: 'prefetch', label: 'Prefetch Files',               desc: 'Program execution evidence (up to 500 .pf files)' },
-  { key: 'lnk',      label: 'LNK / Recent Items',          desc: 'Shell link files from all user Recent folders' },
-  { key: 'browser',  label: 'Browser Artifacts',           desc: 'Chrome, Edge, Firefox — history, cookies, login data' },
-  { key: 'tasks',    label: 'Scheduled Tasks',             desc: 'Windows Task Scheduler XML from System32\\Tasks' },
-  { key: 'triage',   label: 'Live System Triage',          desc: 'systeminfo, netstat, tasklist, services, installed software' },
-  { key: 'memory',   label: 'Memory Dump',                 desc: 'Physical memory acquisition via WinPmem — 4–64 GB, requires winpmem_mini_x64_rc2.exe beside the script', warn: true },
+  { key: 'evtx',      label: 'Event Logs (EVTX)',          desc: 'Security, System, Application, PowerShell, Sysmon and more' },
+  { key: 'registry',  label: 'Registry Hives',              desc: 'SYSTEM, SOFTWARE, SAM, SECURITY, NTUSER.DAT, UsrClass.dat' },
+  { key: 'prefetch',  label: 'Prefetch Files',               desc: 'Program execution evidence (up to 500 .pf files)' },
+  { key: 'lnk',       label: 'LNK / Recent Items',          desc: 'Shell link files from all user Recent folders' },
+  { key: 'browser',   label: 'Browser Artifacts',           desc: 'Chrome, Edge, Firefox, Brave — history, cookies, login data' },
+  { key: 'tasks',     label: 'Scheduled Tasks',             desc: 'Windows Task Scheduler XML from System32\\Tasks' },
+  { key: 'mft',       label: 'Master File Table ($MFT)',    desc: 'Raw NTFS MFT from all NTFS volumes — requires Administrator (feeds MFT ingester)' },
+  { key: 'pe',        label: 'PE / Executable Binaries',    desc: 'EXE/DLL/PS1 from Temp, Downloads, AppData — feeds PE Analysis, YARA, de4dot, strings', warn: true },
+  { key: 'documents', label: 'Office Documents & PDFs',     desc: 'DOCX, XLSX, PPTX, PDF from user Documents/Downloads/Desktop — feeds OLE analysis', warn: true },
+  { key: 'triage',    label: 'Live System Triage',          desc: 'systeminfo, netstat, tasklist, services, installed software' },
+  { key: 'memory',    label: 'Memory Dump',                 desc: 'Physical memory acquisition via WinPmem — 4–64 GB, requires winpmem_mini_x64_rc2.exe beside the script', warn: true },
 ]
 
 const LINUX_ARTIFACTS = [
-  { key: 'logs',    label: 'System Logs',                   desc: '/var/log — auth.log, syslog, audit, journalctl export' },
-  { key: 'history', label: 'Shell Histories',               desc: '.bash_history, .zsh_history for root and all users' },
-  { key: 'config',  label: 'System Configuration',          desc: '/etc/passwd, sudoers, hosts, ssh/sshd_config and more' },
-  { key: 'cron',    label: 'Cron Jobs',                     desc: 'cron.d, cron.daily, crontabs, systemd timers' },
-  { key: 'ssh',     label: 'SSH Artifacts',                 desc: 'known_hosts, authorized_keys, config (no private keys)' },
-  { key: 'network', label: 'Network Captures',              desc: 'PCAP/tcpdump snapshots (5 min, 500 MB cap)' },
-  { key: 'triage',  label: 'Live System Triage',            desc: 'ps, ss, ip, last, lsmod, services, installed packages' },
-  { key: 'memory',  label: 'Memory Dump',                   desc: 'Physical memory via avml or /dev/fmem — 4–64 GB, requires root + avml in PATH', warn: true },
+  { key: 'logs',      label: 'System Logs',                  desc: '/var/log — auth.log, syslog, audit, journalctl export (feeds syslog + access log ingesters)' },
+  { key: 'history',   label: 'Shell Histories',              desc: '.bash_history, .zsh_history for root and all users' },
+  { key: 'config',    label: 'System Configuration',         desc: '/etc/passwd, sudoers, hosts, ssh/sshd_config, plist preferences (macOS)' },
+  { key: 'cron',      label: 'Cron Jobs',                    desc: 'cron.d, cron.daily, crontabs, systemd timers' },
+  { key: 'ssh',       label: 'SSH Artifacts',                desc: 'known_hosts, authorized_keys, config (no private keys)' },
+  { key: 'network',   label: 'Network Captures',             desc: 'PCAP/PCAPNG from /var/log, /tmp — live tcpdump if none found' },
+  { key: 'suricata',  label: 'Suricata IDS Logs',           desc: 'EVE JSON alerts from /var/log/suricata (feeds suricata ingester)' },
+  { key: 'zeek',      label: 'Zeek Network Logs',           desc: 'conn.log, dns.log, http.log, ssl.log and more (feeds zeek ingester)' },
+  { key: 'plist',     label: 'macOS Preference Plists',      desc: '/Library/Preferences, ~/Library/Preferences — feeds plist ingester (macOS only)' },
+  { key: 'pe',        label: 'PE / ELF Binaries',           desc: 'Suspicious binaries from /tmp, /var/tmp, ~/Downloads — feeds PE Analysis, YARA, strings', warn: true },
+  { key: 'documents', label: 'Office Documents & PDFs',      desc: 'DOCX, XLSX, PPTX, PDF from home directories — feeds OLE analysis, ExifTool', warn: true },
+  { key: 'triage',    label: 'Live System Triage',           desc: 'ps, ss, ip, last, lsmod, services, installed packages' },
+  { key: 'memory',    label: 'Memory Dump',                  desc: 'Physical memory via avml or /dev/fmem — 4–64 GB, requires root + avml in PATH', warn: true },
 ]
 
 // Domain Controller adds AD-specific artifacts on top of Windows

@@ -2,7 +2,7 @@ import { useEffect, useState, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Cpu, CheckCircle, XCircle, ChevronDown,
-  Code2, AlertCircle, Search as SearchIcon, X,
+  Code2, AlertCircle, Search as SearchIcon, X, BookOpen,
   Shield, Monitor, HardDrive, Globe, Brain,
   Binary, Bug, Network, FileImage, TextSearch, Tag,
 } from 'lucide-react'

@@ -479,3 +479,55 @@ def clear_malwoverview_config():
     get_redis().delete(_MALWOVERVIEW_CONFIG_KEY)
     env_key = os.getenv("VT_API_KEY", "")
     return {"cleared": True, "env_fallback": bool(env_key)}
+
+
+# ── Module artifact download & re-ingest ─────────────────────────────────────
+
+from fastapi.responses import RedirectResponse  # noqa: E402
+
+@router.get("/cases/{case_id}/modules/{run_id}/artifacts/{filename}")
+def download_module_artifact(case_id: str, run_id: str, filename: str):
+    """
+    Return a short-lived presigned download URL for a module output artifact
+    (e.g. a de4dot-deobfuscated .NET binary).
+    The client is redirected directly to MinIO so no large binary passes through
+    the API server.
+    """
+    key = f"cases/{case_id}/modules/{run_id}/artifacts/{filename}"
+    try:
+        url = storage.get_presigned_url(key, expires_seconds=3600)
+        return RedirectResponse(url, status_code=302)
+    except Exception as exc:
+        logger.warning("Artifact download failed (%s): %s", key, exc)
+        raise HTTPException(status_code=404, detail="Artifact not found or expired")
+
+
+@router.post("/cases/{case_id}/modules/{run_id}/artifacts/{filename}/reingest")
+def reingest_module_artifact(case_id: str, run_id: str, filename: str):
+    """
+    Re-ingest a module output artifact (e.g. a de4dot-deobfuscated binary) back
+    into the case timeline as a new ingest job.
+
+    The artifact already lives in MinIO so we skip the upload stage entirely —
+    just create a job record pointing at the existing key and dispatch Celery.
+    """
+    from services import jobs as job_svc
+    from services.celery_dispatch import dispatch_ingest
+
+    case = get_case(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    minio_key = f"cases/{case_id}/modules/{run_id}/artifacts/{filename}"
+    job_id    = uuid.uuid4().hex
+
+    job_svc.create_job(job_id, case_id, filename, "")
+    job_svc.update_job(job_id, minio_object_key=minio_key, status="PENDING")
+
+    try:
+        dispatch_ingest(job_id, case_id, minio_key, filename)
+    except Exception as exc:
+        job_svc.update_job(job_id, status="FAILED", error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Failed to dispatch ingest: {exc}")
+
+    return {"job_id": job_id, "filename": filename, "status": "PENDING"}

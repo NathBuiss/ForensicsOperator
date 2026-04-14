@@ -200,6 +200,57 @@ function AlertMatchCard({ match, caseId, navigate }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ReIngestButton — re-submits a module output artifact as a new ingest job
+// ─────────────────────────────────────────────────────────────────────────────
+function ReIngestButton({ caseId, runId, filename }) {
+  const [state, setState] = useState('idle')  // 'idle' | 'loading' | 'done' | 'error'
+  const [jobId, setJobId] = useState(null)
+
+  async function handleReIngest(e) {
+    e.stopPropagation()
+    if (state !== 'idle') return
+    setState('loading')
+    try {
+      const res = await api.modules.reingestArtifact(caseId, runId, filename)
+      setJobId(res.job_id)
+      setState('done')
+    } catch {
+      setState('error')
+      setTimeout(() => setState('idle'), 3000)
+    }
+  }
+
+  if (state === 'done') {
+    return (
+      <span className="flex items-center gap-1 text-[10px] text-green-600 bg-green-50 rounded px-1.5 py-1">
+        <CheckCircle size={9} />
+        Ingesting
+      </span>
+    )
+  }
+
+  return (
+    <button
+      onClick={handleReIngest}
+      disabled={state === 'loading'}
+      className={`flex items-center gap-1 text-[10px] rounded px-1.5 py-1 transition-all ${
+        state === 'error'
+          ? 'text-red-500 bg-red-50'
+          : 'text-gray-400 hover:text-violet-600 hover:bg-violet-50'
+      }`}
+      title={`Re-ingest ${filename} into timeline`}
+    >
+      {state === 'loading'
+        ? <><Loader2 size={9} className="animate-spin" /> Re-ingesting…</>
+        : state === 'error'
+          ? <><AlertCircle size={9} /> Failed</>
+          : <><Plus size={9} /> Re-ingest</>
+      }
+    </button>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // LevelGroup — one severity accordion inside ModuleRunCard
 // ─────────────────────────────────────────────────────────────────────────────
 const LEVEL_HEADER_BG = {
@@ -210,7 +261,7 @@ const LEVEL_HEADER_BG = {
   informational: 'bg-gray-50',
 }
 
-function LevelGroup({ level, hits, totalInLevel, defaultOpen, caseId, navigate, buildQuery }) {
+function LevelGroup({ level, hits, totalInLevel, defaultOpen, caseId, runId, navigate, buildQuery }) {
   const [open, setOpen]       = useState(defaultOpen)
   const [expandedHit, setExpandedHit] = useState(null)
   const headerBg = LEVEL_HEADER_BG[level] || 'bg-gray-50'
@@ -275,19 +326,51 @@ function LevelGroup({ level, hits, totalInLevel, defaultOpen, caseId, navigate, 
                       </p>
                     )}
                   </div>
-                  {/* Search pivot */}
-                  <button
-                    onClick={() =>
-                      navigate(`/cases/${caseId}/search`, {
-                        state: { pivotQuery: buildQuery(hit) },
-                      })
-                    }
-                    className="flex-shrink-0 opacity-0 group-hover:opacity-100 flex items-center gap-1 text-[10px] text-gray-400 hover:text-brand-accent hover:bg-brand-accentlight rounded px-1.5 py-1 transition-all"
-                    title="Find matching events in Search"
-                  >
-                    <ExternalLink size={9} />
-                    Search
-                  </button>
+                  {/* Action buttons — appear on row hover */}
+                  <div className="flex-shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all">
+                    {/* Search pivot */}
+                    <button
+                      onClick={() =>
+                        navigate(`/cases/${caseId}/search`, {
+                          state: { pivotQuery: buildQuery(hit) },
+                        })
+                      }
+                      className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-brand-accent hover:bg-brand-accentlight rounded px-1.5 py-1 transition-all"
+                      title="Find matching events in Search"
+                    >
+                      <ExternalLink size={9} />
+                      Search
+                    </button>
+                    {/* Download + Re-ingest buttons for module output artifacts (e.g. de4dot) */}
+                    {(() => {
+                      try {
+                        const det = JSON.parse(hit.details_raw || '{}')
+                        if (det.download_key && det.download_name && runId) {
+                          const dlUrl = `/api/v1/cases/${caseId}/modules/${runId}/artifacts/${encodeURIComponent(det.download_name)}`
+                          return (
+                            <>
+                              <a
+                                href={dlUrl}
+                                download={det.download_name}
+                                className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded px-1.5 py-1 transition-all"
+                                title={`Download: ${det.download_name}`}
+                                onClick={e => e.stopPropagation()}
+                              >
+                                <Download size={9} />
+                                Download
+                              </a>
+                              <ReIngestButton
+                                caseId={caseId}
+                                runId={runId}
+                                filename={det.download_name}
+                              />
+                            </>
+                          )
+                        }
+                      } catch { /* ignore JSON parse errors */ }
+                      return null
+                    })()}
+                  </div>
                 </div>
               </div>
             )
@@ -321,8 +404,37 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
   const [yaraValid, setYaraValid]                   = useState(null)  // null | {valid, error}
   const [yaraLibraryRules, setYaraLibraryRules]     = useState([])
   const [selectedYaraIds, setSelectedYaraIds]       = useState(new Set())
-  const [grepPatterns, setGrepPatterns]             = useState('')
   const yaraDebounce                                = useRef(null)
+
+  // Grep-specific state
+  const [grepPatterns, setGrepPatterns]   = useState('')
+  const [grepPresets, setGrepPresets]     = useState(() => {
+    try { return JSON.parse(localStorage.getItem('fo_grep_presets') || '[]') }
+    catch { return [] }
+  })
+  const [grepPresetName, setGrepPresetName] = useState('')
+  const [showPresetInput, setShowPresetInput] = useState(false)
+
+  function saveGrepPreset() {
+    const name = grepPresetName.trim()
+    if (!name || !grepPatterns.trim()) return
+    const preset = { id: Date.now().toString(), name, patterns: grepPatterns.trim() }
+    const updated = [...grepPresets, preset]
+    setGrepPresets(updated)
+    localStorage.setItem('fo_grep_presets', JSON.stringify(updated))
+    setGrepPresetName('')
+    setShowPresetInput(false)
+  }
+
+  function deleteGrepPreset(id) {
+    const updated = grepPresets.filter(p => p.id !== id)
+    setGrepPresets(updated)
+    localStorage.setItem('fo_grep_presets', JSON.stringify(updated))
+  }
+
+  function loadGrepPreset(preset) {
+    setGrepPatterns(preset.patterns)
+  }
 
   useEffect(() => {
     Promise.all([api.modules.list(), api.modules.listSources(caseId)])
@@ -422,6 +534,8 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
     setYaraRules('')
     setYaraValid(null)
     setGrepPatterns('')
+    setShowPresetInput(false)
+    setGrepPresetName('')
   }
 
   async function handleRun() {
@@ -453,8 +567,8 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
   async function handleRunAll() {
     if (runningAll || sources.length === 0) return
     const eligible = modules.filter(m => {
-      // Skip modules that need custom config (YARA custom rules, grep patterns)
-      // but allow them if they have library/default behaviour
+      // Skip modules that require external service credentials (API keys, sandbox URLs)
+      if (m.config_keys?.length > 0) return false
       const extList  = m.input_extensions || []
       const nameList = m.input_filenames  || []
       const acceptsAll = extList.length === 0 && nameList.length === 0
@@ -713,18 +827,76 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
 
                   {/* ── Grep search patterns ─────────────────────────────── */}
                   {selectedModule.id === 'grep_search' && (
-                    <div className="flex-1 flex flex-col px-4 pb-4 min-h-0">
-                      <p className="section-title text-[11px] uppercase tracking-wider text-gray-400 mb-2 flex-shrink-0">
-                        Search Patterns
-                        <span className="ml-1.5 font-normal normal-case text-gray-400">(one regex per line — leave empty for built-in IOC patterns)</span>
-                      </p>
-                      <textarea
-                        value={grepPatterns}
-                        onChange={e => setGrepPatterns(e.target.value)}
-                        placeholder={"192\\.168\\.\\d+\\.\\d+\ncmd\\.exe\nbase64\\.b64decode"}
-                        spellCheck={false}
-                        className="flex-1 w-full min-h-0 px-3 py-2.5 text-[11px] font-mono border border-gray-200 bg-gray-950 text-green-300 rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-brand-accent/30 focus:border-brand-accent leading-relaxed"
-                      />
+                    <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+
+                      {/* Saved presets */}
+                      {grepPresets.length > 0 && (
+                        <div className="px-4 pt-2 pb-2 flex-shrink-0 border-b border-gray-100">
+                          <p className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">
+                            Saved Presets
+                          </p>
+                          <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                            {grepPresets.map(preset => (
+                              <div key={preset.id} className="flex items-center gap-1 bg-gray-100 hover:bg-brand-accentlight border border-gray-200 hover:border-brand-accent/30 rounded-lg px-2 py-1 group transition-colors">
+                                <button
+                                  onClick={() => loadGrepPreset(preset)}
+                                  className="text-[11px] text-gray-700 group-hover:text-brand-text font-medium"
+                                  title={`Load: ${preset.patterns.split('\n').slice(0,3).join(', ')}`}
+                                >
+                                  {preset.name}
+                                </button>
+                                <button
+                                  onClick={() => deleteGrepPreset(preset.id)}
+                                  className="text-gray-300 hover:text-red-500 transition-colors ml-0.5"
+                                  title="Delete preset"
+                                >
+                                  <X size={9} />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Pattern editor */}
+                      <div className="flex-1 flex flex-col px-4 pt-2 pb-3 min-h-0">
+                        <div className="flex items-center gap-2 mb-1.5 flex-shrink-0">
+                          <p className="text-[10px] uppercase tracking-wider text-gray-400 font-medium flex-1">
+                            Patterns
+                            <span className="normal-case font-normal text-gray-400 ml-1">(one regex per line)</span>
+                          </p>
+                          {!showPresetInput ? (
+                            <button
+                              onClick={() => setShowPresetInput(true)}
+                              disabled={!grepPatterns.trim()}
+                              className="text-[10px] text-gray-400 hover:text-brand-accent disabled:opacity-40 transition-colors"
+                              title="Save current patterns as a preset"
+                            >
+                              + Save preset
+                            </button>
+                          ) : (
+                            <div className="flex items-center gap-1">
+                              <input
+                                autoFocus
+                                value={grepPresetName}
+                                onChange={e => setGrepPresetName(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter') saveGrepPreset(); if (e.key === 'Escape') setShowPresetInput(false) }}
+                                placeholder="Preset name…"
+                                className="text-[10px] border border-gray-200 rounded px-1.5 py-0.5 w-24 focus:outline-none focus:border-brand-accent"
+                              />
+                              <button onClick={saveGrepPreset} className="text-[10px] text-green-600 hover:text-green-700 font-medium">Save</button>
+                              <button onClick={() => setShowPresetInput(false)} className="text-[10px] text-gray-400 hover:text-gray-600">✕</button>
+                            </div>
+                          )}
+                        </div>
+                        <textarea
+                          value={grepPatterns}
+                          onChange={e => setGrepPatterns(e.target.value)}
+                          placeholder={"Leave empty to run built-in IOC patterns:\n  URLs, IPs, MD5/SHA hashes,\n  powershell, cmd.exe, certutil…\n\nOr enter your own (one per line):\n  192\\.168\\.\\d+\\.\\d+\n  base64\\.b64decode\n  C:\\\\Windows\\\\Temp"}
+                          spellCheck={false}
+                          className="flex-1 w-full min-h-0 px-3 py-2.5 text-[11px] font-mono border border-gray-200 bg-gray-950 text-green-300 rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-brand-accent/30 focus:border-brand-accent leading-relaxed"
+                        />
+                      </div>
                     </div>
                   )}
 
@@ -1039,16 +1211,27 @@ function ModuleRunCard({
   // Auto-open completed cards that have detections matching the active filter
   const [open, setOpen] = useState(hasFilteredHits && run.status === 'COMPLETED')
 
-  // Build smart Lucene pivot query for a hit
+  // Build smart Lucene pivot query for a hit.
+  // EVTX modules (hayabusa, wintriage) → event_id + hostname
+  // Event-query modules (browser_report, access_log) → artifact_type
+  // File-scan modules (yara, grep, de4dot, pe_analysis…) → rule_title message search
+  // computer = hostname ONLY when event_id is also present (EVTX hits)
+  const MODULE_ARTIFACT_TYPES = {
+    browser_report:      'browser',
+    access_log_analysis: 'access_log',
+    hindsight:           'browser',
+    cti_match:           null,
+  }
   function buildQuery(hit) {
-    const parts = []
-    if (hit.event_id) parts.push(`evtx.event_id:${hit.event_id}`)
-    if (hit.computer) parts.push(`host.hostname:"${hit.computer}"`)
-    if (parts.length === 0) {
-      const title = (hit.rule_title || '').replace(/"/g, '')
-      return title ? `message:"${title}"` : '*'
+    if (hit.event_id) {
+      const parts = [`evtx.event_id:${hit.event_id}`]
+      if (hit.computer) parts.push(`host.hostname:"${hit.computer}"`)
+      return parts.join(' AND ')
     }
-    return parts.join(' AND ')
+    const artType = MODULE_ARTIFACT_TYPES[run.module_id]
+    if (artType) return `artifact_type:${artType}`
+    const title = (hit.rule_title || '').replace(/"/g, '')
+    return title ? `message:"${title}"` : '*'
   }
 
   return (
@@ -1147,6 +1330,7 @@ function ModuleRunCard({
               totalInLevel={byLevel[lvl] || 0}
               defaultOpen={lvl === 'critical' || lvl === 'high'}
               caseId={caseId}
+              runId={run.run_id}
               navigate={navigate}
               buildQuery={buildQuery}
             />
