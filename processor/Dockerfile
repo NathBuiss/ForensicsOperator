@@ -61,16 +61,14 @@ RUN wget -q -O /tmp/de4dot.zip \
 
 # ── Plaso (log2timeline/psort) — required for .plaso file parsing ────────────
 # Install plaso 20260119 from GitHub release
+# First install build dependencies for lib* Python wrappers
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip pkg-config \
-    libewf-dev libvhdi-dev libvmdk-dev libvslvm-dev libbde-dev \
-    libqcow-dev libmsiecf-dev libolecf-dev libregf-dev liblnk-dev \
-    libfwsi-dev libfwnt-dev libluksde-dev libvshadow-dev libsigscan-dev \
-    libfsntfs-dev libfsapfs-dev libfsext-dev libfshfs-dev libexif-dev \
-    libfsfat-dev \
+    python3 python3-pip python3-dev pkg-config \
+    autoconf automake libtool libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --no-cache-dir --upgrade pip setuptools \
+# Install plaso with all dependencies from the pre-built wheel
+RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel \
     && pip3 install --no-cache-dir "https://github.com/log2timeline/plaso/releases/download/20260119/plaso-20260119.tar.gz" \
     && log2timeline.py --version \
     && psort.py --version
