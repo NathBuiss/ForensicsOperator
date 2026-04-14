@@ -19,7 +19,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     libimage-exiftool-perl \
     libtsk-dev \
-    libewf-dev \
     testdisk \
     mono-runtime \
     && rm -rf /var/lib/apt/lists/*
@@ -60,18 +59,14 @@ RUN wget -q -O /tmp/de4dot.zip \
     && rm -rf /tmp/de4dot.zip /tmp/de4dot_extracted
 
 # ── Plaso (log2timeline/psort) — required for .plaso file parsing ────────────
-# Install plaso 20260119 from GitHub release
-# First install build dependencies for lib* Python wrappers
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-dev pkg-config \
-    autoconf automake libtool libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install plaso with all dependencies from the pre-built wheel
-RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel \
-    && pip3 install --no-cache-dir "https://github.com/log2timeline/plaso/releases/download/20260119/plaso-20260119.tar.gz" \
-    && log2timeline.py --version \
-    && psort.py --version
+# Try recent versions in order until one installs successfully
+RUN pip3 install --no-cache-dir plaso || \
+    pip3 install --no-cache-dir plaso==20250106 || \
+    pip3 install --no-cache-dir plaso==20241209 || \
+    pip3 install --no-cache-dir plaso==20240401 || \
+    pip3 install --no-cache-dir plaso==20240308 || \
+    pip3 install --no-cache-dir plaso==20230506 || \
+    pip3 install --no-cache-dir plaso==20221128
 
 # ── Python deps (includes pyhindsight for the Hindsight module) ───────────────
 # Upgrade build tools first so pyproject.toml-based packages build on Ubuntu 22.04's old pip.
