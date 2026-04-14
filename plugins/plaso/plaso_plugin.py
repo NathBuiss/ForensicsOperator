@@ -186,47 +186,74 @@ class PlasoPlugin(BasePlugin):
 
     def _read_new_schema(self, conn: sqlite3.Connection) -> Generator[dict[str, Any], None, None]:
         cursor = conn.cursor()
-        try:
-            rows = cursor.execute(
-                "SELECT timestamp, timestamp_desc, parser, message, hostname, "
-                "username, data_type, _identifier FROM event_data "
-                "ORDER BY timestamp ASC"
-            )
-        except sqlite3.OperationalError:
-            rows = cursor.execute("SELECT * FROM event_data LIMIT 100000")
+        # Get actual column names from the table
+        cursor.execute("PRAGMA table_info(event_data)")
+        columns = [row[1] for row in cursor.fetchall()]
+        self.log.info("event_data columns: %s", columns)
+        
+        # Build SELECT based on available columns
+        select_cols = []
+        for col in ["timestamp", "timestamp_desc", "parser", "message", "hostname", 
+                    "username", "data_type", "_identifier", "display_name", "filename"]:
+            if col in columns:
+                select_cols.append(col)
+        
+        if not select_cols:
+            select_cols = ["*"]
+        
+        query = f"SELECT {', '.join(select_cols)} FROM event_data ORDER BY timestamp ASC LIMIT 500000"
+        self.log.info("Executing: %s", query)
+        rows = cursor.execute(query)
 
         for row in rows:
             try:
                 d = dict(row)
-                parser = d.get("parser", "")
+                parser = d.get("parser", "") or ""
                 artifact_type = self._resolve_artifact_type(parser)
                 # Plaso timestamps are in microseconds since epoch
-                ts_micro = d.get("timestamp", 0)
+                ts_micro = d.get("timestamp", 0) or 0
+                timestamp = ""
                 if ts_micro:
-                    from datetime import datetime, timezone
-                    dt = datetime.fromtimestamp(ts_micro / 1_000_000, tz=timezone.utc)
-                    timestamp = dt.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
-                else:
-                    timestamp = ""
+                    try:
+                        from datetime import datetime, timezone
+                        dt = datetime.fromtimestamp(ts_micro / 1_000_000, tz=timezone.utc)
+                        timestamp = dt.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+                    except (OSError, OverflowError, ValueError) as ts_exc:
+                        self.log.debug("Invalid timestamp %s: %s", ts_micro, ts_exc)
+                        timestamp = ""
+
+                # Build message from available fields
+                message = d.get("message", "") or ""
+                if not message:
+                    display_name = d.get("display_name", "") or ""
+                    filename = d.get("filename", "") or ""
+                    if display_name:
+                        message = display_name
+                    elif filename:
+                        message = f"File: {filename}"
+                    else:
+                        message = f"[{parser}] Event"
 
                 self._records_read += 1
                 yield {
                     "fo_id": str(uuid.uuid4()),
                     "artifact_type": artifact_type,
                     "timestamp": timestamp,
-                    "timestamp_desc": d.get("timestamp_desc", "Event Time"),
-                    "message": d.get("message", ""),
-                    "host": {"hostname": d.get("hostname", "")},
-                    "user": {"name": d.get("username", "")},
+                    "timestamp_desc": d.get("timestamp_desc", "") or "Event Time",
+                    "message": message,
+                    "host": {"hostname": d.get("hostname", "") or ""},
+                    "user": {"name": d.get("username", "") or ""},
                     "plaso": {
                         "parser": parser,
-                        "data_type": d.get("data_type", ""),
+                        "data_type": d.get("data_type", "") or "",
+                        "display_name": d.get("display_name", "") or "",
+                        "filename": d.get("filename", "") or "",
                     },
                     "raw": _sanitize_for_json(d),
                 }
             except Exception as exc:
                 self._records_skipped += 1
-                self.log.debug("Skipped row: %s", exc)
+                self.log.error("Skipped row: %s", exc)
 
     def _read_legacy_schema(self, conn: sqlite3.Connection) -> Generator[dict[str, Any], None, None]:
         """Fallback for older plaso schemas."""
