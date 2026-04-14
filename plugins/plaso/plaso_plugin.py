@@ -32,6 +32,19 @@ PLASO_PARSER_TO_ARTIFACT = {
 }
 
 
+def _sanitize_for_json(obj: Any) -> Any:
+    """Recursively convert an object to be JSON-serializable."""
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", errors="replace")
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(v) for v in obj]
+    if isinstance(obj, (int, float, str, type(None), bool)):
+        return obj
+    return str(obj)
+
+
 class PlasoPlugin(BasePlugin):
 
     PLUGIN_NAME = "plaso"
@@ -134,7 +147,7 @@ class PlasoPlugin(BasePlugin):
                 "filename": data.get("filename", ""),
                 "display_name": data.get("display_name", ""),
             },
-            "raw": data,
+            "raw": _sanitize_for_json(data),
         }
 
     def _parse_sqlite_direct(self) -> Generator[dict[str, Any], None, None]:
@@ -209,7 +222,7 @@ class PlasoPlugin(BasePlugin):
                         "parser": parser,
                         "data_type": d.get("data_type", ""),
                     },
-                    "raw": d,
+                    "raw": _sanitize_for_json(d),
                 }
             except Exception as exc:
                 self._records_skipped += 1
@@ -228,8 +241,8 @@ class PlasoPlugin(BasePlugin):
                     "timestamp": None,
                     "timestamp_desc": "Unknown",
                     "message": str(d),
-                    "plaso": d,
-                    "raw": d,
+                    "plaso": _sanitize_for_json(d),
+                    "raw": _sanitize_for_json(d),
                 }
         except sqlite3.OperationalError as exc:
             raise PluginFatalError(f"Cannot query legacy events table: {exc}") from exc
