@@ -60,21 +60,51 @@ RUN wget -q -O /tmp/de4dot.zip \
     && rm -rf /tmp/de4dot.zip /tmp/de4dot_extracted
 
 # ── Plaso (log2timeline/psort) — required for .plaso file parsing ────────────
-# Install from GIFT PPA (stable release with plaso-tools)
+# Install latest plaso release (20260119) from PyPI
+# See: https://github.com/log2timeline/plaso/releases/tag/20260119
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gnupg gnupg-agent software-properties-common curl \
-    && export GNUPGHOME="$(mktemp -d)" \
-    && gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys 3ED1EAECE81894B171D7DA5B5E80511B10C598B8 \
-    && gpg --batch --export > /etc/apt/trusted.gpg.d/gift.gpg \
-    && rm -rf "$GNUPGHOME" \
-    && add-apt-repository -y ppa:gift/stable \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-        plaso-tools \
-        libewf-dev \
-        libvhdi-dev \
-        libvmdk-dev \
-    && rm -rf /var/lib/apt/lists/* \
+    # Build dependencies
+    build-essential \
+    python3-dev \
+    pkg-config \
+    # Plaso dependencies
+    libewf-dev \
+    libvhdi-dev \
+    libvmdk-dev \
+    libvslvm-dev \
+    libbde-dev \
+    libqcow-dev \
+    libmsiecf-dev \
+    libolecf-dev \
+    libregf-dev \
+    liblnk-dev \
+    libpfsm-dev \
+    libevt-20200916-dev \
+    libevtx-20200916-dev \
+    libfwsi-dev \
+    libfwnt-dev \
+    libcaes-dev \
+    libfveb-dev \
+    libluksde-dev \
+    libvshadow-dev \
+    libsigscan-dev \
+    libsmdev \
+    libsmraw-dev \
+    libhmac-dev \
+    libfcache-dev \
+    libfdata-dev \
+    libfdatetime-dev \
+    libfsntfs-dev \
+    libfsapfs-dev \
+    libfsext-dev \
+    libfshfs-dev \
+    libfat-20201226-dev \
+    libexif-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install plaso 20260119 from PyPI (latest release as of 2026-04-14)
+RUN pip3 install --no-cache-dir \
+    "plaso==20260119" \
     && log2timeline.py --version \
     && psort.py --version
 
