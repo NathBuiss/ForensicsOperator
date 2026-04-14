@@ -1,13 +1,12 @@
 """
 Plaso Plugin — parses Plaso storage files (.plaso).
-Handles both:
-- Modern schema: event_data table with serialized _data blobs
-- Legacy schema: event table with denormalized columns
+
+NOTE: Modern Plaso files serialize all event data into BLOBs.
+This plugin extracts timestamps from the event table, but for full
+parsing you MUST install psort or plaso libraries.
 """
 from __future__ import annotations
 
-import json
-import pickle
 import sqlite3
 import subprocess
 import tempfile
@@ -26,21 +25,6 @@ PLASO_PARSER_TO_ARTIFACT = {
 }
 
 
-def _sanitize_for_json(obj: Any) -> Any:
-    if isinstance(obj, bytes):
-        try:
-            return obj.decode("utf-8", errors="replace")
-        except Exception:
-            return str(obj)
-    if isinstance(obj, dict):
-        return {k: _sanitize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_sanitize_for_json(v) for v in obj]
-    if isinstance(obj, (int, float, str, type(None), bool)):
-        return obj
-    return str(obj)
-
-
 def _format_timestamp(ts_micro: int) -> str:
     if not ts_micro:
         return ""
@@ -54,7 +38,7 @@ def _format_timestamp(ts_micro: int) -> str:
 class PlasoPlugin(BasePlugin):
 
     PLUGIN_NAME = "plaso"
-    PLUGIN_VERSION = "3.1.0"
+    PLUGIN_VERSION = "4.0.0"
     DEFAULT_ARTIFACT_TYPE = "timeline"
     SUPPORTED_EXTENSIONS = [".plaso"]
     SUPPORTED_MIME_TYPES = ["application/x-sqlite3"]
@@ -65,11 +49,17 @@ class PlasoPlugin(BasePlugin):
         self._records_skipped = 0
 
     def parse(self) -> Generator[dict[str, Any], None, None]:
+        # ALWAYS try psort first - it's REQUIRED for modern plaso files
         if self._psort_available():
+            self.log.info("Using psort for parsing (required for modern plaso files)")
             yield from self._parse_with_psort()
         else:
-            self.log.warning("psort not found, using direct SQLite parsing")
-            yield from self._parse_sqlite_direct()
+            # Fallback: extract what we can from SQLite directly
+            self.log.error(
+                "psort.py NOT FOUND! Modern plaso files require psort for full parsing. "
+                "Install plaso-tools or use: apt-get install plaso-tools / pip install plaso"
+            )
+            yield from self._parse_sqlite_fallback()
 
     def _psort_available(self) -> bool:
         try:
@@ -86,7 +76,11 @@ class PlasoPlugin(BasePlugin):
         self.log.info("Running: %s", " ".join(cmd))
 
         try:
-            subprocess.run(cmd, check=True, capture_output=True, timeout=3600)
+            result = subprocess.run(cmd, check=True, capture_output=True, timeout=3600)
+            if result.stdout:
+                self.log.info("psort: %s", result.stdout.decode()[:300])
+            if result.stderr:
+                self.log.warning("psort: %s", result.stderr.decode()[:300])
         except subprocess.CalledProcessError as exc:
             raise PluginFatalError(f"psort failed: {exc.stderr.decode()[:500] if exc.stderr else 'no output'}") from exc
         except subprocess.TimeoutExpired:
@@ -96,23 +90,76 @@ class PlasoPlugin(BasePlugin):
         if not output_file.exists():
             raise PluginFatalError("psort produced no output")
 
+        self.log.info("Reading psort output: %s (%d bytes)", tmp_path, output_file.stat().st_size)
+        
         with output_file.open() as f:
-            for line in f:
+            for i, line in enumerate(f):
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    data = json.loads(line)
+                    data = self._json_loads(line)
                     event = self._event_to_fo(data)
                     self._records_read += 1
                     yield event
+                    if i > 0 and i % 100000 == 0:
+                        self.log.info("Processed %d events", i)
                 except Exception as exc:
                     self._records_skipped += 1
-                    self.log.debug("Skipped: %s", exc)
+                    self.log.debug("Skipped line %d: %s", i, exc)
 
         output_file.unlink(missing_ok=True)
 
-    def _parse_sqlite_direct(self) -> Generator[dict[str, Any], None, None]:
+    def _json_loads(self, line: str) -> dict:
+        import json
+        return json.loads(line)
+
+    def _event_to_fo(self, data: dict) -> dict[str, Any]:
+        parser = data.get("data_type", "") or data.get("parser", "") or "unknown"
+        artifact_type = self._resolve_artifact_type(parser) if parser else "timeline"
+        
+        timestamp = data.get("datetime", "") or data.get("timestamp", "") or ""
+        hostname = data.get("hostname", "") or ""
+        username = data.get("username", "") or ""
+        
+        message = (
+            data.get("message", "") or 
+            data.get("description", "") or 
+            data.get("display_name", "") or 
+            data.get("filename", "") or 
+            ""
+        )
+        
+        if not message:
+            source_short = data.get("source_short", "") or ""
+            source_long = data.get("source_long", "") or ""
+            if source_short or source_long:
+                message = f"{source_short}: {source_long}"
+            else:
+                message = f"[{parser}] Event"
+
+        return {
+            "fo_id": str(uuid.uuid4()),
+            "artifact_type": artifact_type,
+            "timestamp": timestamp,
+            "timestamp_desc": data.get("timestamp_desc", "") or "Event Time",
+            "message": message,
+            "host": {"hostname": hostname},
+            "user": {"name": username},
+            "plaso": {
+                "parser": parser,
+                "data_type": parser,
+                "filename": data.get("filename", "") or "",
+                "display_name": data.get("display_name", "") or "",
+            },
+            "raw": data,
+        }
+
+    def _parse_sqlite_fallback(self) -> Generator[dict[str, Any], None, None]:
+        """
+        Fallback when psort is not available.
+        Extracts timestamps from the event table, but data is limited.
+        """
         db_path = str(self.ctx.source_file_path)
         self.log.info("Opening: %s", db_path)
 
@@ -125,61 +172,33 @@ class PlasoPlugin(BasePlugin):
         try:
             cursor = conn.cursor()
             
-            # Get ALL tables
+            # Check for event table
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = [row[0] for row in cursor.fetchall()]
-            self.log.info("ALL TABLES: %s", tables)
+            self.log.info("Tables: %s", tables)
             
-            # PREFER "event" table over "event_data" - it has denormalized columns!
-            event_table = None
-            if "event" in tables:
-                event_table = "event"
-                self.log.info("Using 'event' table (denormalized)")
-            elif "event_data" in tables:
-                event_table = "event_data"
-                self.log.info("Using 'event_data' table (serialized blobs)")
-            else:
-                raise PluginFatalError(f"No event table found. Tables: {tables}")
+            # Use event table if available (has _timestamp column)
+            if "event" not in tables:
+                raise PluginFatalError(
+                    "No 'event' table found. This plaso file format is not supported without psort. "
+                    "Install plaso-tools: apt-get install plaso-tools"
+                )
             
-            # Get column info
-            cursor.execute(f"PRAGMA table_info({event_table})")
-            columns_info = cursor.fetchall()
-            column_names = [col[1] for col in columns_info]
-            
-            self.log.info("Columns in %s: %s", event_table, column_names)
-            
-            # Get row count
-            cursor.execute(f"SELECT COUNT(*) FROM {event_table}")
+            # Get timestamp from event table
+            self.log.info("Extracting timestamps from 'event' table")
+            cursor.execute("SELECT COUNT(*) FROM event")
             count = cursor.fetchone()[0]
-            self.log.info("Total rows: %d", count)
+            self.log.info("Total events: %d", count)
             
-            # Sample first 3 rows
-            cursor.execute(f"SELECT * FROM {event_table} LIMIT 3")
-            for i, row in enumerate(cursor.fetchall()):
-                self.log.info("Sample row %d: %s", i, dict(row))
+            # Sample first timestamp
+            cursor.execute("SELECT _timestamp FROM event LIMIT 1")
+            sample = cursor.fetchone()
+            if sample:
+                ts = sample[0]
+                self.log.info("Sample timestamp: %d (%s)", ts, _format_timestamp(ts) if ts else "NULL")
             
-            # Find columns
-            timestamp_col = None
-            for c in ["_timestamp", "timestamp", "time"]:
-                if c in column_names:
-                    timestamp_col = c
-                    break
-            
-            parser_col = None
-            for c in ["data_type", "parser", "source_short"]:
-                if c in column_names:
-                    parser_col = c
-                    break
-            
-            message_cols = [c for c in ["message", "description", "unicode_string", "string", "display_name"] if c in column_names]
-            filename_cols = [c for c in ["filename", "display_name", "pathspec"] if c in column_names]
-            
-            self.log.info("timestamp_col=%s, parser_col=%s, message_cols=%s, filename_cols=%s", 
-                         timestamp_col, parser_col, message_cols, filename_cols)
-            
-            # Execute query
-            order_by = timestamp_col if timestamp_col else "rowid"
-            cursor.execute(f"SELECT * FROM {event_table} ORDER BY {order_by} ASC LIMIT 500000")
+            # Extract all events with timestamps only
+            cursor.execute("SELECT _identifier, _timestamp FROM event ORDER BY _timestamp ASC LIMIT 500000")
             
             while True:
                 rows = cursor.fetchmany(10000)
@@ -188,132 +207,44 @@ class PlasoPlugin(BasePlugin):
                 
                 for row in rows:
                     try:
-                        d = dict(row)
-                        event = self._row_to_event(d, column_names, timestamp_col, parser_col, message_cols, filename_cols)
-                        if event:
-                            self._records_read += 1
-                            yield event
+                        event_id = row[0]
+                        ts_micro = row[1]
+                        
+                        timestamp = _format_timestamp(ts_micro) if ts_micro else ""
+                        
+                        self._records_read += 1
+                        yield {
+                            "fo_id": str(uuid.uuid4()),
+                            "artifact_type": "timeline",
+                            "timestamp": timestamp if timestamp else None,
+                            "timestamp_desc": "Event Time",
+                            "message": f"[Plaso Event #{event_id}] Data requires psort for extraction",
+                            "host": {"hostname": ""},
+                            "user": {"name": ""},
+                            "plaso": {
+                                "parser": "unknown",
+                                "data_type": "unknown",
+                                "note": "Full event data is serialized - install psort.py to extract",
+                                "event_id": event_id,
+                            },
+                            "raw": {"_identifier": event_id, "_timestamp": ts_micro},
+                        }
                     except Exception as exc:
                         self._records_skipped += 1
                         self.log.error("Skipped: %s", exc)
                 
                 if self._records_read % 50000 == 0 and self._records_read > 0:
                     self.log.info("Processed %d events...", self._records_read)
+            
+            self.log.warning(
+                "Extracted %d events with TIMESTAMPS ONLY. "
+                "For full event data (messages, filenames, etc.), install psort: "
+                "apt-get install plaso-tools  OR  pip install plaso",
+                self._records_read
+            )
                     
         finally:
             conn.close()
-
-    def _row_to_event(self, d: dict, all_cols: list, timestamp_col: str | None, 
-                      parser_col: str | None, message_cols: list, filename_cols: list) -> dict[str, Any]:
-        # Get parser
-        parser = ""
-        if parser_col and parser_col in d and d[parser_col]:
-            parser = str(d[parser_col])
-        if not parser:
-            for c in ["data_type", "parser", "source_short"]:
-                if c in d and d[c]:
-                    parser = str(d[c])
-                    break
-        
-        artifact_type = self._resolve_artifact_type(parser) if parser else "timeline"
-        
-        # Get timestamp
-        timestamp = ""
-        if timestamp_col and timestamp_col in d:
-            ts_val = d[timestamp_col]
-            if isinstance(ts_val, bytes):
-                try:
-                    ts_val = int.from_bytes(ts_val, 'little')
-                except Exception:
-                    ts_val = 0
-            if ts_val and isinstance(ts_val, (int, float)):
-                timestamp = _format_timestamp(int(ts_val))
-        
-        # Get message
-        message = ""
-        for col in message_cols:
-            if col in d and d[col]:
-                val = d[col]
-                if isinstance(val, bytes):
-                    val = val.decode("utf-8", errors="replace")
-                message = str(val).strip()
-                if message:
-                    break
-        
-        # Get filename
-        if not message:
-            for col in filename_cols:
-                if col in d and d[col]:
-                    val = d[col]
-                    if isinstance(val, bytes):
-                        val = val.decode("utf-8", errors="replace")
-                    message = f"{col}: {val}"
-                    break
-        
-        # Scan all columns
-        if not message:
-            for col, val in d.items():
-                if val is None or col.startswith("_"):
-                    continue
-                if isinstance(val, bytes):
-                    try:
-                        decoded = val.decode("utf-8", errors="replace").strip()
-                        if decoded and len(decoded) > 3:
-                            message = f"{col}: {decoded[:200]}"
-                            break
-                    except Exception:
-                        pass
-                elif isinstance(val, str) and val.strip():
-                    message = f"{col}: {val[:200]}"
-                    break
-        
-        if not message:
-            message = f"[{parser}] Event" if parser else "Plaso event"
-        
-        # Hostname/username
-        hostname = str(d.get("hostname", "") or "")
-        username = str(d.get("username", "") or "")
-        
-        # Build plaso metadata
-        plaso_meta = {"parser": parser, "data_type": parser}
-        for col in all_cols:
-            if col.startswith("_") or col in ["rowid"]:
-                continue
-            if col in d:
-                val = d[col]
-                if isinstance(val, bytes):
-                    val = f"<blob:{len(val)}>" if len(val) > 100 else val.decode("utf-8", errors="replace")
-                plaso_meta[col] = val
-        
-        return {
-            "fo_id": str(uuid.uuid4()),
-            "artifact_type": artifact_type,
-            "timestamp": timestamp if timestamp else None,
-            "timestamp_desc": "Event Time",
-            "message": message[:2000],
-            "host": {"hostname": hostname},
-            "user": {"name": username},
-            "plaso": plaso_meta,
-            "raw": _sanitize_for_json(d),
-        }
-
-    def _event_to_fo(self, data: dict) -> dict[str, Any]:
-        parser = data.get("data_type", "") or data.get("parser", "") or "unknown"
-        artifact_type = self._resolve_artifact_type(parser)
-        timestamp = data.get("datetime", "") or data.get("timestamp", "") or ""
-        message = data.get("message", "") or data.get("description", "") or data.get("display_name", "") or f"[{parser}] Event"
-        
-        return {
-            "fo_id": str(uuid.uuid4()),
-            "artifact_type": artifact_type,
-            "timestamp": timestamp,
-            "timestamp_desc": data.get("timestamp_desc", "") or "Event Time",
-            "message": message,
-            "host": {"hostname": data.get("hostname", "") or ""},
-            "user": {"name": data.get("username", "") or ""},
-            "plaso": {"parser": parser, "data_type": parser},
-            "raw": _sanitize_for_json(data),
-        }
 
     def _resolve_artifact_type(self, parser: str) -> str:
         parser_lower = parser.lower()
