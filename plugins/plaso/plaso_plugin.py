@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import tempfile
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Generator
 
@@ -45,10 +46,21 @@ def _sanitize_for_json(obj: Any) -> Any:
     return str(obj)
 
 
+def _format_timestamp(ts_micro: int) -> str:
+    """Convert Plaso microsecond timestamp to ISO8601."""
+    if not ts_micro:
+        return ""
+    try:
+        dt = datetime.fromtimestamp(ts_micro / 1_000_000, tz=timezone.utc)
+        return dt.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+    except (OSError, OverflowError, ValueError):
+        return ""
+
+
 class PlasoPlugin(BasePlugin):
 
     PLUGIN_NAME = "plaso"
-    PLUGIN_VERSION = "1.0.0"
+    PLUGIN_VERSION = "2.0.0"
     DEFAULT_ARTIFACT_TYPE = "timeline"
     SUPPORTED_EXTENSIONS = [".plaso"]
     SUPPORTED_MIME_TYPES = ["application/x-sqlite3"]
@@ -121,21 +133,26 @@ class PlasoPlugin(BasePlugin):
 
     def _psort_event_to_fo(self, data: dict) -> dict[str, Any]:
         """Convert a psort JSON Line event to a TraceX event dict."""
-        parser = data.get("parser", "unknown")
+        parser = data.get("parser", "unknown") or "unknown"
         artifact_type = self._resolve_artifact_type(parser)
-        timestamp = data.get("datetime", "")
-        hostname = data.get("hostname", "")
-        username = data.get("username", "")
-        message = data.get("message", data.get("description", ""))
-        source_short = data.get("source_short", "")
-        source_long = data.get("source_long", "")
+        timestamp = data.get("datetime", "") or ""
+        hostname = data.get("hostname", "") or ""
+        username = data.get("username", "") or ""
+        message = data.get("message", "") or data.get("description", "") or ""
+        source_short = data.get("source_short", "") or ""
+        source_long = data.get("source_long", "") or ""
+        filename = data.get("filename", "") or ""
+        display_name = data.get("display_name", "") or ""
+
+        if not message:
+            message = display_name or filename or f"{source_short}: {source_long}" or f"[{parser}] Event"
 
         return {
             "fo_id": str(uuid.uuid4()),
             "artifact_type": artifact_type,
             "timestamp": timestamp,
-            "timestamp_desc": data.get("timestamp_desc", "Event Time"),
-            "message": message or f"{source_short}: {source_long}",
+            "timestamp_desc": data.get("timestamp_desc", "") or "Event Time",
+            "message": message,
             "host": {"hostname": hostname},
             "user": {"name": username},
             "plaso": {
@@ -144,8 +161,8 @@ class PlasoPlugin(BasePlugin):
                 "source_long": source_long,
                 "store_number": data.get("store_number"),
                 "inode": data.get("inode"),
-                "filename": data.get("filename", ""),
-                "display_name": data.get("display_name", ""),
+                "filename": filename,
+                "display_name": display_name,
             },
             "raw": _sanitize_for_json(data),
         }
@@ -153,7 +170,7 @@ class PlasoPlugin(BasePlugin):
     def _parse_sqlite_direct(self) -> Generator[dict[str, Any], None, None]:
         """
         Directly query the Plaso SQLite storage file.
-        Plaso >= 20200227 uses a single SQLite file with event tables.
+        Handles multiple schema versions dynamically.
         """
         db_path = str(self.ctx.source_file_path)
 
@@ -164,11 +181,13 @@ class PlasoPlugin(BasePlugin):
             raise PluginFatalError(f"Cannot open as SQLite: {exc}") from exc
 
         try:
-            # Check if this looks like a plaso storage file
             cursor = conn.cursor()
+            
+            # Get all tables
             tables = {row[0] for row in cursor.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )}
+            self.log.info("Tables in plaso file: %s", tables)
 
             if "event_data" not in tables and "events" not in tables:
                 raise PluginFatalError(
@@ -176,113 +195,224 @@ class PlasoPlugin(BasePlugin):
                     "(missing event_data/events tables)"
                 )
 
-            # Try the newer schema first (plaso >= 20200227)
+            # Try event_data first (newer schema), then events (legacy)
             if "event_data" in tables:
-                yield from self._read_new_schema(conn)
-            else:
-                yield from self._read_legacy_schema(conn)
+                yield from self._read_event_data(conn)
+            elif "events" in tables:
+                yield from self._read_events(conn)
         finally:
             conn.close()
 
-    def _read_new_schema(self, conn: sqlite3.Connection) -> Generator[dict[str, Any], None, None]:
+    def _read_event_data(self, conn: sqlite3.Connection) -> Generator[dict[str, Any], None, None]:
+        """Read from event_data table with dynamic column detection."""
         cursor = conn.cursor()
-        # Get actual column names from the table
+        
+        # Get column info
         cursor.execute("PRAGMA table_info(event_data)")
-        columns = [row[1] for row in cursor.fetchall()]
-        self.log.info("event_data columns: %s", columns)
+        columns = {row[1]: {"cid": row[0], "type": row[2]} for row in cursor.fetchall()}
+        column_names = list(columns.keys())
         
-        # Plaso uses _timestamp (with underscore) in newer versions
-        timestamp_col = "_timestamp" if "_timestamp" in columns else "timestamp" if "timestamp" in columns else None
-        self.log.info("Using timestamp column: %s", timestamp_col)
+        self.log.info("event_data columns (%d): %s", len(column_names), column_names)
         
-        # Build SELECT based on available columns
+        # Log first 3 rows as debug
+        cursor.execute("SELECT * FROM event_data LIMIT 3")
+        sample_rows = cursor.fetchall()
+        for i, row in enumerate(sample_rows):
+            row_dict = dict(row)
+            self.log.info("Sample row %d: %s", i, {k: repr(v)[:100] for k, v in row_dict.items()})
+        
+        # Identify timestamp column (could be _timestamp, timestamp, or event_timestamp)
+        timestamp_col = None
+        for candidate in ["_timestamp", "timestamp", "event_timestamp"]:
+            if candidate in column_names:
+                timestamp_col = candidate
+                break
+        
+        # Build column list for SELECT
+        important_cols = ["parser", "message", "description", "hostname", "username", 
+                         "data_type", "display_name", "filename", "timestamp_desc", 
+                         "pathspec", "source_short", "source_long", "store_number", 
+                         "inode", "unicode_string", "string"]
+        
         select_cols = []
-        for col in ["parser", "message", "hostname", "username", "data_type", 
-                    "_identifier", "display_name", "filename", "timestamp_desc", "pathspec"]:
-            if col in columns:
+        if timestamp_col:
+            select_cols.append(timestamp_col)
+        for col in important_cols:
+            if col in column_names:
                 select_cols.append(col)
         
-        # Add timestamp column if it exists
-        if timestamp_col:
-            select_cols.insert(0, timestamp_col)
-        
+        # If no important columns found, select all
         if not select_cols:
             select_cols = ["*"]
         
-        query = f"SELECT {', '.join(select_cols)} FROM event_data ORDER BY {timestamp_col or 'rowid'} ASC LIMIT 500000"
+        order_by = timestamp_col if timestamp_col else "rowid"
+        query = f"SELECT {', '.join(select_cols)} FROM event_data ORDER BY {order_by} ASC LIMIT 500000"
         self.log.info("Executing: %s", query)
+        
         rows = cursor.execute(query)
-
         for row in rows:
             try:
                 d = dict(row)
-                parser = d.get("parser", "") or ""
-                artifact_type = self._resolve_artifact_type(parser)
-                
-                # Plaso timestamps are in microseconds since epoch
-                ts_micro = d.get(timestamp_col, 0) if timestamp_col else 0
-                ts_micro = ts_micro or 0
-                timestamp = ""
-                if ts_micro:
-                    try:
-                        from datetime import datetime, timezone
-                        dt = datetime.fromtimestamp(ts_micro / 1_000_000, tz=timezone.utc)
-                        timestamp = dt.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
-                    except (OSError, OverflowError, ValueError) as ts_exc:
-                        self.log.debug("Invalid timestamp %s: %s", ts_micro, ts_exc)
-                        timestamp = ""
-
-                # Build message from available fields
-                message = d.get("message", "") or ""
-                if not message:
-                    display_name = d.get("display_name", "") or ""
-                    filename = d.get("filename", "") or ""
-                    if display_name:
-                        message = display_name
-                    elif filename:
-                        message = f"File: {filename}"
-                    else:
-                        message = f"[{parser}] Event"
-
-                self._records_read += 1
-                yield {
-                    "fo_id": str(uuid.uuid4()),
-                    "artifact_type": artifact_type,
-                    "timestamp": timestamp,
-                    "timestamp_desc": d.get("timestamp_desc", "") or "Event Time",
-                    "message": message,
-                    "host": {"hostname": d.get("hostname", "") or ""},
-                    "user": {"name": d.get("username", "") or ""},
-                    "plaso": {
-                        "parser": parser,
-                        "data_type": d.get("data_type", "") or "",
-                        "display_name": d.get("display_name", "") or "",
-                        "filename": d.get("filename", "") or "",
-                    },
-                    "raw": _sanitize_for_json(d),
-                }
+                event = self._row_to_event(d, timestamp_col)
+                if event:
+                    self._records_read += 1
+                    yield event
             except Exception as exc:
                 self._records_skipped += 1
                 self.log.error("Skipped row: %s", exc)
 
-    def _read_legacy_schema(self, conn: sqlite3.Connection) -> Generator[dict[str, Any], None, None]:
-        """Fallback for older plaso schemas."""
+    def _read_events(self, conn: sqlite3.Connection) -> Generator[dict[str, Any], None, None]:
+        """Read from legacy events table."""
         cursor = conn.cursor()
-        try:
-            for row in cursor.execute("SELECT * FROM events ORDER BY timestamp ASC"):
+        
+        cursor.execute("PRAGMA table_info(events)")
+        column_names = [row[1] for row in cursor.fetchall()]
+        self.log.info("events table columns: %s", column_names)
+        
+        # Log sample
+        cursor.execute("SELECT * FROM events LIMIT 3")
+        for i, row in enumerate(cursor.fetchall()):
+            self.log.info("Sample events row %d: %s", i, dict(row))
+        
+        timestamp_col = "_timestamp" if "_timestamp" in column_names else "timestamp" if "timestamp" in column_names else None
+        
+        select_cols = [timestamp_col] if timestamp_col else []
+        for col in ["timestamp_desc", "source_short", "source_long", "parser", 
+                   "display_name", "pathspec", "inode", "filename", "unicode_string", 
+                   "message", "string", "data"]:
+            if col in column_names:
+                select_cols.append(col)
+        
+        if not select_cols:
+            select_cols = ["*"]
+        
+        order_by = timestamp_col if timestamp_col else "rowid"
+        query = f"SELECT {', '.join(select_cols)} FROM events ORDER BY {order_by} ASC LIMIT 500000"
+        self.log.info("Executing: %s", query)
+        
+        rows = cursor.execute(query)
+        for row in rows:
+            try:
                 d = dict(row)
-                self._records_read += 1
-                yield {
-                    "fo_id": str(uuid.uuid4()),
-                    "artifact_type": "timeline",
-                    "timestamp": None,
-                    "timestamp_desc": "Unknown",
-                    "message": str(d),
-                    "plaso": _sanitize_for_json(d),
-                    "raw": _sanitize_for_json(d),
-                }
-        except sqlite3.OperationalError as exc:
-            raise PluginFatalError(f"Cannot query legacy events table: {exc}") from exc
+                event = self._row_to_event_legacy(d, timestamp_col)
+                if event:
+                    self._records_read += 1
+                    yield event
+            except Exception as exc:
+                self._records_skipped += 1
+                self.log.error("Skipped events row: %s", exc)
+
+    def _row_to_event(self, d: dict, timestamp_col: str | None) -> dict[str, Any] | None:
+        """Convert a row from event_data table to ForensicEvent."""
+        # Extract fields with multiple possible names
+        parser = d.get("parser", "") or d.get("data_type", "") or ""
+        artifact_type = self._resolve_artifact_type(parser) if parser else "timeline"
+        
+        # Timestamp
+        ts_val = d.get(timestamp_col, 0) if timestamp_col else 0
+        timestamp = _format_timestamp(ts_val) if ts_val else ""
+        
+        # Message - try multiple fields
+        message = (
+            d.get("message", "") or 
+            d.get("description", "") or 
+            d.get("unicode_string", "") or 
+            d.get("string", "") or 
+            d.get("display_name", "") or 
+            d.get("filename", "") or 
+            ""
+        ).strip()
+        
+        if not message:
+            # Build from available context
+            display_name = d.get("display_name", "") or ""
+            filename = d.get("filename", "") or ""
+            pathspec = d.get("pathspec", "") or ""
+            
+            if display_name:
+                message = display_name
+            elif filename:
+                message = f"File: {filename}"
+            elif pathspec:
+                message = f"Path: {pathspec}"
+            elif parser:
+                message = f"[{parser}] Event"
+            else:
+                message = "Plaso event"
+        
+        # Hostname and username
+        hostname = d.get("hostname", "") or ""
+        username = d.get("username", "") or ""
+        
+        # Timestamp description
+        timestamp_desc = d.get("timestamp_desc", "") or "Event Time"
+        
+        return {
+            "fo_id": str(uuid.uuid4()),
+            "artifact_type": artifact_type,
+            "timestamp": timestamp if timestamp else None,
+            "timestamp_desc": timestamp_desc,
+            "message": message,
+            "host": {"hostname": hostname},
+            "user": {"name": username},
+            "plaso": {
+                "parser": parser,
+                "data_type": d.get("data_type", "") or "",
+                "display_name": d.get("display_name", "") or "",
+                "filename": d.get("filename", "") or "",
+                "pathspec": d.get("pathspec", "") or "",
+                "source_short": d.get("source_short", "") or "",
+                "source_long": d.get("source_long", "") or "",
+            },
+            "raw": _sanitize_for_json(d),
+        }
+
+    def _row_to_event_legacy(self, d: dict, timestamp_col: str | None) -> dict[str, Any] | None:
+        """Convert a row from legacy events table to ForensicEvent."""
+        parser = d.get("parser", "") or ""
+        artifact_type = self._resolve_artifact_type(parser) if parser else "timeline"
+        
+        ts_val = d.get(timestamp_col, 0) if timestamp_col else 0
+        timestamp = _format_timestamp(ts_val) if ts_val else ""
+        
+        # Legacy plaso uses different field names
+        message = (
+            d.get("unicode_string", "") or 
+            d.get("string", "") or 
+            d.get("message", "") or 
+            d.get("display_name", "") or 
+            d.get("filename", "") or 
+            ""
+        ).strip()
+        
+        if not message:
+            source_short = d.get("source_short", "") or ""
+            source_long = d.get("source_long", "") or ""
+            if source_short or source_long:
+                message = f"{source_short}: {source_long}"
+            elif parser:
+                message = f"[{parser}] Event"
+            else:
+                message = "Plaso event"
+        
+        return {
+            "fo_id": str(uuid.uuid4()),
+            "artifact_type": artifact_type,
+            "timestamp": timestamp if timestamp else None,
+            "timestamp_desc": d.get("timestamp_desc", "") or "Event Time",
+            "message": message,
+            "host": {"hostname": ""},
+            "user": {"name": ""},
+            "plaso": {
+                "parser": parser,
+                "source_short": d.get("source_short", "") or "",
+                "source_long": d.get("source_long", "") or "",
+                "display_name": d.get("display_name", "") or "",
+                "filename": d.get("filename", "") or "",
+                "pathspec": d.get("pathspec", "") or "",
+            },
+            "raw": _sanitize_for_json(d),
+        }
 
     def _resolve_artifact_type(self, parser: str) -> str:
         parser_lower = parser.lower()
@@ -297,18 +427,11 @@ class PlasoPlugin(BasePlugin):
             "records_skipped": self._records_skipped,
         }
 
-    # ── log2timeline fallback ─────────────────────────────────────────────────
-
     @classmethod
     def create_from_source(cls, source_file: Path, work_dir: Path, ctx: PluginContext) -> "PlasoPlugin":
         """
         Run log2timeline on an arbitrary source file, produce a .plaso storage,
         and return a PlasoPlugin instance pointing at it.
-
-        This is the fallback path used when the primary plugin fails — log2timeline
-        supports hundreds of file formats and will extract whatever it can.
-
-        Raises PluginFatalError if log2timeline is unavailable or fails.
         """
         plaso_path = work_dir / f"{source_file.name}.plaso"
         cmd = [
