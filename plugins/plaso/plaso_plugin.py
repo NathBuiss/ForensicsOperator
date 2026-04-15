@@ -106,27 +106,47 @@ class PlasoPlugin(BasePlugin):
 
     def _get_psort_version(self) -> str:
         """Get psort version string."""
+        name = self._psort_bin()
+        if not name:
+            return "not found"
         try:
-            result = subprocess.run(["psort.py", "--version"], capture_output=True, timeout=5)
+            result = subprocess.run([name, "--version"], capture_output=True, timeout=5)
             return (result.stdout or result.stderr).decode().strip() or "unknown"
         except Exception:
             return "unknown"
 
+    def _psort_bin(self) -> str | None:
+        """Return the first working psort binary name, or None if not found.
+        
+        Plaso ≥ 20231231 ships 'psort' (no .py suffix).
+        Older builds use 'psort.py'.
+        """
+        for name in ("psort", "psort.py"):
+            try:
+                result = subprocess.run([name, "--version"], capture_output=True, timeout=5)
+                if result.returncode == 0:
+                    return name
+            except FileNotFoundError:
+                continue
+            except subprocess.TimeoutExpired:
+                continue
+        return None
+
     def _psort_available(self) -> bool:
-        """Check if psort.py is available and working."""
-        try:
-            result = subprocess.run(["psort.py", "--version"], capture_output=True, timeout=5)
-            return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
+        """Check if a working psort binary exists."""
+        return self._psort_bin() is not None
 
     def _parse_with_psort(self) -> Generator[dict[str, Any], None, None]:
-        """Export events using psort.py and parse JSON output."""
+        """Export events using psort and parse JSON output."""
+        psort = self._psort_bin()
+        if not psort:
+            raise PluginFatalError("psort binary not found in PATH")
+
         with tempfile.TemporaryDirectory() as tmpdir:
             output_file = Path(tmpdir) / "output.jsonl"
             
             cmd = [
-                "psort.py",
+                psort,
                 "--output-time-zone", "UTC",
                 "-o", "json_line",
                 "-w", str(output_file),
@@ -270,10 +290,20 @@ class PlasoPlugin(BasePlugin):
                 
                 for row in rows:
                     try:
-                        event_id = row[0]
+                        raw_id   = row[0]
                         ts_value = row[1]
+
+                        # SQLite may return _identifier as BLOB → bytes.
+                        # Normalise to a JSON-safe string (hex for BLOB, str otherwise).
+                        if isinstance(raw_id, bytes):
+                            event_id = raw_id.hex()
+                        elif raw_id is not None:
+                            event_id = str(raw_id)
+                        else:
+                            event_id = ""
+
                         timestamp = _format_timestamp(ts_value) if ts_value else ""
-                        
+
                         self._records_read += 1
                         yield {
                             "fo_id": str(uuid.uuid4()),
@@ -286,15 +316,15 @@ class PlasoPlugin(BasePlugin):
                             "plaso": {
                                 "parser": "unknown",
                                 "data_type": "unknown",
-                                "note": "Full event data requires psort.py",
+                                "note": "Full event data requires psort binary",
                                 "event_id": event_id,
-                                "raw_timestamp": ts_value,
+                                "raw_timestamp": ts_value if isinstance(ts_value, (int, float, str, type(None))) else str(ts_value),
                             },
                             "raw": {"_identifier": event_id, "_timestamp": ts_value},
                         }
                     except Exception as exc:
                         self._records_skipped += 1
-                        self.log.error("Skipped event %d: %s", row[0], exc)
+                        self.log.error("Skipped event (id=%s): %s", repr(row[0]), exc)
                 
                 if self._records_read % 50000 == 0 and self._records_read > 0:
                     self.log.info("Processed %d events...", self._records_read)
@@ -326,8 +356,17 @@ class PlasoPlugin(BasePlugin):
     def create_from_source(cls, source_file: Path, work_dir: Path, ctx: PluginContext) -> "PlasoPlugin":
         """Create plaso file from arbitrary source using log2timeline."""
         plaso_path = work_dir / f"{source_file.name}.plaso"
+        # plaso >= 20231231 ships 'log2timeline' (no .py); older builds use 'log2timeline.py'
+        l2t_bin = None
+        for name in ("log2timeline", "log2timeline.py"):
+            if subprocess.run(["which", name], capture_output=True).returncode == 0:
+                l2t_bin = name
+                break
+        if not l2t_bin:
+            raise PluginFatalError("log2timeline binary not found in PATH")
+
         cmd = [
-            "log2timeline.py",
+            l2t_bin,
             "--status_view", "none",
             "--logfile", "/dev/null",
             str(plaso_path),
@@ -340,11 +379,11 @@ class PlasoPlugin(BasePlugin):
             if result.stderr:
                 ctx.logger.info("log2timeline stderr: %s", result.stderr.decode()[:500])
         except FileNotFoundError as exc:
-            raise PluginFatalError("log2timeline.py not found in PATH") from exc
+            raise PluginFatalError(f"{l2t_bin} not found in PATH") from exc
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.decode()[:500] if exc.stderr else "no output"
             raise PluginFatalError(f"log2timeline failed (exit {exc.returncode}): {stderr}") from exc
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             raise PluginFatalError("log2timeline timed out after 2 hours") from exc
         
         if not plaso_path.exists() or plaso_path.stat().st_size == 0:

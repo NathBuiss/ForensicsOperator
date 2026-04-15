@@ -377,22 +377,21 @@ def _build_prompt(run: dict) -> str:
     else:
         preview = preview_raw or []
 
-    # Build a concise representation of the top hits
+    # Serialize each hit as full JSON — include every field so the LLM has
+    # complete visibility. Long string fields are capped at 800 chars to
+    # stay within token budgets while preserving all structure.
     hits_text = ""
     for i, hit in enumerate(preview[:50], 1):
-        lvl   = hit.get("level", "informational").upper()
-        title = hit.get("rule_title", "")
-        ts    = hit.get("timestamp", "")
-        host  = hit.get("computer", "")
-        details = hit.get("details_raw", "")[:200]
-        hits_text += f"{i}. [{lvl}] {title}"
-        if host:
-            hits_text += f" | host:{host}"
-        if ts:
-            hits_text += f" | {ts}"
-        if details:
-            hits_text += f"\n   {details}"
-        hits_text += "\n"
+        compact = {
+            k: (v[:800] if isinstance(v, str) and len(v) > 800 else v)
+            for k, v in hit.items()
+            if v or v == 0
+        }
+        try:
+            hit_json = json.dumps(compact, ensure_ascii=False, default=str)
+        except Exception:
+            hit_json = str(compact)
+        hits_text += f"{i}. {hit_json}\n"
 
     level_summary = ", ".join(f"{k}:{v}" for k, v in sorted(hits_by_level.items()))
     if not level_summary:
@@ -405,8 +404,9 @@ def _build_prompt(run: dict) -> str:
         f"Module: {module_id}\n"
         f"{context_line}"
         f"Total findings: {total_hits}  ({level_summary})\n\n"
-        f"Findings (up to 50 shown):\n"
+        f"Findings (up to 50 shown, full JSON — analyze all fields):\n"
         f"{hits_text or '(none)'}\n\n"
+        "Analyze all fields in every JSON object above. "
         "Describe what these findings show about the system or user activity, and respond with the JSON structure as instructed."
     )
 
@@ -415,9 +415,16 @@ def _build_alert_prompt(rule_name: str, rule_query: str, match_count: int, sampl
     """Build a prompt for LLM analysis of alert rule results."""
     events_text = ""
     for i, ev in enumerate(sample_events[:30], 1):
-        ts  = ev.get("timestamp", "")
-        msg = ev.get("message", "")[:300]
-        events_text += f"{i}. [{ts}] {msg}\n"
+        compact = {
+            k: (v[:800] if isinstance(v, str) and len(v) > 800 else v)
+            for k, v in ev.items()
+            if v or v == 0
+        }
+        try:
+            ev_json = json.dumps(compact, ensure_ascii=False, default=str)
+        except Exception:
+            ev_json = str(compact)
+        events_text += f"{i}. {ev_json}\n"
 
     return (
         f"Alert Rule: {rule_name}\n"

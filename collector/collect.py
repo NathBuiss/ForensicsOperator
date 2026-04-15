@@ -84,6 +84,7 @@ ARTIFACT_LABELS = {
     "suricata":     "Suricata IDS Logs (EVE JSON)",
     "zeek":         "Zeek / Bro Network Logs",
     "memory":       "Physical Memory Dump (live acquisition)",
+    "external_disk": "External / BitLocker Disk Triage",
 }
 
 
@@ -1278,6 +1279,407 @@ class MacOSCollector(Collector):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# External Disk Collector (BitLocker support via dislocker-fuse)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ExternalDiskCollector(Collector):
+    """
+    Collect forensic artifacts from an external Windows disk (NTFS).
+
+    Works on Linux with dislocker-fuse for BitLocker-encrypted partitions,
+    or with a plain ntfs-3g/mount for unencrypted NTFS disks.
+    Also accepts a path to an already-mounted directory.
+
+    Usage
+    -----
+      # Unencrypted NTFS partition:
+      tracex-collector --disk /dev/sdb1
+
+      # BitLocker-encrypted partition (recovery key):
+      tracex-collector --disk /dev/sdb1 --bitlocker-key "123456-789012-345678-901234-567890-123456-789012-345678"
+
+      # Already-mounted directory (no root needed):
+      tracex-collector --disk /mnt/external
+
+    Requirements (Linux)
+    --------------------
+      apt-get install dislocker ntfs-3g
+    """
+
+    DEFAULT_COLLECT = {"evtx", "registry", "prefetch", "lnk", "browser", "tasks", "mft"}
+
+    def __init__(self, disk: str, bitlocker_key: str = "", **kwargs):
+        super().__init__(**kwargs)
+        self.disk          = disk
+        self.bitlocker_key = bitlocker_key.strip()
+        self._dislocker_dir: Path | None = None
+        self._ntfs_dir: Path | None = None
+
+    # ── Mount lifecycle ───────────────────────────────────────────────────────
+
+    def _run_privileged(self, cmd: list, timeout: int = 60) -> bool:
+        """Run a command, prepending sudo when not already root."""
+        if IS_LINUX and os.getuid() != 0:
+            cmd = ["sudo"] + cmd
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+            if r.returncode != 0:
+                err = (r.stderr or r.stdout or b"").decode(errors="replace")[:300]
+                self._warn(f"{cmd[0]} failed: {err}")
+                return False
+            return True
+        except subprocess.TimeoutExpired:
+            self._warn(f"{cmd[0]} timed out")
+            return False
+        except Exception as exc:
+            self._warn(f"{cmd[0]} error: {exc}")
+            return False
+
+    def _detect_bitlocker(self, device: str) -> bool:
+        """Check for BitLocker volume signature at sector offset 3."""
+        try:
+            with open(device, "rb") as fh:
+                header = fh.read(16)
+            return header[3:11] == b"-FVE-FS-"
+        except (PermissionError, OSError):
+            # Cannot read raw device — assume it may be BitLocker if key provided
+            return bool(self.bitlocker_key)
+
+    def _unlock_bitlocker(self, device: str, mount_point: Path) -> str | None:
+        """
+        Unlock a BitLocker partition using dislocker-fuse.
+
+        Creates a virtual NTFS image (dislocker-file) inside mount_point.
+        Returns the path to that file on success, None on failure.
+        """
+        mount_point.mkdir(parents=True, exist_ok=True)
+
+        dl_bin = shutil.which("dislocker-fuse") or shutil.which("dislocker")
+        if not dl_bin:
+            self._warn(
+                "dislocker-fuse not found. Install with: apt-get install dislocker"
+            )
+            return None
+
+        cmd = [dl_bin, device]
+        if self.bitlocker_key:
+            # 48-digit recovery key (digits + hyphens) → -p flag
+            # Passphrase → -u flag
+            if re.match(r"^[\d\-]+$", self.bitlocker_key):
+                cmd += ["-p", self.bitlocker_key]
+            else:
+                cmd += ["-u", self.bitlocker_key]
+        else:
+            self._warn(
+                "No BitLocker key supplied — attempting unauthenticated unlock "
+                "(only works on volumes with clear-key protector)."
+            )
+
+        cmd += ["--", str(mount_point)]
+        print(f"      dislocker-fuse: unlocking {device} → {mount_point}")
+
+        if not self._run_privileged(cmd, timeout=120):
+            return None
+
+        dl_file = mount_point / "dislocker-file"
+        if not dl_file.exists():
+            self._warn(f"dislocker-fuse succeeded but dislocker-file is absent in {mount_point}")
+            return None
+
+        return str(dl_file)
+
+    def _mount_ntfs(self, source: str, mount_point: Path) -> bool:
+        """Mount an NTFS image or partition read-only at mount_point."""
+        mount_point.mkdir(parents=True, exist_ok=True)
+
+        # Prefer ntfs-3g (handles advanced NTFS features and compressed files)
+        ntfs3g = shutil.which("ntfs-3g") or shutil.which("mount.ntfs-3g")
+        if ntfs3g:
+            ok = self._run_privileged(
+                [ntfs3g, source, str(mount_point),
+                 "-o", "ro,noatime,streams_interface=none,nodev,nosuid"],
+                timeout=30,
+            )
+            if ok:
+                return True
+
+        # Generic mount fallback (kernel NTFS module)
+        ok = self._run_privileged(
+            ["mount", "-t", "ntfs", "-o", "ro,noatime", source, str(mount_point)],
+            timeout=30,
+        )
+        return ok
+
+    def _umount(self, path: Path) -> None:
+        self._run_privileged(["umount", "-l", str(path)], timeout=30)
+
+    def unlock_and_mount(self) -> Path | None:
+        """
+        Full pipeline: detect → BitLocker unlock → NTFS mount.
+        Returns the filesystem root Path, or None on any failure.
+        """
+        disk_path = Path(self.disk)
+
+        # Already a mounted directory
+        if disk_path.is_dir():
+            print(f"      Using existing mount: {disk_path}")
+            return disk_path
+
+        device = str(disk_path)
+
+        # ── BitLocker unlock ───────────────────────────────────────────────────
+        is_bitlocker = self.bitlocker_key or self._detect_bitlocker(device)
+        if is_bitlocker:
+            print(f"  [*] BitLocker volume detected — unlocking {device}")
+            self._dislocker_dir = Path(tempfile.mkdtemp(prefix="fo_dislocker_"))
+            dl_file = self._unlock_bitlocker(device, self._dislocker_dir)
+            if dl_file is None:
+                return None
+            ntfs_source = dl_file
+        else:
+            ntfs_source = device
+
+        # ── NTFS mount ─────────────────────────────────────────────────────────
+        self._ntfs_dir = Path(tempfile.mkdtemp(prefix="fo_ntfs_"))
+        print(f"  [*] Mounting NTFS → {self._ntfs_dir}")
+        if not self._mount_ntfs(ntfs_source, self._ntfs_dir):
+            self._warn(f"Failed to mount NTFS from {ntfs_source}")
+            return None
+
+        return self._ntfs_dir
+
+    def cleanup(self) -> None:
+        """Unmount filesystems before removing the staging directory."""
+        if self._ntfs_dir and self._ntfs_dir.exists():
+            self._umount(self._ntfs_dir)
+            try:
+                self._ntfs_dir.rmdir()
+            except OSError:
+                pass
+
+        if self._dislocker_dir and self._dislocker_dir.exists():
+            self._umount(self._dislocker_dir)
+            try:
+                self._dislocker_dir.rmdir()
+            except OSError:
+                pass
+
+        super().cleanup()
+
+    # ── Artifact collection from filesystem root ──────────────────────────────
+
+    def collect_all(self) -> None:
+        root = self.unlock_and_mount()
+        if root is None:
+            self._warn("Could not access the disk — no artifacts collected")
+            return
+
+        win_dir   = root / "Windows"
+        users_dir = root / "Users"
+
+        print(f"  [+] Filesystem root: {root}")
+        print(f"      Windows dir present: {win_dir.exists()}")
+        print(f"      Users dir present  : {users_dir.exists()}")
+
+        if self._want("evtx"):      self._evtx_from(win_dir)
+        if self._want("registry"):  self._registry_from(win_dir, users_dir)
+        if self._want("prefetch"):  self._prefetch_from(win_dir)
+        if self._want("lnk"):       self._lnk_from(users_dir)
+        if self._want("browser"):   self._browser_from(users_dir)
+        if self._want("tasks"):     self._tasks_from(win_dir)
+        if self._want("mft"):       self._mft_from(root)
+        if self._want("pe"):        self._pe_from(win_dir, users_dir)
+        if self._want("documents"): self._documents_from(users_dir)
+
+    def _evtx_from(self, win_dir: Path) -> None:
+        print("  [*] Event Logs (EVTX)")
+        evtx_dir = win_dir / "System32" / "winevt" / "Logs"
+        if not evtx_dir.exists():
+            self._warn(f"EVTX directory not found: {evtx_dir}")
+            return
+        priority = [
+            "Security.evtx", "System.evtx", "Application.evtx",
+            "Microsoft-Windows-PowerShell%4Operational.evtx",
+            "Microsoft-Windows-Sysmon%4Operational.evtx",
+            "Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx",
+            "Microsoft-Windows-TaskScheduler%4Operational.evtx",
+            "Microsoft-Windows-WinRM%4Operational.evtx",
+            "Microsoft-Windows-WindowsDefender%4Operational.evtx",
+            "Microsoft-Windows-Bits-Client%4Operational.evtx",
+            "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Operational.evtx",
+        ]
+        seen: set = set()
+        for name in priority:
+            if self._add(evtx_dir / name, f"evtx/{name}"):
+                seen.add(name)
+        count = 0
+        for p in sorted(evtx_dir.glob("*.evtx")):
+            if count >= 100:
+                break
+            if p.name not in seen and self._add(p, f"evtx/{p.name}"):
+                count += 1
+
+    def _registry_from(self, win_dir: Path, users_dir: Path) -> None:
+        print("  [*] Registry Hives")
+        config_dir = win_dir / "System32" / "config"
+        for name in ["SYSTEM", "SOFTWARE", "SAM", "SECURITY"]:
+            self._add(config_dir / name, f"registry/{name}")
+        if users_dir.exists():
+            for user_dir in sorted(users_dir.iterdir()):
+                if not user_dir.is_dir():
+                    continue
+                self._add(
+                    user_dir / "NTUSER.DAT",
+                    f"registry/users/{user_dir.name}/NTUSER.DAT",
+                )
+                usrclass = (
+                    user_dir / "AppData" / "Local" / "Microsoft" / "Windows" / "UsrClass.dat"
+                )
+                self._add(
+                    usrclass,
+                    f"registry/users/{user_dir.name}/USRCLASS.DAT",
+                )
+
+    def _prefetch_from(self, win_dir: Path) -> None:
+        print("  [*] Prefetch Files")
+        pf_dir = win_dir / "Prefetch"
+        count = 0
+        for p in (sorted(pf_dir.glob("*.pf")) if pf_dir.exists() else []):
+            if count >= 500:
+                break
+            if self._add(p, f"prefetch/{p.name}"):
+                count += 1
+
+    def _lnk_from(self, users_dir: Path) -> None:
+        print("  [*] LNK / Recent Items")
+        count = 0
+        for user_dir in (sorted(users_dir.iterdir()) if users_dir.exists() else []):
+            if not user_dir.is_dir():
+                continue
+            recent = (
+                user_dir / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Recent"
+            )
+            for p in (recent.rglob("*.lnk") if recent.exists() else []):
+                if count >= 2000:
+                    break
+                if self._add(p, f"lnk/{user_dir.name}/{p.name}"):
+                    count += 1
+
+    def _browser_from(self, users_dir: Path) -> None:
+        print("  [*] Browser Artifacts")
+        PROFILES = [
+            ("chrome",  "AppData/Local/Google/Chrome/User Data/Default"),
+            ("edge",    "AppData/Local/Microsoft/Edge/User Data/Default"),
+            ("brave",   "AppData/Local/BraveSoftware/Brave-Browser/User Data/Default"),
+            ("opera",   "AppData/Roaming/Opera Software/Opera Stable"),
+            ("vivaldi", "AppData/Local/Vivaldi/User Data/Default"),
+        ]
+        DB_FILES = ["History", "Web Data", "Cookies", "Login Data", "Bookmarks"]
+
+        for user_dir in (sorted(users_dir.iterdir()) if users_dir.exists() else []):
+            if not user_dir.is_dir():
+                continue
+            for browser, rel in PROFILES:
+                profile_dir = user_dir / Path(rel.replace("/", os.sep))
+                for db in DB_FILES:
+                    self._add(
+                        profile_dir / db,
+                        f"browser/{browser}/{user_dir.name}/{db}",
+                    )
+            # Firefox
+            ff_profiles = (
+                user_dir / "AppData" / "Roaming" / "Mozilla" / "Firefox" / "Profiles"
+            )
+            if ff_profiles.exists():
+                for prof in ff_profiles.iterdir():
+                    if not prof.is_dir():
+                        continue
+                    for db in ("places.sqlite", "cookies.sqlite", "logins.json", "formhistory.sqlite"):
+                        self._add(
+                            prof / db,
+                            f"browser/firefox/{user_dir.name}/{prof.name}/{db}",
+                        )
+
+    def _tasks_from(self, win_dir: Path) -> None:
+        print("  [*] Scheduled Tasks")
+        tasks_dir = win_dir / "System32" / "Tasks"
+        count = 0
+        for p in (tasks_dir.rglob("*") if tasks_dir.exists() else []):
+            if count >= 500:
+                break
+            if p.is_file() and not p.suffix:
+                rel = p.relative_to(tasks_dir)
+                if self._add(p, f"scheduled_tasks/{rel}"):
+                    count += 1
+
+    def _mft_from(self, root: Path) -> None:
+        """Copy $MFT directly from the NTFS mount point root."""
+        print("  [*] Master File Table ($MFT)")
+        mft = root / "$MFT"
+        if mft.exists():
+            self._add(mft, "mft/C_$MFT")
+        else:
+            self._warn("$MFT not found at filesystem root (may require elevated access)")
+
+    def _pe_from(self, win_dir: Path, users_dir: Path) -> None:
+        print("  [*] PE / Executable Binaries")
+        PE_EXTS  = {".exe", ".dll", ".scr", ".bat", ".ps1", ".vbs", ".js", ".msi", ".hta"}
+        MAX_FILE = 200 * 1024 * 1024
+        MAX_FILES = 1000
+        dirs: list = [win_dir / "Temp"]
+        if users_dir.exists():
+            for ud in sorted(users_dir.iterdir()):
+                if not ud.is_dir():
+                    continue
+                for rel in [
+                    "AppData/Local/Temp", "AppData/Roaming",
+                    "Downloads", "Desktop",
+                    "AppData/Local/Microsoft/Windows/INetCache",
+                ]:
+                    dirs.append(ud / Path(rel.replace("/", os.sep)))
+        count = 0
+        total = 0
+        for d in dirs:
+            if not d.exists():
+                continue
+            for p in sorted(d.rglob("*")):
+                if count >= MAX_FILES or total >= 2 * 1024 ** 3:
+                    break
+                if not p.is_file() or p.suffix.lower() not in PE_EXTS:
+                    continue
+                sz = p.stat().st_size
+                if sz == 0 or sz > MAX_FILE:
+                    continue
+                if self._add(p, f"pe/{d.name}/{p.name}"):
+                    count += 1
+                    total += sz
+
+    def _documents_from(self, users_dir: Path) -> None:
+        print("  [*] Office Documents & PDFs")
+        DOC_EXTS = {".doc", ".docx", ".docm", ".xls", ".xlsx", ".xlsm",
+                    ".ppt", ".pptx", ".pptm", ".rtf", ".pdf", ".odt", ".ods"}
+        MAX_FILE  = 100 * 1024 * 1024
+        MAX_FILES = 500
+        count = 0
+        for ud in (sorted(users_dir.iterdir()) if users_dir.exists() else []):
+            if not ud.is_dir():
+                continue
+            for rel in ["Documents", "Downloads", "Desktop"]:
+                d = ud / rel
+                if not d.exists():
+                    continue
+                for p in sorted(d.rglob("*")):
+                    if count >= MAX_FILES:
+                        break
+                    if not p.is_file() or p.suffix.lower() not in DOC_EXTS:
+                        continue
+                    if p.stat().st_size == 0 or p.stat().st_size > MAX_FILE:
+                        continue
+                    if self._add(p, f"documents/{ud.name}/{rel}/{p.name}"):
+                        count += 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Upload helper
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1342,6 +1744,16 @@ def main() -> None:
                         help="Comma-separated artifact types (e.g. evtx,registry,prefetch)")
     parser.add_argument("--dry-run",   action="store_true")
     parser.add_argument("--verbose",   "-v", action="store_true")
+    parser.add_argument(
+        "--disk", type=str, default=None,
+        help="External disk or partition to collect from (e.g. /dev/sdb1 or /mnt/external). "
+             "Linux only. Runs as ExternalDiskCollector.",
+    )
+    parser.add_argument(
+        "--bitlocker-key", type=str, default=None, dest="bitlocker_key",
+        help="BitLocker recovery key (48-digit) or password to unlock the disk before mounting. "
+             "Example: 123456-789012-345678-901234-567890-123456-789012-345678",
+    )
     args = parser.parse_args()
 
     # Merge: EMBEDDED_CONFIG < CLI args (CLI wins)
@@ -1382,8 +1794,26 @@ def main() -> None:
     print(f"  Collect  : {', '.join(sorted(collect_set)) or '(none)'}")
     print()
 
-    if IS_WINDOWS:
-        collector: Collector = WindowsCollector(output, collect_set, args.verbose, args.dry_run)
+    disk = getattr(args, "disk", None) or cfg.get("disk", "")
+    bitlocker_key = getattr(args, "bitlocker_key", None) or cfg.get("bitlocker_key", "")
+
+    if disk:
+        # External disk mode — OS-independent path; uses dislocker-fuse on Linux
+        if not IS_LINUX:
+            print("  [!] External disk collection is only supported on Linux.", file=sys.stderr)
+            sys.exit(1)
+        # Default to Windows artifact set (minus live-only triage) when unspecified
+        if not raw_collect:
+            collect_set = ExternalDiskCollector.DEFAULT_COLLECT
+        print(f"  Disk     : {disk}")
+        if bitlocker_key:
+            print(f"  BitLocker: key provided ({len(bitlocker_key)} chars)")
+        collector: Collector = ExternalDiskCollector(
+            disk, bitlocker_key=bitlocker_key,
+            output=output, collect=collect_set, verbose=args.verbose, dry_run=args.dry_run,
+        )
+    elif IS_WINDOWS:
+        collector = WindowsCollector(output, collect_set, args.verbose, args.dry_run)
     elif IS_MACOS:
         collector = MacOSCollector(output, collect_set, args.verbose, args.dry_run)
     elif IS_LINUX:

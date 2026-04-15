@@ -1520,8 +1520,13 @@ def _parse_lnk_triage(file_path: Path) -> list[dict]:
     string_data = data.get("string_data", {}) or {}
 
     ts = header.get("creation_time") or header.get("write_time") or ""
-    if ts and not ts.endswith("Z"):
-        ts = ts.replace(" ", "T") + "Z"
+    # LnkParse3 may return datetime.datetime objects instead of strings
+    if isinstance(ts, datetime):
+        ts = ts.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+    elif ts:
+        ts = str(ts)
+        if not ts.endswith("Z"):
+            ts = ts.replace(" ", "T") + "Z"
 
     target_path = (
         link_info.get("local_base_path")
