@@ -21,7 +21,8 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
-def _push(queue: str, task_name: str, task_id: str, args: list) -> None:
+def _push(queue: str, task_name: str, task_id: str, args: list,
+          kwargs: dict | None = None) -> None:
     """
     Build a Celery v5 JSON message envelope and RPUSH it to *queue*.
 
@@ -29,9 +30,10 @@ def _push(queue: str, task_name: str, task_id: str, args: list) -> None:
     loop.  Any well-formed Celery message pushed here will be received and
     executed by the worker regardless of exchange/binding configuration.
     """
+    kw = kwargs or {}
     body_b64 = base64.b64encode(
         json.dumps(
-            [args, {}, {"callbacks": None, "errbacks": None, "chain": None, "chord": None}]
+            [args, kw, {"callbacks": None, "errbacks": None, "chain": None, "chord": None}]
         ).encode()
     ).decode()
 
@@ -57,7 +59,7 @@ def _push(queue: str, task_name: str, task_id: str, args: list) -> None:
             "origin": "api",
             "utc": True,
             "argsrepr": repr(args),
-            "kwargsrepr": "{}",
+            "kwargsrepr": repr(kw),
         },
         "properties": {
             "correlation_id": task_id,
@@ -99,3 +101,28 @@ def dispatch_module(run_id: str, case_id: str, module_id: str,
                     source_files: list, params: dict) -> None:
     _push("modules", "module.run", run_id,
           [run_id, case_id, module_id, source_files, params])
+
+
+def dispatch_harvest(
+    run_id: str,
+    case_id: str,
+    level: str,
+    categories: list,
+    minio_object_key: str | None,
+    mounted_path: str | None,
+) -> None:
+    """Dispatch a forensic harvest/triage run to the modules queue."""
+    _push(
+        "modules",
+        "harvest.run_harvest",
+        run_id,
+        [],
+        kwargs={
+            "run_id":           run_id,
+            "case_id":          case_id,
+            "level":            level,
+            "categories":       categories,
+            "minio_object_key": minio_object_key,
+            "mounted_path":     mounted_path,
+        },
+    )

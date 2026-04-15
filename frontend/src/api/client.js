@@ -277,6 +277,14 @@ export const api = {
     },
   },
 
+  harvest: {
+    listCategories: ()                         => request('GET',  '/harvest/categories'),
+    listLevels:     ()                         => request('GET',  '/harvest/levels'),
+    startRun:       (caseId, data)             => request('POST', `/cases/${caseId}/harvest`, data),
+    getRun:         (runId)                    => request('GET',  `/harvest/runs/${runId}`),
+    cancelRun:      (runId)                    => request('DELETE', `/harvest/runs/${runId}`),
+  },
+
   collector: {
     downloadUrl: ({ platform = 'py', caseId, apiUrl, collect } = {}) => {
       const params = new URLSearchParams({ platform })

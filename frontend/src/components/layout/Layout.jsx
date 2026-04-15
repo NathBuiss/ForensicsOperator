@@ -5,6 +5,7 @@ import {
   Plus, X, ChevronRight, Bell, Sun, Moon, Cpu, PackageOpen, Layers,
   Code2, BookOpen, LogOut, UserCircle, Settings2, Stars,
   Activity, Shield, Users, FlaskConical, FileCode, Loader2,
+  FolderSearch,
 } from 'lucide-react'
 import { api } from '../../api/client'
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts'
@@ -134,6 +135,12 @@ export default function Layout({ user, onLogout }) {
             isActive ? 'nav-item-active' : 'nav-item-inactive'}>
             <PackageOpen size={15} />
             Collector
+          </NavLink>
+
+          <NavLink to="/harvest" className={({ isActive }) =>
+            isActive ? 'nav-item-active' : 'nav-item-inactive'}>
+            <FolderSearch size={15} />
+            Harvest
           </NavLink>
 
           {/* ── Detection ────────────────────────────── */}

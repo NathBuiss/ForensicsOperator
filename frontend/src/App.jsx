@@ -19,6 +19,7 @@ import Performance    from './pages/Performance'
 import UserManagement from './pages/UserManagement'
 import ThreatIntel    from './pages/ThreatIntel'
 import MalwareAnalysis from './pages/MalwareAnalysis'
+import Harvest         from './pages/Harvest'
 import { UploadProvider } from './contexts/UploadContext'
 
 import { getToken, setToken, clearToken, isAuthenticated } from './api/client'
@@ -82,6 +83,7 @@ export default function App() {
             <Route path="users"                     element={<UserManagement />} />
             <Route path="cti"                       element={<ThreatIntel />} />
             <Route path="malware"                   element={<MalwareAnalysis />} />
+            <Route path="harvest"                   element={<Harvest />} />
             <Route path="settings"                  element={<Settings />} />
             <Route path="plugins" element={<Navigate to="/ingesters" replace />} />
             <Route path="*"       element={<Navigate to="/" replace />} />

@@ -21,7 +21,7 @@ from routers import (
     cases, ingest, jobs, search, plugins, health,
     saved_searches, notes, alert_rules, export, global_alert_rules,
     modules, collector, editor, llm_config, s3_integration, metrics,
-    cti, yara_rules, sigma_sync, case_files,
+    cti, yara_rules, sigma_sync, case_files, harvest,
 )
 from routers import auth as auth_router
 from auth.dependencies import get_current_user, require_admin, require_analyst_or_admin
@@ -164,6 +164,7 @@ app.include_router(editor.router,             prefix="/api/v1", dependencies=_an
 app.include_router(cti.router,               prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(yara_rules.router,        prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(case_files.router,        prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(harvest.router,           prefix="/api/v1", dependencies=_analyst_or_admin)
 
 # Protected — analyst or admin (alert rules used by analysts too)
 app.include_router(global_alert_rules.router, prefix="/api/v1", dependencies=_analyst_or_admin)
