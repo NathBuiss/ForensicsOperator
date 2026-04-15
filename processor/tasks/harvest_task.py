@@ -604,11 +604,27 @@ def _upload_and_dispatch(
     local_file: Path,
     case_id: str,
     run_id: str,
-    filename: str,
+    original_filename: str,
     harvest_category: str,
+    *,
+    minio_name: Optional[str] = None,
 ) -> Optional[str]:
-    """Upload a local file to MinIO and dispatch a child ingest job. Returns job_id."""
-    minio_key = f"cases/{case_id}/harvest_{run_id}/{harvest_category}/{filename}"
+    """
+    Upload *local_file* to MinIO and dispatch a child ingest job.
+
+    Args:
+        original_filename: Basename as the ingest task should see it.  This is
+            used by plugin_loader.get_plugin() for filename-based matching
+            (e.g. "NTUSER.DAT", "History").  Must NOT include a user prefix.
+        minio_name: Optional override for the filename component of the MinIO
+            key.  Defaults to *original_filename*.  Use this to store
+            user-specific variants without collisions, e.g. "john_NTUSER.DAT".
+
+    Returns:
+        job_id on success, None on failure.
+    """
+    key_name  = minio_name or original_filename
+    minio_key = f"cases/{case_id}/harvest_{run_id}/{harvest_category}/{key_name}"
     job_id    = str(uuid.uuid4())
 
     try:
@@ -621,7 +637,7 @@ def _upload_and_dispatch(
             "job_id":            job_id,
             "case_id":           case_id,
             "status":            "PENDING",
-            "original_filename": filename,
+            "original_filename": original_filename,
             "minio_object_key":  minio_key,
             "events_indexed":    "0",
             "error":             "",
@@ -636,13 +652,14 @@ def _upload_and_dispatch(
         })
         r.expire(f"job:{job_id}", RUN_TTL)
 
-        # Dispatch ingest
+        # Dispatch ingest — pass original_filename so the worker restores the
+        # correct local filename and plugin selection works by name.
         app.send_task("ingest.process_artifact",
-                      args=[job_id, case_id, minio_key, filename],
+                      args=[job_id, case_id, minio_key, original_filename],
                       queue="ingest")
         return job_id
     except Exception as exc:
-        logger.warning("[%s] Failed to upload/dispatch %s: %s", run_id, filename, exc)
+        logger.warning("[%s] Failed to upload/dispatch %s: %s", run_id, original_filename, exc)
         return None
 
 
@@ -660,11 +677,28 @@ def _collect_category(
     """Collect all artifacts for one category. Returns number of files dispatched."""
     dispatched = 0
 
-    def _do_file(rel_path: str, dest_name: str) -> bool:
+    def _do_file(rel_path: str, original_filename: str, *,
+                 local_name: Optional[str] = None,
+                 minio_name: Optional[str] = None) -> bool:
+        """
+        Extract *rel_path* from the filesystem, upload to MinIO, dispatch ingest.
+
+        Args:
+            original_filename: Plugin-matching filename (e.g. "NTUSER.DAT").
+            local_name: Local disk name to avoid filesystem collisions when
+                multiple users provide the same filename (e.g. "john_NTUSER.DAT").
+                Defaults to *original_filename*.
+            minio_name: MinIO key component override (e.g. "john_NTUSER.DAT").
+                Defaults to *local_name* or *original_filename*.
+        """
         nonlocal dispatched
-        local_dest = work_dir / dest_name
+        local_dest = work_dir / (local_name or original_filename)
         if fs.extract_to(rel_path, local_dest):
-            job = _upload_and_dispatch(minio, r, local_dest, case_id, run_id, dest_name, category)
+            job = _upload_and_dispatch(
+                minio, r, local_dest, case_id, run_id,
+                original_filename, category,
+                minio_name=minio_name or local_name,
+            )
             if job:
                 dispatched += 1
                 try:
@@ -676,8 +710,7 @@ def _collect_category(
 
     # 1. Specific named paths
     for path in cat_def.get("paths", []):
-        filename = Path(path).name
-        _do_file(path, filename)
+        _do_file(path, Path(path).name)
 
     # 2. Critical paths (used by eventlogs for 'small' level)
     if level == "small" and cat_def.get("critical_paths"):
@@ -693,11 +726,14 @@ def _collect_category(
         for entry in entries:
             if ext and not entry.lower().endswith(ext.lower()):
                 continue
-            rel = f"{scan_dir}/{entry}"
+            rel       = f"{scan_dir}/{entry}"
             safe_name = entry.replace(":", "_").replace("%", "_")
             _do_file(rel, safe_name)
 
     # 4. User-profile paths
+    # Critical: pass the ORIGINAL filename (without user prefix) as original_filename
+    # so that plugin_loader can match by exact name (e.g. "NTUSER.DAT", "History").
+    # Use a user-prefixed local_name / minio_name to avoid filesystem & MinIO collisions.
     user_paths = cat_def.get("user_paths", [])
     firefox    = cat_def.get("firefox", False)
     if user_paths or firefox:
@@ -707,9 +743,11 @@ def _collect_category(
         for user in users:
             # Standard user_paths
             for upath in user_paths:
-                rel = f"{users_dir}/{user}/{upath.replace('/', '/')}"
-                filename = Path(upath).name
-                _do_file(rel, f"{user}_{filename}")
+                rel           = f"{users_dir}/{user}/{upath}"
+                orig_filename = Path(upath).name          # e.g. "NTUSER.DAT"
+                scoped_name   = f"{user}_{orig_filename}" # e.g. "john_NTUSER.DAT"
+                _do_file(rel, orig_filename,
+                         local_name=scoped_name, minio_name=scoped_name)
 
             # Firefox: discover profiles dynamically
             if firefox:
@@ -718,8 +756,10 @@ def _collect_category(
                 for profile in profiles:
                     for fname in ("places.sqlite", "cookies.sqlite", "downloads.sqlite",
                                   "formhistory.sqlite", "key4.db"):
-                        rel = f"{profiles_dir}/{profile}/{fname}"
-                        _do_file(rel, f"{user}_{profile}_{fname}")
+                        rel         = f"{profiles_dir}/{profile}/{fname}"
+                        scoped_name = f"{user}_{profile}_{fname}"
+                        _do_file(rel, fname,
+                                 local_name=scoped_name, minio_name=scoped_name)
 
     return dispatched
 

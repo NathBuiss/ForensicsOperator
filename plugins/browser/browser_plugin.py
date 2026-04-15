@@ -83,20 +83,23 @@ _HANDLED_FILENAMES: list[str] = [
     "BOOKMARKS",
     "WEB DATA",
     "DOWNLOADS",
-    "FAVICONS",       # Chrome: extensionless favicon database
-    "SHORTCUTS",      # Chrome: address bar shortcut/autocomplete database
-    "TOP SITES",      # Chrome: most-visited sites database
+    "FAVICONS",          # Chrome: extensionless favicon database
+    "SHORTCUTS",         # Chrome: address bar shortcut/autocomplete database
+    "TOP SITES",         # Chrome: most-visited sites database
     "PLACES.SQLITE",
     "COOKIES.SQLITE",
     "FAVICONS.SQLITE",
     "FORMHISTORY.SQLITE",
+    "DOWNLOADS.SQLITE",  # Firefox: download history
+    "KEY4.DB",           # Firefox: password encryption keys (NSS key store)
 ]
 
 # Chromium-family filenames (no extension, title-case)
 _CHROMIUM_FILES = {"HISTORY", "COOKIES", "LOGIN DATA", "BOOKMARKS", "WEB DATA", "DOWNLOADS",
                    "FAVICONS", "SHORTCUTS", "TOP SITES"}
 # Firefox-family filenames
-_FIREFOX_FILES = {"PLACES.SQLITE", "COOKIES.SQLITE", "FAVICONS.SQLITE", "FORMHISTORY.SQLITE"}
+_FIREFOX_FILES = {"PLACES.SQLITE", "COOKIES.SQLITE", "FAVICONS.SQLITE", "FORMHISTORY.SQLITE",
+                  "DOWNLOADS.SQLITE", "KEY4.DB"}
 
 
 def _detect_browser_family(filename_upper: str) -> str:

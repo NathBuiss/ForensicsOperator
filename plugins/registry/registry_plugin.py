@@ -19,6 +19,10 @@ except ImportError:
 HIVE_FILENAMES = {
     "NTUSER.DAT", "USRCLASS.DAT", "SYSTEM", "SOFTWARE",
     "SAM", "SECURITY", "DEFAULT", "COMPONENTS",
+    # Boot Configuration Database — registry-format hive
+    "BCD",
+    # Application compatibility / execution evidence hives
+    "AMCACHE.HVE",
 }
 
 
