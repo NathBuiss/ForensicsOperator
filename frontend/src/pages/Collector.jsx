@@ -319,7 +319,7 @@ export default function Collector() {
           <div>
             <h1 className="text-lg font-bold text-brand-text">Artifact Collector</h1>
             <p className="text-xs text-gray-500">
-              Generate a pre-configured collection script — or trigger server-side harvest below
+              Generate a pre-configured collection script for live systems, mounted directories, or external drives
             </p>
           </div>
         </div>
