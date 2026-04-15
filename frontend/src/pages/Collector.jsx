@@ -9,14 +9,12 @@
  * the processor worker using pytsk3 / OS paths, uploaded to MinIO, and dispatched
  * as ingest jobs automatically — no script needs to run on the target.
  */
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import {
   Monitor, Terminal, FileCode, Download, Check,
   ChevronRight, ChevronLeft, Wifi, RefreshCw,
   PackageOpen, AlertTriangle, Globe, Loader2, Trash2,
-  Info, Copy, ExternalLink, HardDrive, FolderOpen,
-  Play, CheckCircle2, XCircle, Ban, X, ListChecks,
-  SquareStack,
+  Info, Copy, ExternalLink,
 } from 'lucide-react'
 import { api } from '../api/client'
 
@@ -73,26 +71,6 @@ const NS_ARTIFACTS = [
   { key: 'ssh',     label: 'SSH Artifacts',                desc: 'known_hosts, authorized_keys, sshd_config' },
 ]
 
-// ── Harvest level metadata ────────────────────────────────────────────────────
-
-const LEVEL_META = {
-  small: {
-    label: 'Small',
-    colour: 'text-green-700 bg-green-50 border-green-200',
-    desc:   'Core Windows artifacts — registry, event logs, prefetch, MFT, credentials.',
-  },
-  complete: {
-    label: 'Complete',
-    colour: 'text-blue-700 bg-blue-50 border-blue-200',
-    desc:   'Full forensic collection — browsers, email, cloud storage, remote access, and more.',
-  },
-  exhaustive: {
-    label: 'Exhaustive',
-    colour: 'text-purple-700 bg-purple-50 border-purple-200',
-    desc:   'Everything in Complete plus messaging apps, gaming, memory, file listings.',
-  },
-}
-
 // ── Platform definitions ──────────────────────────────────────────────────────
 
 const PLATFORMS = [
@@ -106,7 +84,7 @@ const PLATFORMS = [
     border: 'border-blue-200',
     selectedBorder: 'border-blue-500',
     selectedBg: 'bg-blue-50',
-    desc: 'Workstation or server — run as Administrator',
+    desc: 'Live system, mounted directory (--path), or external disk (--disk)',
     tip: 'Requires Python 3.8+ on target. Build a zero-dependency EXE with build.bat.',
     artifacts: WINDOWS_ARTIFACTS,
   },
@@ -185,120 +163,9 @@ const PLATFORMS = [
       (a, i, arr) => arr.findIndex(b => b.key === a.key) === i
     ),
   },
-  // ── Disk Image Harvest ───────────────────────────────────────────────────────
-  // Fundamentally different from the script platforms: instead of generating a
-  // collector script, the worker directly opens a disk image (via pytsk3) or a
-  // mounted directory, locates known Windows artifact paths by category, uploads
-  // each file to MinIO, and dispatches ingest jobs — no script runs on a target.
-  {
-    id: 'harvest',
-    mode: 'harvest',
-    label: 'Windows Disk Image',
-    group: 'Disk Image',
-    Icon: HardDrive,
-    color: 'text-amber-600',
-    bg: 'bg-amber-50',
-    border: 'border-amber-200',
-    selectedBorder: 'border-amber-500',
-    selectedBg: 'bg-amber-50',
-    desc: 'Triage a raw disk image (.dd/.raw) or mounted Windows directory on the worker',
-    tip: 'Requires pytsk3 on the processor. Artifacts are located automatically and dispatched as ingest jobs — no script needed on target.',
-    artifacts: [],
-  },
 ]
 
-const PLATFORM_GROUPS = ['Endpoint', 'Network', 'Disk Image', 'Other']
-
-// ── Small run-status card (harvest mode only) ─────────────────────────────────
-
-function HarvestRunCard({ runId, onDone }) {
-  const [run, setRun]     = useState(null)
-  const [err, setErr]     = useState(null)
-  const timerRef          = useRef(null)
-
-  const poll = useCallback(async () => {
-    try {
-      const data = await api.harvest.getRun(runId)
-      setRun(data)
-      if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(data.status)) {
-        clearInterval(timerRef.current)
-        if (onDone) onDone(data)
-      }
-    } catch (e) {
-      setErr(e.message)
-      clearInterval(timerRef.current)
-    }
-  }, [runId, onDone])
-
-  useEffect(() => {
-    poll()
-    timerRef.current = setInterval(poll, 3000)
-    return () => clearInterval(timerRef.current)
-  }, [poll])
-
-  if (err) return (
-    <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
-      Poll error: {err}
-    </div>
-  )
-  if (!run) return (
-    <div className="flex items-center gap-2 text-xs text-gray-400 px-1">
-      <Loader2 size={12} className="animate-spin" /> Loading…
-    </div>
-  )
-
-  const isLive = ['RUNNING', 'OPENING_FILESYSTEM'].includes(run.status)
-  const statusColour = {
-    PENDING:  'text-amber-600',
-    RUNNING:  'text-blue-600',
-    OPENING_FILESYSTEM: 'text-blue-600',
-    COMPLETED:'text-green-600',
-    FAILED:   'text-red-600',
-    CANCELLED:'text-gray-400',
-  }[run.status] || 'text-gray-400'
-
-  return (
-    <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
-      <div className="flex items-center gap-2 px-3 py-2.5 border-b border-gray-100 bg-gray-50">
-        {isLive
-          ? <Loader2 size={13} className="text-blue-500 animate-spin flex-shrink-0" />
-          : run.status === 'COMPLETED'
-            ? <CheckCircle2 size={13} className="text-green-500 flex-shrink-0" />
-            : run.status === 'FAILED'
-              ? <XCircle size={13} className="text-red-500 flex-shrink-0" />
-              : <Ban size={13} className="text-gray-400 flex-shrink-0" />
-        }
-        <span className="font-mono text-[10px] text-gray-400 truncate flex-1">{run.run_id}</span>
-        <span className={`text-xs font-semibold ${statusColour}`}>{run.status}</span>
-        {isLive && (
-          <button
-            onClick={() => api.harvest.cancelRun(runId).catch(() => {})}
-            className="icon-btn text-red-400 hover:text-red-600"
-            title="Cancel"
-          >
-            <X size={11} />
-          </button>
-        )}
-      </div>
-      <div className="px-3 py-2 text-xs space-y-1">
-        {run.current_category && isLive && (
-          <div className="flex items-center gap-1.5 text-blue-600">
-            <Loader2 size={10} className="animate-spin" />
-            <span className="font-mono">{run.current_category}</span>
-          </div>
-        )}
-        {run.total_dispatched != null && (
-          <p className="text-gray-500">
-            <span className="font-semibold text-brand-text">{run.total_dispatched}</span> ingest jobs dispatched
-          </p>
-        )}
-        {run.error && (
-          <p className="text-red-600">{run.error}</p>
-        )}
-      </div>
-    </div>
-  )
-}
+const PLATFORM_GROUPS = ['Endpoint', 'Network', 'Other']
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
@@ -321,23 +188,8 @@ export default function Collector() {
   const [downloading, setDownloading] = useState(false)
   const [downloaded, setDownloaded]   = useState(false)
 
-  // Harvest-mode state
-  const [harvestLevel, setHarvestLevel]               = useState('complete')
-  const [harvestCatOverrides, setHarvestCatOverrides] = useState([])
-  const [harvestSourceMode, setHarvestSourceMode]     = useState('minio')
-  const [harvestMinioKey, setHarvestMinioKey]         = useState('')
-  const [harvestMountedPath, setHarvestMountedPath]   = useState('')
-  const [harvestLevels, setHarvestLevels]             = useState({})
-  const [harvestAllCats, setHarvestAllCats]           = useState([])
-  const [harvestRuns, setHarvestRuns]                 = useState([])
-  const [harvestLoading, setHarvestLoading]           = useState(false)
-  const [harvestErr, setHarvestErr]                   = useState(null)
-  const [harvestCatFilter, setHarvestCatFilter]       = useState('')
-  const [showCatPicker, setShowCatPicker]             = useState(false)
-  const [diskImages, setDiskImages]                   = useState([])
 
   const platformDef = platIdx !== null ? PLATFORMS[platIdx] : null
-  const isHarvest   = platformDef?.mode === 'harvest'
   const artifacts   = platformDef?.artifacts || []
 
   // ── data loading ──────────────────────────────────────────────────────────
@@ -349,32 +201,15 @@ export default function Collector() {
     }).catch(() => {})
   }, [])
 
-  // Pre-select artifacts when script platform chosen
+  // Pre-select artifacts when platform chosen
   useEffect(() => {
-    if (!platformDef || isHarvest) return
+    if (!platformDef) return
     const defaults = platformDef.defaultCollect
       ? new Set(platformDef.defaultCollect)
       : new Set(platformDef.artifacts.map(a => a.key))
     setSelected(defaults)
     setStep(1)
   }, [platIdx])
-
-  // Load harvest metadata when harvest platform chosen
-  useEffect(() => {
-    if (!platformDef || !isHarvest) return
-    api.harvest.listLevels().then(r => setHarvestLevels(r.levels || {})).catch(() => {})
-    api.harvest.listCategories().then(r => setHarvestAllCats(r.categories || [])).catch(() => {})
-    setHarvestCatOverrides([])
-    setHarvestRuns([])
-  }, [platIdx])
-
-  // Load disk images for MinIO picker when case selected (harvest mode)
-  useEffect(() => {
-    if (!caseId || !isHarvest) { setDiskImages([]); return }
-    api.caseFiles.diskImages(caseId)
-      .then(r => setDiskImages(r.images || []))
-      .catch(() => setDiskImages([]))
-  }, [caseId, isHarvest])
 
   // ── script handlers ───────────────────────────────────────────────────────
   function toggleArtifact(key) {
@@ -446,7 +281,7 @@ export default function Collector() {
 
   function handleCaseSelect(id) {
     setCaseId(id)
-    if (!apiUrl && !isHarvest) detectIps()
+    if (!apiUrl) detectIps()
   }
 
   function handleDownload() {
@@ -467,61 +302,8 @@ export default function Collector() {
     setTimeout(() => { setDownloading(false); setDownloaded(true) }, 1200)
   }
 
-  // ── harvest handlers ──────────────────────────────────────────────────────
-  const activeLevelCats = harvestLevels[harvestLevel]?.categories || []
-
-  function toggleHarvestCat(name) {
-    setHarvestCatOverrides(prev =>
-      prev.includes(name) ? prev.filter(c => c !== name) : [...prev, name]
-    )
-  }
-
-  function seedAndToggleCat(name) {
-    if (harvestCatOverrides.length === 0) {
-      const seed = [...activeLevelCats]
-      if (seed.includes(name)) {
-        setHarvestCatOverrides(seed.filter(c => c !== name))
-      } else {
-        setHarvestCatOverrides([...seed, name])
-      }
-    } else {
-      toggleHarvestCat(name)
-    }
-  }
-
-  async function handleStartHarvest() {
-    if (!caseId)  { setHarvestErr('Select a case first.'); return }
-    const source = harvestSourceMode === 'minio'
-      ? harvestMinioKey.trim()
-      : harvestMountedPath.trim()
-    if (!source)  { setHarvestErr(`Provide a ${harvestSourceMode === 'minio' ? 'MinIO object key' : 'mounted path'}.`); return }
-    setHarvestErr(null)
-    setHarvestLoading(true)
-    try {
-      const res = await api.harvest.startRun(caseId, {
-        level:            harvestLevel,
-        categories:       harvestCatOverrides,
-        minio_object_key: harvestSourceMode === 'minio'    ? source : null,
-        mounted_path:     harvestSourceMode === 'mounted'  ? source : null,
-      })
-      setHarvestRuns(prev => [{ runId: res.run_id }, ...prev])
-    } catch (e) {
-      setHarvestErr(e.message)
-    } finally {
-      setHarvestLoading(false)
-    }
-  }
-
   // ── derived / display ─────────────────────────────────────────────────────
-  const stepLabels = isHarvest
-    ? ['Platform', 'Categories', 'Source & Start']
-    : ['Platform', 'Artifacts', 'Configure & Download']
-
-  const filteredAllCats = harvestAllCats.filter(c =>
-    !harvestCatFilter ||
-    c.name.includes(harvestCatFilter) ||
-    c.description.toLowerCase().includes(harvestCatFilter.toLowerCase())
-  )
+  const stepLabels = ['Platform', 'Artifacts', 'Configure & Download']
 
   // ── render ────────────────────────────────────────────────────────────────
   return (
@@ -537,7 +319,7 @@ export default function Collector() {
           <div>
             <h1 className="text-lg font-bold text-brand-text">Artifact Collector</h1>
             <p className="text-xs text-gray-500">
-              Generate a pre-configured script for live systems, or harvest a disk image directly
+              Generate a pre-configured collection script — or trigger server-side harvest below
             </p>
           </div>
         </div>
@@ -617,8 +399,8 @@ export default function Collector() {
           </div>
         )}
 
-        {/* ── Step 2: Artifacts (script) or Categories (harvest) ─────── */}
-        {step === 2 && platformDef && !isHarvest && (
+        {/* ── Step 2: Artifacts ─────────────────────────────────────── */}
+        {step === 2 && platformDef && (
           <div className="card p-5">
             <div className="flex items-center justify-between mb-4">
               <div>
@@ -675,117 +457,8 @@ export default function Collector() {
           </div>
         )}
 
-        {/* ── Step 2: Harvest — category / level picker ─────────────── */}
-        {step === 2 && isHarvest && (
-          <div className="card p-5 space-y-5">
-
-            {/* Level picker */}
-            <div>
-              <label className="section-title block mb-2">Collection level</label>
-              <div className="grid grid-cols-3 gap-3">
-                {Object.entries(LEVEL_META).map(([key, meta]) => {
-                  const count = harvestLevels[key]?.count ?? '?'
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      onClick={() => { setHarvestLevel(key); setHarvestCatOverrides([]) }}
-                      className={`rounded-xl border p-3 text-left transition-all ${
-                        harvestLevel === key
-                          ? 'border-brand-accent bg-brand-accentlight ring-1 ring-brand-accent/30'
-                          : 'border-gray-200 bg-white hover:border-gray-300'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${meta.colour}`}>
-                          {meta.label}
-                        </span>
-                        <span className="text-[10px] text-gray-400">{count} cats</span>
-                      </div>
-                      <p className="text-[11px] text-gray-500 leading-snug">{meta.desc}</p>
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-
-            {/* Category overrides */}
-            <div>
-              <div className="flex items-center gap-2 mb-2">
-                <label className="section-title">Category overrides</label>
-                <span className="text-[10px] text-gray-400 italic">
-                  {harvestCatOverrides.length === 0
-                    ? `Using all ${activeLevelCats.length} categories from "${harvestLevel}"`
-                    : `${harvestCatOverrides.length} selected (overrides level)`
-                  }
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setShowCatPicker(v => !v)}
-                  className="ml-auto text-xs text-brand-accent hover:underline flex items-center gap-1"
-                >
-                  <ListChecks size={12} />
-                  {showCatPicker ? 'Hide' : 'Customize'}
-                </button>
-                {harvestCatOverrides.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => setHarvestCatOverrides([])}
-                    className="text-xs text-red-500 hover:underline flex items-center gap-1"
-                  >
-                    <X size={11} /> Clear
-                  </button>
-                )}
-              </div>
-
-              {showCatPicker && (
-                <div className="rounded-xl border border-gray-200 overflow-hidden">
-                  <div className="px-3 py-2 border-b border-gray-100 bg-gray-50">
-                    <input
-                      value={harvestCatFilter}
-                      onChange={e => setHarvestCatFilter(e.target.value)}
-                      placeholder="Filter categories…"
-                      className="input py-1 text-xs w-full"
-                    />
-                  </div>
-                  <div className="max-h-52 overflow-y-auto divide-y divide-gray-50">
-                    {filteredAllCats.map(cat => {
-                      const inLevel    = activeLevelCats.includes(cat.name)
-                      const overridden = harvestCatOverrides.includes(cat.name)
-                      const checked    = harvestCatOverrides.length === 0 ? inLevel : overridden
-                      return (
-                        <label
-                          key={cat.name}
-                          className="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-50 transition-colors"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => seedAndToggleCat(cat.name)}
-                            className="rounded border-gray-300 text-brand-accent focus:ring-brand-accent/30"
-                          />
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-1.5">
-                              <span className="text-xs font-mono text-brand-text">{cat.name}</span>
-                              {inLevel && harvestCatOverrides.length === 0 && (
-                                <span className="badge bg-gray-100 text-gray-400 border border-gray-200 text-[9px]">in level</span>
-                              )}
-                            </div>
-                            <p className="text-[10px] text-gray-400 truncate">{cat.description}</p>
-                          </div>
-                        </label>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
-
-          </div>
-        )}
-
-        {/* ── Step 3: Configure & Download (script mode) ───────────── */}
-        {step === 3 && !isHarvest && (
+        {/* ── Step 3: Configure & Download ─────────────────────────── */}
+        {step === 3 && (
           <div className="space-y-4">
 
             {/* Summary */}
@@ -952,136 +625,6 @@ export default function Collector() {
           </div>
         )}
 
-        {/* ── Step 3: Harvest — source, case, start ────────────────── */}
-        {step === 3 && isHarvest && (
-          <div className="space-y-4">
-
-            {/* Case selector */}
-            <div className="card p-4">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Case</h3>
-              <select
-                value={caseId}
-                onChange={e => { setCaseId(e.target.value) }}
-                className="input w-full"
-                required
-              >
-                <option value="">— select a case —</option>
-                {cases.map(c => <option key={c.case_id} value={c.case_id}>{c.name}</option>)}
-              </select>
-            </div>
-
-            {/* Source */}
-            <div className="card p-4 space-y-3">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Artifact source</h3>
-
-              <div className="flex gap-3">
-                {[
-                  { id: 'minio',   label: 'MinIO disk image',  Icon: HardDrive },
-                  { id: 'mounted', label: 'Mounted directory', Icon: FolderOpen },
-                ].map(({ id, label, Icon }) => (
-                  <button
-                    key={id}
-                    type="button"
-                    onClick={() => setHarvestSourceMode(id)}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-lg border text-sm transition-all ${
-                      harvestSourceMode === id
-                        ? 'border-brand-accent bg-brand-accentlight text-brand-accent font-medium'
-                        : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300'
-                    }`}
-                  >
-                    <Icon size={14} />
-                    {label}
-                  </button>
-                ))}
-              </div>
-
-              {harvestSourceMode === 'minio' ? (
-                <div>
-                  <label className="text-xs text-gray-500 mb-1 block">
-                    MinIO object key <span className="text-gray-400">(e.g. cases/abc/disk.dd)</span>
-                  </label>
-                  {diskImages.length > 0 ? (
-                    <select
-                      value={harvestMinioKey}
-                      onChange={e => setHarvestMinioKey(e.target.value)}
-                      className="input w-full"
-                    >
-                      <option value="">— select a disk image —</option>
-                      {diskImages.map(img => (
-                        <option key={img.minio_key} value={img.minio_key}>
-                          {img.filename} ({img.minio_key})
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <input
-                      value={harvestMinioKey}
-                      onChange={e => setHarvestMinioKey(e.target.value)}
-                      placeholder="cases/<case_id>/image.dd"
-                      className="input w-full font-mono"
-                    />
-                  )}
-                  <p className="text-[10px] text-gray-400 mt-1 flex items-center gap-1">
-                    <Info size={10} />
-                    Image is downloaded by the worker and opened with pytsk3.
-                  </p>
-                </div>
-              ) : (
-                <div>
-                  <label className="text-xs text-gray-500 mb-1 block">
-                    Path on the processor worker <span className="text-gray-400">(e.g. /mnt/windows)</span>
-                  </label>
-                  <input
-                    value={harvestMountedPath}
-                    onChange={e => setHarvestMountedPath(e.target.value)}
-                    placeholder="/mnt/windows"
-                    className="input w-full font-mono"
-                  />
-                  <p className="text-[10px] text-gray-400 mt-1 flex items-center gap-1">
-                    <Info size={10} />
-                    Directory must already be mounted on the processor pod (e.g. via dislocker-fuse for BitLocker).
-                  </p>
-                </div>
-              )}
-            </div>
-
-            {/* Start button */}
-            {harvestErr && (
-              <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700 flex items-center gap-2">
-                <AlertTriangle size={14} /> {harvestErr}
-              </div>
-            )}
-
-            <button
-              onClick={handleStartHarvest}
-              disabled={harvestLoading}
-              className="btn-primary w-full justify-center h-10 gap-2"
-            >
-              {harvestLoading
-                ? <Loader2 size={14} className="animate-spin" />
-                : <Play size={14} />
-              }
-              {harvestLoading ? 'Starting…' : 'Start harvest'}
-            </button>
-
-            {/* Run cards */}
-            {harvestRuns.length > 0 && (
-              <div>
-                <div className="flex items-center gap-2 mb-2">
-                  <SquareStack size={13} className="text-gray-400" />
-                  <h3 className="text-sm font-semibold text-brand-text">Harvest runs</h3>
-                  <span className="badge bg-gray-100 text-gray-500 border border-gray-200">{harvestRuns.length}</span>
-                </div>
-                <div className="space-y-2">
-                  {harvestRuns.map(({ runId }) => (
-                    <HarvestRunCard key={runId} runId={runId} />
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
         {/* ── Navigation ────────────────────────────────────────────── */}
         <div className="flex items-center justify-between mt-6">
           <button
@@ -1101,6 +644,7 @@ export default function Collector() {
             </button>
           )}
         </div>
+
 
       </div>
     </div>

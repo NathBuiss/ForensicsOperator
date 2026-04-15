@@ -7,11 +7,13 @@ them as a timestamped ZIP archive, then optionally upload directly to a case.
 
 Usage
 -----
-  tracex-collector                                           # collect everything
-  tracex-collector --collect evtx,registry,prefetch          # selective collection
-  tracex-collector --api-url http://TRACEX/api/v1 --case-id XYZ  # upload to case
-  tracex-collector --output /tmp/evidence.zip                # custom output path
-  tracex-collector --dry-run --verbose                       # preview only
+  tracex-collector                                               # collect everything (live OS)
+  tracex-collector --collect evtx,registry,prefetch              # selective collection
+  tracex-collector --path /mnt/evidence                          # dead-box: mounted directory
+  tracex-collector --disk /dev/sdb1 --bitlocker-key 123456-...  # dead-box: raw device (Linux)
+  tracex-collector --api-url http://TRACEX/api/v1 --case-id XYZ # upload to case
+  tracex-collector --output /tmp/evidence.zip                    # custom output path
+  tracex-collector --dry-run --verbose                           # preview only
 
 Build
 -----
@@ -1745,9 +1747,15 @@ def main() -> None:
     parser.add_argument("--dry-run",   action="store_true")
     parser.add_argument("--verbose",   "-v", action="store_true")
     parser.add_argument(
+        "--path", type=str, default=None,
+        help="Path to a mounted Windows filesystem directory (e.g. /mnt/evidence or E:\\). "
+             "Collects Windows artifacts from the given root — works on any OS.",
+    )
+    parser.add_argument(
         "--disk", type=str, default=None,
-        help="External disk or partition to collect from (e.g. /dev/sdb1 or /mnt/external). "
-             "Linux only. Runs as ExternalDiskCollector.",
+        help="Raw block device or partition to mount and collect from (e.g. /dev/sdb1). "
+             "Linux only — requires ntfs-3g and optionally dislocker for BitLocker volumes. "
+             "For already-mounted directories use --path instead.",
     )
     parser.add_argument(
         "--bitlocker-key", type=str, default=None, dest="bitlocker_key",
@@ -1792,24 +1800,35 @@ def main() -> None:
     if api_url and case_id:
         print(f"  Upload   : {api_url}  →  case {case_id}")
     print(f"  Collect  : {', '.join(sorted(collect_set)) or '(none)'}")
+    if path_arg:
+        print(f"  Mode     : dead-box directory  ({path_arg})")
+    elif disk:
+        print(f"  Mode     : dead-box raw device ({disk})")
     print()
 
-    disk = getattr(args, "disk", None) or cfg.get("disk", "")
+    path_arg      = getattr(args, "path", None) or cfg.get("path", "")
+    disk          = getattr(args, "disk", None) or cfg.get("disk", "")
     bitlocker_key = getattr(args, "bitlocker_key", None) or cfg.get("bitlocker_key", "")
 
-    if disk:
-        # External disk mode — OS-independent path; uses dislocker-fuse on Linux
-        if not IS_LINUX:
-            print("  [!] External disk collection is only supported on Linux.", file=sys.stderr)
+    # --path: already-mounted Windows filesystem directory (any OS)
+    # --disk: raw block device that needs mounting (Linux only)
+    external_root = path_arg or disk or ""
+
+    if external_root:
+        ext_path = Path(external_root)
+        is_raw_device = disk and not ext_path.is_dir()
+        if is_raw_device and not IS_LINUX:
+            print("  [!] Raw block-device collection requires Linux (ntfs-3g + dislocker).", file=sys.stderr)
+            print("      If the disk is already mounted as a directory, use --path instead.", file=sys.stderr)
             sys.exit(1)
         # Default to Windows artifact set (minus live-only triage) when unspecified
         if not raw_collect:
             collect_set = ExternalDiskCollector.DEFAULT_COLLECT
-        print(f"  Disk     : {disk}")
+        print(f"  Path     : {external_root}")
         if bitlocker_key:
             print(f"  BitLocker: key provided ({len(bitlocker_key)} chars)")
         collector: Collector = ExternalDiskCollector(
-            disk, bitlocker_key=bitlocker_key,
+            external_root, bitlocker_key=bitlocker_key,
             output=output, collect=collect_set, verbose=args.verbose, dry_run=args.dry_run,
         )
     elif IS_WINDOWS:

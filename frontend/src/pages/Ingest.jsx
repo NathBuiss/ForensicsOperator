@@ -1,5 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { RefreshCw, Upload, AlertTriangle } from 'lucide-react'
+import {
+  RefreshCw, AlertTriangle,
+  FolderOpen, Play, CheckCircle2, XCircle, Ban, X, Loader2, Info,
+} from 'lucide-react'
 import { api } from '../api/client'
 import { useUpload } from '../contexts/UploadContext'
 
@@ -182,6 +185,86 @@ function JobCard({ jobId, jobData, onRetry }) {
 
 const TERMINAL = new Set(['COMPLETED', 'FAILED', 'SKIPPED'])
 
+// ── Server-side harvest run card ──────────────────────────────────────────────
+
+function HarvestRunCard({ runId }) {
+  const [run, setRun] = useState(null)
+  const timerRef      = useRef(null)
+
+  const poll = useCallback(async () => {
+    try {
+      const data = await api.harvest.getRun(runId)
+      setRun(data)
+      if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(data.status)) {
+        clearInterval(timerRef.current)
+      }
+    } catch {
+      clearInterval(timerRef.current)
+    }
+  }, [runId])
+
+  useEffect(() => {
+    poll()
+    timerRef.current = setInterval(poll, 3000)
+    return () => clearInterval(timerRef.current)
+  }, [poll])
+
+  if (!run) return (
+    <div className="flex items-center gap-1.5 text-xs text-gray-400">
+      <Loader2 size={11} className="animate-spin" /> Loading…
+    </div>
+  )
+
+  const isLive = ['RUNNING', 'OPENING_FILESYSTEM', 'PENDING'].includes(run.status)
+  const statusColour = {
+    PENDING:            'text-amber-600',
+    RUNNING:            'text-blue-600',
+    OPENING_FILESYSTEM: 'text-blue-600',
+    COMPLETED:          'text-green-600',
+    FAILED:             'text-red-600',
+    CANCELLED:          'text-gray-400',
+  }[run.status] || 'text-gray-400'
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-gray-50 overflow-hidden text-xs">
+      <div className="flex items-center gap-2 px-3 py-2">
+        {run.status === 'COMPLETED'
+          ? <CheckCircle2 size={12} className="text-green-500 flex-shrink-0" />
+          : run.status === 'FAILED'
+          ? <XCircle     size={12} className="text-red-500 flex-shrink-0" />
+          : run.status === 'CANCELLED'
+          ? <Ban         size={12} className="text-gray-400 flex-shrink-0" />
+          : <Loader2     size={12} className="text-blue-500 animate-spin flex-shrink-0" />
+        }
+        <span className="font-mono text-[10px] text-gray-400 truncate flex-1">{run.run_id}</span>
+        <span className={`font-semibold ${statusColour}`}>{run.status}</span>
+        {isLive && (
+          <button
+            onClick={() => api.harvest.cancelRun(runId).catch(() => {})}
+            className="icon-btn text-red-400 hover:text-red-600" title="Cancel"
+          >
+            <X size={10} />
+          </button>
+        )}
+      </div>
+      {(run.current_category || run.total_dispatched != null || run.error) && (
+        <div className="px-3 pb-2 space-y-0.5 text-gray-500">
+          {run.current_category && isLive && (
+            <div className="flex items-center gap-1 text-blue-600">
+              <Loader2 size={9} className="animate-spin" />
+              <span className="font-mono">{run.current_category}</span>
+            </div>
+          )}
+          {run.total_dispatched != null && (
+            <p><span className="font-semibold text-brand-text">{run.total_dispatched}</span> ingest jobs dispatched</p>
+          )}
+          {run.error && <p className="text-red-600">{run.error}</p>}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Ingest({ caseId, onComplete }) {
   const [dragging, setDragging]         = useState(false)
   const [uploading, setUploading]       = useState(false)
@@ -195,6 +278,32 @@ export default function Ingest({ caseId, onComplete }) {
   const jobsRef    = useRef([])          // mirror of jobs — readable inside setInterval
   const statusesRef = useRef({})         // mirror of jobStatuses — readable inside setInterval
   const { startUpload, updateUpload, finishUpload } = useUpload()
+
+  // ── Server-side harvest state ─────────────────────────────────────────────
+  const [harvestPath, setHarvestPath]       = useState('')
+  const [harvestLevel, setHarvestLevel]     = useState('complete')
+  const [harvestRuns, setHarvestRuns]       = useState([])
+  const [harvestLoading, setHarvestLoading] = useState(false)
+  const [harvestErr, setHarvestErr]         = useState(null)
+
+  async function handleStartHarvest() {
+    const path = harvestPath.trim()
+    if (!path) { setHarvestErr('Enter a mounted path.'); return }
+    setHarvestErr(null)
+    setHarvestLoading(true)
+    try {
+      const res = await api.harvest.startRun(caseId, {
+        level:        harvestLevel,
+        categories:   [],
+        mounted_path: path,
+      })
+      setHarvestRuns(prev => [res.run_id, ...prev])
+    } catch (e) {
+      setHarvestErr(e.message)
+    } finally {
+      setHarvestLoading(false)
+    }
+  }
 
   // Keep refs in sync with state so the central poller can read current values
   useEffect(() => { jobsRef.current = jobs }, [jobs])
@@ -423,6 +532,82 @@ export default function Ingest({ caseId, onComplete }) {
           className="hidden"
           onChange={e => handleFiles([...e.target.files])}
         />
+      </div>
+
+      {/* ── Server-side harvest ───────────────────────────────────────── */}
+      <div className="mt-5 pt-5 border-t border-gray-100">
+        <div className="flex items-center gap-2 mb-2">
+          <FolderOpen size={13} className="text-amber-500" />
+          <span className="text-xs font-semibold text-brand-text">Server-side Harvest</span>
+          <span className="badge bg-amber-50 text-amber-700 border border-amber-200 text-[10px]">server</span>
+        </div>
+        <p className="text-[11px] text-gray-400 mb-3">
+          Collect Windows artifacts from a drive already mounted on the TraceX server
+          (e.g. via dislocker-fuse or ntfs-3g). Artifacts are ingested directly into this case.
+        </p>
+
+        <div className="flex flex-col gap-2">
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={harvestPath}
+              onChange={e => setHarvestPath(e.target.value)}
+              placeholder="/mnt/evidence"
+              className="input flex-1 font-mono text-xs"
+            />
+            <div className="flex gap-1">
+              {[
+                { id: 'small',      label: 'S', title: 'Small',      colour: 'border-green-400  text-green-700  bg-green-50'  },
+                { id: 'complete',   label: 'C', title: 'Complete',   colour: 'border-blue-400   text-blue-700   bg-blue-50'   },
+                { id: 'exhaustive', label: 'E', title: 'Exhaustive', colour: 'border-purple-400 text-purple-700 bg-purple-50' },
+              ].map(({ id, label, title, colour }) => (
+                <button
+                  key={id}
+                  type="button"
+                  title={title}
+                  onClick={() => setHarvestLevel(id)}
+                  className={`w-7 h-8 text-xs font-semibold rounded-lg border transition-all ${
+                    harvestLevel === id ? colour : 'border-gray-200 bg-white text-gray-400 hover:border-gray-300'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={handleStartHarvest}
+              disabled={harvestLoading}
+              className="btn-primary gap-1 text-xs px-3"
+            >
+              {harvestLoading
+                ? <Loader2 size={12} className="animate-spin" />
+                : <Play size={12} />
+              }
+              Start
+            </button>
+          </div>
+
+          <p className="text-[10px] text-gray-400 flex items-center gap-1">
+            <Info size={10} />
+            Level: <strong className="text-gray-500">S</strong>=Small (core artifacts),{' '}
+            <strong className="text-gray-500">C</strong>=Complete,{' '}
+            <strong className="text-gray-500">E</strong>=Exhaustive (all categories)
+          </p>
+
+          {harvestErr && (
+            <p className="text-xs text-red-600 flex items-center gap-1">
+              <AlertTriangle size={11} /> {harvestErr}
+            </p>
+          )}
+        </div>
+
+        {harvestRuns.length > 0 && (
+          <div className="mt-3 space-y-1.5">
+            {harvestRuns.map(runId => (
+              <HarvestRunCard key={runId} runId={runId} />
+            ))}
+          </div>
+        )}
       </div>
 
       {error && (

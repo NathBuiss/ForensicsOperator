@@ -27,7 +27,7 @@ const CATEGORY_ICONS = {
 function ModuleCard({ mod, onEdit }) {
   const [open, setOpen] = useState(false)
 
-  const acceptsAll = mod.input_extensions.length === 0 && (mod.input_filenames || []).length === 0
+  const acceptsAll = (mod.input_extensions || []).length === 0 && (mod.input_filenames || []).length === 0
   const allTags    = [...(mod.input_extensions || []), ...(mod.input_filenames || [])]
 
   return (
