@@ -65,8 +65,8 @@ RUN wget -q -O /tmp/de4dot.zip \
 # ── Plaso (log2timeline/psort) — required for .plaso file parsing ────────────
 RUN apt-get update && apt-get install -y --no-install-recommends plaso-tools
 
-# ── Python venv for additional packages ──────────────────────────────────────
-RUN python3 -m venv /opt/venv
+# ── Python venv for additional packages (with system site-packages) ──────────
+RUN python3 -m venv --system-site-packages /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # ── Python deps (includes pyhindsight for the Hindsight module) ───────────────
