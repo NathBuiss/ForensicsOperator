@@ -1,13 +1,9 @@
 /**
- * Collector page — artifact collection wizard.
+ * Collector page — artifact collection script wizard.
  *
- * Two modes:
- *   Script   — generate a pre-configured Python script (Windows / Linux / macOS)
- *   Harvest  — server-side triage of a raw disk image or mounted directory
- *
- * The Harvest mode bypasses the download step entirely: artifacts are located by
- * the processor worker using pytsk3 / OS paths, uploaded to MinIO, and dispatched
- * as ingest jobs automatically — no script needs to run on the target.
+ * Generates a pre-configured Python script for live systems,
+ * mounted directories (--path), or external drives (--disk).
+ * Server-side harvest is available inside the ingestion panel of each case.
  */
 import { useState, useEffect } from 'react'
 import {

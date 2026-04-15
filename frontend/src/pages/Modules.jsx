@@ -4,7 +4,7 @@ import {
   Cpu, CheckCircle, XCircle, ChevronDown,
   Code2, AlertCircle, Search as SearchIcon, X, BookOpen,
   Shield, Monitor, HardDrive, Globe, Brain,
-  Binary, Bug, Network, FileImage, TextSearch, Tag,
+  Binary, Bug, Network, FileImage, TextSearch, Tag, ArrowRight,
 } from 'lucide-react'
 import { api } from '../api/client'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
