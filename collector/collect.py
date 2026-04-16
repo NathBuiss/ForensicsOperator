@@ -65,16 +65,63 @@ DEFAULT_MACOS   = {"logs", "history", "config", "launchagents", "browser", "plis
 
 # Human-readable names (used in the header printout)
 ARTIFACT_LABELS = {
-    "evtx":         "Event Logs (EVTX)",
-    "registry":     "Registry Hives",
-    "prefetch":     "Prefetch Files",
-    "lnk":          "LNK / Recent Items",
-    "browser":      "Browser Artifacts",
-    "tasks":        "Scheduled Tasks",
-    "mft":          "Master File Table ($MFT)",
-    "pe":           "PE / Executable Binaries",
-    "documents":    "Office Documents & PDFs",
-    "triage":       "System Triage (live)",
+    # ── Live Windows ──────────────────────────────────────────────────────────
+    "evtx":              "Event Logs (EVTX)",
+    "registry":          "Registry Hives",
+    "prefetch":          "Prefetch Files",
+    "lnk":               "LNK / Recent Items",
+    "browser":           "Browser Artifacts (all)",
+    "tasks":             "Scheduled Tasks",
+    "mft":               "Master File Table ($MFT)",
+    "pe":                "PE / Executable Binaries",
+    "documents":         "Office Documents & PDFs",
+    "triage":            "System Triage (live)",
+    # ── Dead-box / ForensicHarvester categories ───────────────────────────────
+    "execution":         "Execution Evidence (SRUM, Amcache, Prefetch)",
+    "persistence":       "Persistence (Tasks, WMI)",
+    "network_cfg":       "Network Config (Hosts, WLAN, Firewall)",
+    "usb_devices":       "USB Device History",
+    "credentials":       "Credentials (DPAPI, Credential Manager)",
+    "antivirus":         "Antivirus / Windows Defender",
+    "wer_crashes":       "WER Crash Dumps & Reports",
+    "filesystem":        "NTFS Metadata ($MFT, $LogFile, $Boot)",
+    "browser_chrome":    "Chrome Browser Artifacts",
+    "browser_firefox":   "Firefox Browser Artifacts",
+    "browser_edge":      "Edge Browser Artifacts",
+    "browser_ie":        "Internet Explorer WebCache",
+    "email_outlook":     "Outlook Email (.pst / .ost)",
+    "email_thunderbird":  "Thunderbird Email",
+    "teams":             "Microsoft Teams",
+    "slack":             "Slack",
+    "discord":           "Discord",
+    "signal":            "Signal Desktop",
+    "whatsapp":          "WhatsApp Desktop",
+    "telegram":          "Telegram Desktop",
+    "cloud_onedrive":    "OneDrive Sync Artifacts",
+    "cloud_google_drive":"Google Drive Sync Artifacts",
+    "cloud_dropbox":     "Dropbox Sync Artifacts",
+    "remote_access":     "Remote Access (AnyDesk, TeamViewer)",
+    "rdp":               "RDP / Terminal Services",
+    "ssh_ftp":           "SSH / FTP Clients (PuTTY, WinSCP)",
+    "office":            "Office MRU / Trusted Documents",
+    "iis_web":           "IIS Web Server Logs",
+    "active_directory":  "Active Directory (NTDS.dit, SYSVOL)",
+    "dev_tools":         "Dev Tools (.gitconfig, PS history, .aws)",
+    "password_managers": "Password Managers (KeePass)",
+    "vpn":               "VPN Config (OpenVPN, WireGuard)",
+    "encryption":        "Encryption Metadata (BitLocker / EFS)",
+    "boot_uefi":         "Boot Config (BCD, EFI)",
+    "win_logs":          "Windows Logs (CBS, DISM, WU)",
+    "memory_artifacts":  "Memory Artifacts (pagefile, hiberfil)",
+    "etw_diagnostics":   "ETW Diagnostic Traces",
+    "windows_apps":      "Windows UWP / Modern Apps",
+    "wsl":               "WSL Filesystem & Config",
+    "virtualization":    "Virtualization (Hyper-V, Docker)",
+    "recovery":          "Recovery (VSS, Windows.old)",
+    "database_clients":  "Database Clients (SSMS, DBeaver)",
+    "gaming":            "Gaming Platforms (Steam, Epic)",
+    "printing":          "Print Spool Files",
+    # ── Linux / macOS ────────────────────────────────────────────────────────
     "logs":         "System Logs",
     "history":      "Shell Histories",
     "config":       "System Configuration",
@@ -1308,7 +1355,13 @@ class ExternalDiskCollector(Collector):
       apt-get install dislocker ntfs-3g
     """
 
-    DEFAULT_COLLECT = {"evtx", "registry", "prefetch", "lnk", "browser", "tasks", "mft"}
+    # Mirrors harvest_task LEVEL_CATEGORIES["small"] — safe defaults for dead-box triage.
+    # Heavy categories (memory_artifacts, pe, documents, printing) are opt-in only.
+    DEFAULT_COLLECT = {
+        "evtx", "registry", "prefetch", "mft",
+        "execution", "persistence", "network_cfg",
+        "usb_devices", "credentials", "antivirus", "wer_crashes", "win_logs",
+    }
 
     def __init__(self, disk: str, bitlocker_key: str = "", **kwargs):
         super().__init__(**kwargs)
@@ -1483,15 +1536,69 @@ class ExternalDiskCollector(Collector):
         print(f"      Windows dir present: {win_dir.exists()}")
         print(f"      Users dir present  : {users_dir.exists()}")
 
-        if self._want("evtx"):      self._evtx_from(win_dir)
-        if self._want("registry"):  self._registry_from(win_dir, users_dir)
-        if self._want("prefetch"):  self._prefetch_from(win_dir)
-        if self._want("lnk"):       self._lnk_from(users_dir)
-        if self._want("browser"):   self._browser_from(users_dir)
-        if self._want("tasks"):     self._tasks_from(win_dir)
-        if self._want("mft"):       self._mft_from(root)
-        if self._want("pe"):        self._pe_from(win_dir, users_dir)
-        if self._want("documents"): self._documents_from(users_dir)
+        # ── Core ─────────────────────────────────────────────────────────────
+        if self._want("evtx"):             self._evtx_from(win_dir)
+        if self._want("registry"):         self._registry_from(win_dir, users_dir)
+        if self._want("prefetch"):         self._prefetch_from(win_dir)
+        if self._want("mft"):              self._mft_from(root)
+        if self._want("execution"):        self._execution_from(win_dir)
+        if self._want("persistence"):      self._persistence_from(win_dir)
+        if self._want("filesystem"):       self._filesystem_from(root)
+        # ── Network & USB ────────────────────────────────────────────────────
+        if self._want("network_cfg"):      self._network_cfg_from(root, win_dir)
+        if self._want("usb_devices"):      self._usb_devices_from(win_dir)
+        # ── Credentials & Security ───────────────────────────────────────────
+        if self._want("credentials"):      self._credentials_from(win_dir, users_dir)
+        if self._want("antivirus"):        self._antivirus_from(root)
+        if self._want("wer_crashes"):      self._wer_crashes_from(root)
+        if self._want("win_logs"):         self._win_logs_from(win_dir)
+        if self._want("boot_uefi"):        self._boot_uefi_from(win_dir)
+        if self._want("encryption"):       self._encryption_from(win_dir)
+        if self._want("etw_diagnostics"):  self._etw_diagnostics_from(win_dir)
+        # ── Browsers ─────────────────────────────────────────────────────────
+        if self._want("browser"):          self._browser_from(users_dir)
+        if self._want("browser_chrome"):   self._browser_chrome_from(users_dir)
+        if self._want("browser_edge"):     self._browser_edge_from(users_dir)
+        if self._want("browser_ie"):       self._browser_ie_from(users_dir)
+        # ── Email ────────────────────────────────────────────────────────────
+        if self._want("email_outlook"):    self._email_outlook_from(users_dir)
+        if self._want("email_thunderbird"):self._email_thunderbird_from(users_dir)
+        # ── Messaging ────────────────────────────────────────────────────────
+        if self._want("teams"):            self._teams_from(users_dir)
+        if self._want("slack"):            self._slack_from(users_dir)
+        if self._want("discord"):          self._discord_from(users_dir)
+        if self._want("signal"):           self._signal_from(users_dir)
+        if self._want("whatsapp"):         self._whatsapp_from(users_dir)
+        if self._want("telegram"):         self._telegram_from(users_dir)
+        # ── Cloud ────────────────────────────────────────────────────────────
+        if self._want("cloud_onedrive"):   self._cloud_onedrive_from(users_dir)
+        if self._want("cloud_google_drive"):self._cloud_google_drive_from(users_dir)
+        if self._want("cloud_dropbox"):    self._cloud_dropbox_from(users_dir)
+        # ── Remote access ────────────────────────────────────────────────────
+        if self._want("remote_access"):    self._remote_access_from(root, users_dir)
+        if self._want("rdp"):              self._rdp_from(users_dir)
+        if self._want("ssh_ftp"):          self._ssh_ftp_from(users_dir)
+        # ── Apps & user data ─────────────────────────────────────────────────
+        if self._want("lnk"):              self._lnk_from(users_dir)
+        if self._want("tasks"):            self._tasks_from(win_dir)
+        if self._want("office"):           self._office_from(users_dir)
+        if self._want("dev_tools"):        self._dev_tools_from(users_dir)
+        if self._want("password_managers"):self._password_managers_from(users_dir)
+        if self._want("database_clients"): self._database_clients_from(users_dir)
+        if self._want("gaming"):           self._gaming_from(root, users_dir)
+        if self._want("windows_apps"):     self._windows_apps_from(users_dir)
+        if self._want("wsl"):              self._wsl_from(users_dir)
+        # ── Infrastructure ───────────────────────────────────────────────────
+        if self._want("vpn"):              self._vpn_from(root)
+        if self._want("iis_web"):          self._iis_web_from(root)
+        if self._want("active_directory"): self._active_directory_from(win_dir)
+        if self._want("virtualization"):   self._virtualization_from(root)
+        if self._want("recovery"):         self._recovery_from(root)
+        if self._want("printing"):         self._printing_from(win_dir)
+        # ── Heavy / opt-in ───────────────────────────────────────────────────
+        if self._want("pe"):               self._pe_from(win_dir, users_dir)
+        if self._want("documents"):        self._documents_from(users_dir)
+        if self._want("memory_artifacts"): self._memory_artifacts_from(root)
 
     def _evtx_from(self, win_dir: Path) -> None:
         print("  [*] Event Logs (EVTX)")
@@ -1679,6 +1786,458 @@ class ExternalDiskCollector(Collector):
                         continue
                     if self._add(p, f"documents/{ud.name}/{rel}/{p.name}"):
                         count += 1
+
+    # ── ForensicHarvester category methods ────────────────────────────────────
+
+    _USER_SKIP = {"Default", "Default User", "Public", "All Users"}
+
+    def _iter_users(self, users_dir: Path):
+        """Yield user subdirectories, skipping built-in system accounts."""
+        if not users_dir.exists():
+            return
+        for d in sorted(users_dir.iterdir()):
+            if d.is_dir() and d.name not in self._USER_SKIP:
+                yield d
+
+    def _execution_from(self, win_dir: Path) -> None:
+        print("  [*] Execution Evidence (SRUM, Amcache, Prefetch)")
+        self._add(win_dir / "System32" / "sru" / "SRUDB.dat",    "execution/SRUDB.dat")
+        self._add(win_dir / "AppCompat" / "Programs" / "Amcache.hve", "execution/Amcache.hve")
+        self._add(win_dir / "System32" / "Amcache.hve",           "execution/Amcache.hve")
+        pf = win_dir / "Prefetch"
+        count = 0
+        for p in (sorted(pf.glob("*.pf")) if pf.exists() else []):
+            if count >= 500:
+                break
+            if self._add(p, f"execution/prefetch/{p.name}"):
+                count += 1
+
+    def _persistence_from(self, win_dir: Path) -> None:
+        print("  [*] Persistence (Tasks, WMI)")
+        for tasks_dir in [win_dir / "System32" / "Tasks", win_dir / "SysWOW64" / "Tasks"]:
+            count = 0
+            for p in (tasks_dir.rglob("*") if tasks_dir.exists() else []):
+                if count >= 500:
+                    break
+                if p.is_file() and not p.suffix:
+                    rel = p.relative_to(tasks_dir)
+                    if self._add(p, f"persistence/tasks/{tasks_dir.name}/{rel}"):
+                        count += 1
+        wmi_repo = win_dir / "System32" / "wbem" / "Repository"
+        self._add(wmi_repo / "OBJECTS.DATA", "persistence/wmi/OBJECTS.DATA")
+        self._add(wmi_repo / "INDEX.BTR",    "persistence/wmi/INDEX.BTR")
+
+    def _network_cfg_from(self, root: Path, win_dir: Path) -> None:
+        print("  [*] Network Config (Hosts, WLAN, Firewall)")
+        self._add(win_dir / "System32" / "drivers" / "etc" / "hosts",
+                  "network_cfg/hosts")
+        self._add(win_dir / "System32" / "LogFiles" / "Firewall" / "pfirewall.log",
+                  "network_cfg/pfirewall.log")
+        wlan = root / "ProgramData" / "Microsoft" / "Wlansvc" / "Profiles" / "Interfaces"
+        if wlan.exists():
+            for p in wlan.rglob("*.xml"):
+                self._add(p, f"network_cfg/wlan/{p.parent.name}/{p.name}")
+
+    def _usb_devices_from(self, win_dir: Path) -> None:
+        print("  [*] USB Device History")
+        inf = win_dir / "INF"
+        self._add(inf / "setupapi.dev.log",   "usb_devices/setupapi.dev.log")
+        self._add(inf / "setupapi.setup.log",  "usb_devices/setupapi.setup.log")
+
+    def _credentials_from(self, win_dir: Path, users_dir: Path) -> None:
+        print("  [*] Credentials (DPAPI, Credential Manager)")
+        cfg = win_dir / "System32" / "config"
+        self._add(cfg / "SAM",      "credentials/SAM")
+        self._add(cfg / "SECURITY", "credentials/SECURITY")
+        for ud in self._iter_users(users_dir):
+            for rel in ["AppData/Local/Microsoft/Credentials",
+                        "AppData/Roaming/Microsoft/Credentials",
+                        "AppData/Local/Microsoft/Protect"]:
+                d = ud / Path(rel.replace("/", os.sep))
+                if d.exists():
+                    for p in d.rglob("*"):
+                        if p.is_file():
+                            self._add(p, f"credentials/{ud.name}/{rel.split('/')[-1]}/{p.name}")
+
+    def _antivirus_from(self, root: Path) -> None:
+        print("  [*] Antivirus / Windows Defender")
+        base = root / "ProgramData" / "Microsoft" / "Windows Defender"
+        for sub in ["Quarantine", "Support"]:
+            d = base / sub
+            if d.exists():
+                for p in d.rglob("*"):
+                    if p.is_file():
+                        self._add(p, f"antivirus/{sub}/{p.name}")
+
+    def _wer_crashes_from(self, root: Path) -> None:
+        print("  [*] WER Crash Dumps & Reports")
+        base = root / "ProgramData" / "Microsoft" / "Windows" / "WER"
+        count = 0
+        for sub in ["ReportQueue", "ReportArchive"]:
+            d = base / sub
+            for p in (d.rglob("*") if d.exists() else []):
+                if count >= 200:
+                    break
+                if p.is_file():
+                    if self._add(p, f"wer_crashes/{sub}/{p.name}"):
+                        count += 1
+
+    def _win_logs_from(self, win_dir: Path) -> None:
+        print("  [*] Windows Logs (CBS, DISM, WU)")
+        self._add(win_dir / "Logs" / "CBS" / "CBS.log",   "win_logs/CBS.log")
+        self._add(win_dir / "Logs" / "DISM" / "dism.log", "win_logs/dism.log")
+        self._add(win_dir / "WindowsUpdate.log",           "win_logs/WindowsUpdate.log")
+        panther = win_dir / "Panther"
+        if panther.exists():
+            for p in panther.glob("*.log"):
+                self._add(p, f"win_logs/panther/{p.name}")
+
+    def _filesystem_from(self, root: Path) -> None:
+        print("  [*] NTFS Metadata ($MFT, $LogFile, $Boot)")
+        for name in ["$MFT", "$LogFile", "$Boot"]:
+            self._add(root / name, f"filesystem/{name}")
+
+    def _boot_uefi_from(self, win_dir: Path) -> None:
+        print("  [*] Boot Config (BCD, EFI)")
+        cfg = win_dir / "System32" / "config"
+        self._add(cfg / "BCD",              "boot_uefi/BCD")
+        self._add(win_dir / "bootstat.dat", "boot_uefi/bootstat.dat")
+
+    def _encryption_from(self, win_dir: Path) -> None:
+        print("  [*] Encryption Metadata (BitLocker / EFS)")
+        self._add(win_dir / "System32" / "FVE" / "BDE-Recovery.txt",
+                  "encryption/BDE-Recovery.txt")
+
+    def _etw_diagnostics_from(self, win_dir: Path) -> None:
+        print("  [*] ETW Diagnostic Traces")
+        d = win_dir / "System32" / "LogFiles" / "WMI"
+        count = 0
+        for p in (d.glob("*.etl") if d.exists() else []):
+            if count >= 50:
+                break
+            if self._add(p, f"etw_diagnostics/{p.name}"):
+                count += 1
+
+    def _browser_chrome_from(self, users_dir: Path) -> None:
+        print("  [*] Chrome Browser Artifacts")
+        FILES = ["History", "Cookies", "Web Data", "Login Data", "Bookmarks"]
+        for ud in self._iter_users(users_dir):
+            profile = ud / "AppData" / "Local" / "Google" / "Chrome" / "User Data" / "Default"
+            for f in FILES:
+                self._add(profile / f, f"browser_chrome/{ud.name}/{f}")
+
+    def _browser_edge_from(self, users_dir: Path) -> None:
+        print("  [*] Edge Browser Artifacts")
+        FILES = ["History", "Cookies", "Web Data", "Login Data"]
+        for ud in self._iter_users(users_dir):
+            profile = ud / "AppData" / "Local" / "Microsoft" / "Edge" / "User Data" / "Default"
+            for f in FILES:
+                self._add(profile / f, f"browser_edge/{ud.name}/{f}")
+
+    def _browser_ie_from(self, users_dir: Path) -> None:
+        print("  [*] Internet Explorer WebCache")
+        FILES = ["WebCacheV01.dat", "WebCacheV24.dat"]
+        for ud in self._iter_users(users_dir):
+            wc = ud / "AppData" / "Local" / "Microsoft" / "Windows" / "WebCache"
+            for f in FILES:
+                self._add(wc / f, f"browser_ie/{ud.name}/{f}")
+
+    def _email_outlook_from(self, users_dir: Path) -> None:
+        print("  [*] Outlook Email (.pst / .ost)")
+        count = 0
+        for ud in self._iter_users(users_dir):
+            for rel in ["Documents/Outlook Files",
+                        "AppData/Local/Microsoft/Outlook"]:
+                d = ud / Path(rel.replace("/", os.sep))
+                for p in (d.rglob("*.pst") if d.exists() else []):
+                    if self._add(p, f"email_outlook/{ud.name}/{p.name}"):
+                        count += 1
+                for p in (d.rglob("*.ost") if d.exists() else []):
+                    if self._add(p, f"email_outlook/{ud.name}/{p.name}"):
+                        count += 1
+
+    def _email_thunderbird_from(self, users_dir: Path) -> None:
+        print("  [*] Thunderbird Email")
+        for ud in self._iter_users(users_dir):
+            tb = ud / "AppData" / "Roaming" / "Thunderbird" / "Profiles"
+            if tb.exists():
+                for prof in tb.iterdir():
+                    if prof.is_dir():
+                        for p in prof.rglob("*.sqlite"):
+                            self._add(p, f"email_thunderbird/{ud.name}/{prof.name}/{p.name}")
+                        for p in prof.rglob("*.msf"):
+                            self._add(p, f"email_thunderbird/{ud.name}/{prof.name}/{p.name}")
+
+    def _teams_from(self, users_dir: Path) -> None:
+        print("  [*] Microsoft Teams")
+        PATHS = ["AppData/Roaming/Microsoft/Teams/logs.txt",
+                 "AppData/Roaming/Microsoft/Teams/IndexedDB",
+                 "AppData/Roaming/Microsoft/Teams/Local Storage"]
+        for ud in self._iter_users(users_dir):
+            for rel in PATHS:
+                p = ud / Path(rel.replace("/", os.sep))
+                if p.is_file():
+                    self._add(p, f"teams/{ud.name}/{p.name}")
+                elif p.is_dir():
+                    for f in p.rglob("*"):
+                        if f.is_file():
+                            self._add(f, f"teams/{ud.name}/{p.name}/{f.name}")
+
+    def _slack_from(self, users_dir: Path) -> None:
+        print("  [*] Slack")
+        for ud in self._iter_users(users_dir):
+            d = ud / "AppData" / "Roaming" / "Slack" / "logs"
+            if d.exists():
+                for p in d.rglob("*.log"):
+                    self._add(p, f"slack/{ud.name}/{p.name}")
+
+    def _discord_from(self, users_dir: Path) -> None:
+        print("  [*] Discord")
+        for ud in self._iter_users(users_dir):
+            d = ud / "AppData" / "Roaming" / "discord" / "Local Storage"
+            if d.exists():
+                for p in d.rglob("*"):
+                    if p.is_file():
+                        self._add(p, f"discord/{ud.name}/{p.name}")
+
+    def _signal_from(self, users_dir: Path) -> None:
+        print("  [*] Signal Desktop")
+        for ud in self._iter_users(users_dir):
+            db = ud / "AppData" / "Roaming" / "Signal" / "databases" / "db.sqlite"
+            self._add(db, f"signal/{ud.name}/db.sqlite")
+
+    def _whatsapp_from(self, users_dir: Path) -> None:
+        print("  [*] WhatsApp Desktop")
+        for ud in self._iter_users(users_dir):
+            base = ud / "AppData" / "Local" / "Packages"
+            if base.exists():
+                for pkg in base.iterdir():
+                    if pkg.is_dir() and "WhatsApp" in pkg.name:
+                        for p in pkg.rglob("*.db"):
+                            self._add(p, f"whatsapp/{ud.name}/{p.name}")
+
+    def _telegram_from(self, users_dir: Path) -> None:
+        print("  [*] Telegram Desktop")
+        for ud in self._iter_users(users_dir):
+            tdata = ud / "AppData" / "Roaming" / "Telegram Desktop" / "tdata"
+            if tdata.exists():
+                for p in tdata.iterdir():
+                    if p.is_file() and p.suffix not in {".db"}:
+                        self._add(p, f"telegram/{ud.name}/{p.name}")
+
+    def _cloud_onedrive_from(self, users_dir: Path) -> None:
+        print("  [*] OneDrive Sync Artifacts")
+        for ud in self._iter_users(users_dir):
+            d = ud / "AppData" / "Local" / "Microsoft" / "OneDrive"
+            if d.exists():
+                for p in d.rglob("*.db"):
+                    self._add(p, f"cloud_onedrive/{ud.name}/{p.name}")
+                for p in d.rglob("*.log"):
+                    self._add(p, f"cloud_onedrive/{ud.name}/{p.name}")
+
+    def _cloud_google_drive_from(self, users_dir: Path) -> None:
+        print("  [*] Google Drive Sync Artifacts")
+        for ud in self._iter_users(users_dir):
+            d = ud / "AppData" / "Local" / "Google" / "DriveFS"
+            if d.exists():
+                for p in d.rglob("*.db"):
+                    self._add(p, f"cloud_google_drive/{ud.name}/{p.name}")
+
+    def _cloud_dropbox_from(self, users_dir: Path) -> None:
+        print("  [*] Dropbox Sync Artifacts")
+        for ud in self._iter_users(users_dir):
+            d = ud / "AppData" / "Local" / "Dropbox"
+            if d.exists():
+                for p in d.rglob("*.db"):
+                    self._add(p, f"cloud_dropbox/{ud.name}/{p.name}")
+                for p in d.rglob("*.json"):
+                    self._add(p, f"cloud_dropbox/{ud.name}/{p.name}")
+
+    def _remote_access_from(self, root: Path, users_dir: Path) -> None:
+        print("  [*] Remote Access (AnyDesk, TeamViewer)")
+        tv_logs = root / "ProgramData" / "TeamViewer" / "Logs"
+        if tv_logs.exists():
+            for p in tv_logs.glob("*.log"):
+                self._add(p, f"remote_access/teamviewer/{p.name}")
+        for ud in self._iter_users(users_dir):
+            ad = ud / "AppData" / "Roaming" / "AnyDesk"
+            if ad.exists():
+                for p in ad.rglob("*.trace"):
+                    self._add(p, f"remote_access/anydesk/{ud.name}/{p.name}")
+                for p in ad.rglob("*.conf"):
+                    self._add(p, f"remote_access/anydesk/{ud.name}/{p.name}")
+
+    def _rdp_from(self, users_dir: Path) -> None:
+        print("  [*] RDP / Terminal Services")
+        for ud in self._iter_users(users_dir):
+            cache = (ud / "AppData" / "Local" / "Microsoft" /
+                     "Terminal Server Client" / "Cache")
+            if cache.exists():
+                for p in cache.rglob("*"):
+                    if p.is_file():
+                        self._add(p, f"rdp/{ud.name}/{p.name}")
+
+    def _ssh_ftp_from(self, users_dir: Path) -> None:
+        print("  [*] SSH / FTP Clients (PuTTY, WinSCP)")
+        for ud in self._iter_users(users_dir):
+            ssh = ud / ".ssh"
+            if ssh.exists():
+                for p in ssh.iterdir():
+                    if p.is_file() and "id_" not in p.name:  # skip private keys
+                        self._add(p, f"ssh_ftp/{ud.name}/ssh/{p.name}")
+            putty = ud / "AppData" / "Roaming" / "PuTTY"
+            if putty.exists():
+                for p in putty.rglob("*"):
+                    if p.is_file():
+                        self._add(p, f"ssh_ftp/{ud.name}/putty/{p.name}")
+            winscp = ud / "AppData" / "Roaming" / "WinSCP.ini"
+            self._add(winscp, f"ssh_ftp/{ud.name}/WinSCP.ini")
+
+    def _office_from(self, users_dir: Path) -> None:
+        print("  [*] Office MRU / Trusted Documents")
+        for ud in self._iter_users(users_dir):
+            d = ud / "AppData" / "Roaming" / "Microsoft" / "Office"
+            if d.exists():
+                for p in d.rglob("*.json"):
+                    self._add(p, f"office/{ud.name}/{p.name}")
+                for p in d.rglob("Recent"):
+                    if p.is_dir():
+                        for f in p.iterdir():
+                            if f.is_file():
+                                self._add(f, f"office/{ud.name}/Recent/{f.name}")
+
+    def _iis_web_from(self, root: Path) -> None:
+        print("  [*] IIS Web Server Logs")
+        d = root / "inetpub" / "logs" / "LogFiles"
+        count = 0
+        for p in (d.rglob("*.log") if d.exists() else []):
+            if count >= 200:
+                break
+            if self._add(p, f"iis_web/{p.parent.name}/{p.name}"):
+                count += 1
+        self._add(root / "Windows" / "System32" / "inetsrv" / "config" / "applicationHost.config",
+                  "iis_web/applicationHost.config")
+
+    def _active_directory_from(self, win_dir: Path) -> None:
+        print("  [*] Active Directory (NTDS.dit, SYSVOL)")
+        ntds = win_dir / "NTDS"
+        self._add(ntds / "ntds.dit", "active_directory/ntds.dit")
+        self._add(ntds / "edb.log",  "active_directory/edb.log")
+
+    def _dev_tools_from(self, users_dir: Path) -> None:
+        print("  [*] Dev Tools (.gitconfig, PS history, .aws)")
+        for ud in self._iter_users(users_dir):
+            self._add(ud / ".gitconfig",
+                      f"dev_tools/{ud.name}/.gitconfig")
+            self._add(ud / ".git-credentials",
+                      f"dev_tools/{ud.name}/.git-credentials")
+            ps_hist = (ud / "AppData" / "Roaming" / "Microsoft" / "Windows" /
+                       "PowerShell" / "PSReadLine" / "ConsoleHost_history.txt")
+            self._add(ps_hist, f"dev_tools/{ud.name}/ConsoleHost_history.txt")
+            aws = ud / ".aws" / "credentials"
+            self._add(aws, f"dev_tools/{ud.name}/aws_credentials")
+            azure = ud / ".azure" / "accessTokens.json"
+            self._add(azure, f"dev_tools/{ud.name}/azure_accessTokens.json")
+
+    def _password_managers_from(self, users_dir: Path) -> None:
+        print("  [*] Password Managers (KeePass)")
+        count = 0
+        for ud in self._iter_users(users_dir):
+            for p in ud.rglob("*.kdbx"):
+                if count >= 20:
+                    break
+                if self._add(p, f"password_managers/{ud.name}/{p.name}"):
+                    count += 1
+
+    def _vpn_from(self, root: Path) -> None:
+        print("  [*] VPN Config (OpenVPN, WireGuard)")
+        openvpn = root / "ProgramData" / "OpenVPN" / "config"
+        if openvpn.exists():
+            for p in openvpn.rglob("*.ovpn"):
+                self._add(p, f"vpn/openvpn/{p.name}")
+        wg = root / "ProgramData" / "WireGuard"
+        if wg.exists():
+            for p in wg.rglob("*.conf"):
+                self._add(p, f"vpn/wireguard/{p.name}")
+
+    def _windows_apps_from(self, users_dir: Path) -> None:
+        print("  [*] Windows UWP / Modern Apps")
+        APPS = ["Microsoft.MicrosoftStickyNotes_8wekyb3d8bbwe"]
+        for ud in self._iter_users(users_dir):
+            pkg_base = ud / "AppData" / "Local" / "Packages"
+            for app in APPS:
+                d = pkg_base / app
+                if d.exists():
+                    for p in d.rglob("*.sqlite"):
+                        self._add(p, f"windows_apps/{ud.name}/{app}/{p.name}")
+
+    def _wsl_from(self, users_dir: Path) -> None:
+        print("  [*] WSL Filesystem & Config")
+        for ud in self._iter_users(users_dir):
+            pkg_base = ud / "AppData" / "Local" / "Packages"
+            if pkg_base.exists():
+                for pkg in pkg_base.iterdir():
+                    if pkg.is_dir() and "CanonicalGroupLimited" in pkg.name:
+                        cfg = pkg / "LocalState" / "rootfs" / "etc"
+                        if cfg.exists():
+                            for p in ["passwd", "shadow", "bash.bashrc"]:
+                                self._add(cfg / p, f"wsl/{ud.name}/{p}")
+
+    def _virtualization_from(self, root: Path) -> None:
+        print("  [*] Virtualization (Hyper-V, Docker)")
+        hv = root / "ProgramData" / "Microsoft" / "Windows" / "Hyper-V"
+        if hv.exists():
+            for p in hv.rglob("*.vhd"):
+                self._add(p, f"virtualization/hyperv/{p.name}")
+            for p in hv.rglob("*.vhdx"):
+                self._add(p, f"virtualization/hyperv/{p.name}")
+
+    def _recovery_from(self, root: Path) -> None:
+        print("  [*] Recovery (VSS, Windows.old)")
+        svi = root / "System Volume Information"
+        if svi.exists():
+            for p in svi.iterdir():
+                if p.is_file():
+                    self._add(p, f"recovery/svi/{p.name}")
+
+    def _database_clients_from(self, users_dir: Path) -> None:
+        print("  [*] Database Clients (SSMS, DBeaver)")
+        for ud in self._iter_users(users_dir):
+            for rel in ["AppData/Roaming/Microsoft SQL Server Management Studio",
+                        "AppData/Roaming/DBeaverData"]:
+                d = ud / Path(rel.replace("/", os.sep))
+                if d.exists():
+                    for p in d.rglob("*.xml"):
+                        self._add(p, f"database_clients/{ud.name}/{rel.split('/')[-1]}/{p.name}")
+                    for p in d.rglob("*.ini"):
+                        self._add(p, f"database_clients/{ud.name}/{rel.split('/')[-1]}/{p.name}")
+
+    def _gaming_from(self, root: Path, users_dir: Path) -> None:
+        print("  [*] Gaming Platforms (Steam, Epic)")
+        epic = root / "ProgramData" / "Epic" / "EpicGamesLauncher" / "Data" / "Logs"
+        if epic.exists():
+            for p in epic.glob("*.log"):
+                self._add(p, f"gaming/epic/{p.name}")
+        for ud in self._iter_users(users_dir):
+            steam = ud / "AppData" / "Local" / "Steam"
+            if steam.exists():
+                for p in steam.rglob("*.vdf"):
+                    self._add(p, f"gaming/steam/{ud.name}/{p.name}")
+
+    def _printing_from(self, win_dir: Path) -> None:
+        print("  [*] Print Spool Files")
+        spool = win_dir / "System32" / "spool" / "PRINTERS"
+        count = 0
+        for p in (spool.iterdir() if spool.exists() else []):
+            if count >= 100:
+                break
+            if p.is_file() and self._add(p, f"printing/{p.name}"):
+                count += 1
+
+    def _memory_artifacts_from(self, root: Path) -> None:
+        print("  [*] Memory Artifacts (pagefile, hiberfil)")
+        for name in ["pagefile.sys", "hiberfil.sys", "swapfile.sys"]:
+            self._add(root / name, f"memory_artifacts/{name}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

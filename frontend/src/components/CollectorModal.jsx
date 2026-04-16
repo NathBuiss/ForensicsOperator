@@ -10,15 +10,71 @@ import { api } from '../api/client'
 // ── Artifact definitions (script mode) ───────────────────────────────────────
 
 const WINDOWS_ARTIFACTS = [
-  { key: 'evtx',     label: 'Event Logs (EVTX)',   desc: 'Security, System, Application, PowerShell, Sysmon and more' },
-  { key: 'registry', label: 'Registry Hives',       desc: 'SYSTEM, SOFTWARE, SAM, SECURITY, NTUSER.DAT, UsrClass.dat' },
-  { key: 'prefetch', label: 'Prefetch Files',        desc: 'Program execution evidence (up to 500 .pf files)' },
-  { key: 'lnk',      label: 'LNK / Recent Items',   desc: 'Shell link files from all user Recent folders' },
-  { key: 'browser',  label: 'Browser Artifacts',    desc: 'Chrome, Edge, Firefox — history, cookies, login data' },
-  { key: 'tasks',    label: 'Scheduled Tasks',      desc: 'Windows Task Scheduler XML files from System32\\Tasks' },
-  { key: 'mft',      label: 'Master File Table ($MFT)', desc: 'Raw NTFS MFT — requires Administrator' },
-  { key: 'triage',   label: 'Live System Triage',   desc: 'systeminfo, netstat, tasklist, services, installed software' },
-  { key: 'memory',   label: 'Memory Dump',          desc: 'Physical memory via WinPmem — requires winpmem_mini_x64_rc2.exe beside the script', warn: true },
+  // ── Core ────────────────────────────────────────────────────────────────────
+  { key: 'evtx',              label: 'Event Logs (EVTX)',               desc: 'Security, System, Application, PowerShell, Sysmon and more' },
+  { key: 'registry',          label: 'Registry Hives',                  desc: 'SYSTEM, SOFTWARE, SAM, SECURITY, NTUSER.DAT, UsrClass.dat' },
+  { key: 'prefetch',          label: 'Prefetch Files',                  desc: 'Program execution evidence (up to 500 .pf files)' },
+  { key: 'mft',               label: 'Master File Table ($MFT)',        desc: 'Raw NTFS MFT — requires Administrator or dead-box access' },
+  { key: 'execution',         label: 'Execution Evidence',              desc: 'SRUM database, Amcache.hve, Prefetch — comprehensive execution history' },
+  { key: 'persistence',       label: 'Persistence (Tasks + WMI)',       desc: 'Scheduled Tasks XML from System32/SysWOW64, WMI repository (OBJECTS.DATA)' },
+  { key: 'filesystem',        label: 'NTFS Metadata',                   desc: '$MFT, $LogFile, $Boot — full NTFS journal and boot sector' },
+  // ── Network & USB ────────────────────────────────────────────────────────────
+  { key: 'network_cfg',       label: 'Network Config',                  desc: 'Hosts file, WLAN profiles (.xml), Windows Firewall logs' },
+  { key: 'usb_devices',       label: 'USB Device History',              desc: 'setupapi.dev.log / setupapi.setup.log — device plug-in timeline' },
+  // ── Credentials & Security ───────────────────────────────────────────────────
+  { key: 'credentials',       label: 'Credentials (DPAPI)',             desc: 'SAM, SECURITY hives, Credential Manager stores, DPAPI Protect folders' },
+  { key: 'antivirus',         label: 'Windows Defender',                desc: 'Quarantine, support logs — detection history and threat actions' },
+  { key: 'wer_crashes',       label: 'WER Crash Dumps',                 desc: 'Windows Error Reporting crash dumps and report archives' },
+  { key: 'win_logs',          label: 'Windows Logs',                    desc: 'CBS.log, DISM, WindowsUpdate.log, Panther setup logs' },
+  { key: 'boot_uefi',         label: 'Boot Config (BCD / EFI)',         desc: 'BCD store, bootstat.dat — boot persistence indicators' },
+  { key: 'encryption',        label: 'Encryption Metadata',             desc: 'BitLocker FVE recovery info, EFS metadata' },
+  { key: 'etw_diagnostics',   label: 'ETW Diagnostic Traces',           desc: 'Windows/System32/LogFiles/WMI — .etl trace files' },
+  // ── Browsers ─────────────────────────────────────────────────────────────────
+  { key: 'browser',           label: 'All Browsers',                    desc: 'Chrome, Edge, Firefox, Brave, Opera, Vivaldi — history, cookies, logins' },
+  { key: 'browser_chrome',    label: 'Chrome',                          desc: 'History, Cookies, Login Data, Bookmarks, Web Data for all users' },
+  { key: 'browser_edge',      label: 'Microsoft Edge',                  desc: 'History, Cookies, Login Data, Web Data for all users' },
+  { key: 'browser_ie',        label: 'Internet Explorer',               desc: 'WebCacheV01.dat / WebCacheV24.dat — legacy IE cache database' },
+  // ── Email ────────────────────────────────────────────────────────────────────
+  { key: 'email_outlook',     label: 'Outlook Email',                   desc: '.pst / .ost mailbox databases', warn: true },
+  { key: 'email_thunderbird', label: 'Thunderbird Email',               desc: 'Thunderbird profile SQLite databases and .msf index files' },
+  // ── Messaging ────────────────────────────────────────────────────────────────
+  { key: 'teams',             label: 'Microsoft Teams',                 desc: 'Teams logs.txt, IndexedDB, Local Storage — chat history traces' },
+  { key: 'slack',             label: 'Slack',                           desc: 'Slack AppData/Roaming/Slack/logs' },
+  { key: 'discord',           label: 'Discord',                         desc: 'Discord Local Storage — message and user data artifacts' },
+  { key: 'signal',            label: 'Signal Desktop',                  desc: 'Signal databases/db.sqlite — encrypted message store' },
+  { key: 'whatsapp',          label: 'WhatsApp Desktop',                desc: 'WhatsApp Desktop UWP package databases' },
+  { key: 'telegram',          label: 'Telegram Desktop',                desc: 'Telegram tdata folder — session and message cache' },
+  // ── Cloud ─────────────────────────────────────────────────────────────────────
+  { key: 'cloud_onedrive',    label: 'OneDrive',                        desc: 'OneDrive sync databases and activity logs' },
+  { key: 'cloud_google_drive',label: 'Google Drive',                    desc: 'Google DriveFS sync databases' },
+  { key: 'cloud_dropbox',     label: 'Dropbox',                         desc: 'Dropbox sync metadata and activity JSON' },
+  // ── Remote access ────────────────────────────────────────────────────────────
+  { key: 'remote_access',     label: 'Remote Access Tools',             desc: 'AnyDesk traces/config, TeamViewer logs' },
+  { key: 'rdp',               label: 'RDP / Terminal Services',         desc: 'Terminal Server Client cache — bitmap tiles from past RDP sessions' },
+  { key: 'ssh_ftp',           label: 'SSH / FTP Clients',               desc: 'known_hosts, PuTTY sessions, WinSCP.ini' },
+  // ── Applications & user data ─────────────────────────────────────────────────
+  { key: 'lnk',               label: 'LNK / Recent Items',              desc: 'Shell link files from all user Recent folders' },
+  { key: 'office',            label: 'Office MRU',                      desc: 'Office Recent Documents list and trusted document registry' },
+  { key: 'dev_tools',         label: 'Dev Tools',                       desc: '.gitconfig, PowerShell history, .aws/credentials, .azure tokens' },
+  { key: 'password_managers', label: 'Password Managers',               desc: 'KeePass .kdbx databases found in user directories' },
+  { key: 'database_clients',  label: 'Database Clients',                desc: 'SSMS connection configs, DBeaver workspace files' },
+  { key: 'gaming',            label: 'Gaming Platforms',                desc: 'Steam .vdf files, Epic Games Launcher logs' },
+  { key: 'windows_apps',      label: 'Windows Apps (UWP)',              desc: 'Sticky Notes, Cortana — UWP package SQLite stores' },
+  { key: 'wsl',               label: 'WSL',                             desc: 'Ubuntu/Debian WSL rootfs /etc — passwd, shadow, bashrc' },
+  // ── Infrastructure ───────────────────────────────────────────────────────────
+  { key: 'vpn',               label: 'VPN Config',                      desc: 'OpenVPN .ovpn profiles, WireGuard .conf files' },
+  { key: 'iis_web',           label: 'IIS Web Server',                  desc: 'inetpub/logs .log files, applicationHost.config' },
+  { key: 'active_directory',  label: 'Active Directory',                desc: 'Windows/NTDS/ntds.dit + edb.log — full AD database', warn: true },
+  { key: 'virtualization',    label: 'Virtualization',                  desc: 'Hyper-V .vhd / .vhdx inventory from ProgramData' },
+  { key: 'recovery',          label: 'Recovery / VSS',                  desc: 'System Volume Information — VSS snapshot metadata' },
+  { key: 'printing',          label: 'Print Spool',                     desc: 'Windows/System32/spool/PRINTERS — spooled print jobs' },
+  // ── Live-only ────────────────────────────────────────────────────────────────
+  { key: 'triage',            label: 'Live System Triage',              desc: 'systeminfo, netstat, tasklist, services, installed software — live OS only' },
+  // ── Heavy / opt-in ───────────────────────────────────────────────────────────
+  { key: 'pe',                label: 'PE / Executable Binaries',        desc: 'EXE/DLL/PS1 from Temp, Downloads, AppData — feeds PE Analysis, YARA', warn: true },
+  { key: 'documents',         label: 'Office Documents & PDFs',         desc: 'DOCX, XLSX, PPTX, PDF from Documents/Downloads/Desktop', warn: true },
+  { key: 'memory',            label: 'Live Memory Dump',                desc: 'Physical memory via WinPmem — requires winpmem_mini_x64_rc2.exe beside the script', warn: true },
+  { key: 'memory_artifacts',  label: 'Memory Artifacts (dead-box)',     desc: 'pagefile.sys, hiberfil.sys, swapfile.sys — from mounted/external volume', warn: true },
 ]
 
 const LINUX_ARTIFACTS = [
