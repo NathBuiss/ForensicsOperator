@@ -37,11 +37,14 @@ _SCRIPT_CANDIDATES = [
     Path(__file__).parent.parent.parent / "collector" / "collect.py",  # mono-repo root
 ]
 
-# ForensicHarvester source tree (for the package download)
+# ForensicHarvester source tree (for the package download).
+# /opt/forensic_harvester is baked by the Dockerfile (never shadowed by volume mounts).
+# Remaining entries are fallbacks for local dev (docker-compose bind mount or bare venv).
 _HARVESTER_CANDIDATES = [
-    Path("/app/forensic_harvester"),
-    Path(__file__).parent.parent / "forensic_harvester",
-    Path(__file__).parent.parent.parent / "forensic_harvester",
+    Path("/opt/forensic_harvester"),                                      # Docker image (K8s / prod)
+    Path("/app/forensic_harvester"),                                      # docker-compose bind mount
+    Path(__file__).parent.parent / "forensic_harvester",                  # local: api/../forensic_harvester
+    Path(__file__).parent.parent.parent / "forensic_harvester",           # mono-repo root
 ]
 
 def _find_harvester_dir() -> Path:

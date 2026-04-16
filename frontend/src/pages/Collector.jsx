@@ -465,19 +465,22 @@ export default function Collector() {
 
               {downloaded && (
                 <div className="mt-4 bg-gray-950 rounded-lg p-4 text-[11px] font-mono leading-relaxed space-y-1">
-                  <div className="text-gray-500 mb-2"># 1. Extract the ZIP on the target machine</div>
+                  <div className="text-gray-500 mb-2"># 1. Extract fo-harvester.zip on the target machine</div>
                   <div className="text-gray-300">
                     {platformDef?.id === 'win'
                       ? <>
                           <span className="text-gray-500"># Windows — run as Administrator</span>{'\n'}
-                          {'double-click run.bat'}
+                          {'double-click run.bat'}{'\n'}
+                          {'   — or —'}{'\n'}
+                          {'python forensic_harvester.py'}{'\n'}
                           {'\n'}
-                          {'   — or — python forensic_harvester.py'}
+                          <span className="text-gray-500"># BitLocker-encrypted drive (e.g. E:)</span>{'\n'}
+                          {'python forensic_harvester.py --mode image --image-path E:'}{'\n'}
+                          {'  --bitlocker-key 123456-123456-123456-123456-123456-123456-123456-123456'}
                         </>
                       : <>
                           <span className="text-gray-500"># Linux / macOS — run as root</span>{'\n'}
-                          {'sh run.sh'}
-                          {'\n'}
+                          {'sh run.sh'}{'\n'}
                           {'   — or — python3 forensic_harvester.py'}
                         </>
                     }

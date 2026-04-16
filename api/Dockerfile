@@ -17,8 +17,8 @@ COPY api/ .
 RUN mkdir -p /app/collector
 COPY collector/collect.py /app/collector/collect.py
 
-# Bake the ForensicHarvester source tree so the package download endpoint works.
-COPY forensic_harvester/ /app/forensic_harvester/
+# Bake the ForensicHarvester source tree at /opt so no volume mount can shadow it.
+COPY forensic_harvester/ /opt/forensic_harvester/
 
 RUN mkdir -p /app/static
 
