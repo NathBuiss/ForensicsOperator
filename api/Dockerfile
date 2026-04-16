@@ -17,6 +17,9 @@ COPY api/ .
 RUN mkdir -p /app/collector
 COPY collector/collect.py /app/collector/collect.py
 
+# Bake the ForensicHarvester source tree so the package download endpoint works.
+COPY forensic_harvester/ /app/forensic_harvester/
+
 RUN mkdir -p /app/static
 
 # Ensure all internal packages have __init__.py stubs
