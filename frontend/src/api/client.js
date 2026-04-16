@@ -296,14 +296,15 @@ export const api = {
       if (token) { params.set('_token', token); params.set('api_token', token) }
       return `/api/v1/collector/download?${params.toString()}`
     },
-    // New: full ForensicHarvester ZIP bundle with pre-filled config.json
-    packageUrl: ({ categories = [], level = 'complete', sourcePath } = {}) => {
-      const params = new URLSearchParams({ level })
+    // New: fo-harvester ZIP — config.json has true/false per artifact category.
+    // Input source (--path/--disk) and BitLocker key are CLI args on the target.
+    packageUrl: ({ categories = [] } = {}) => {
+      const params = new URLSearchParams()
       if (categories.length > 0) params.set('categories', categories.join(','))
-      if (sourcePath)            params.set('source_path', sourcePath)
       const token = getToken()
       if (token) params.set('_token', token)
-      return `/api/v1/collector/package?${params.toString()}`
+      const qs = params.toString()
+      return `/api/v1/collector/package${qs ? '?' + qs : ''}`
     },
     networkInterfaces: () => request('GET',    '/network/interfaces'),
     createIngress:     () => request('POST',   '/collector/ingress'),

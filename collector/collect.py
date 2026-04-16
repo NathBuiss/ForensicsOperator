@@ -44,18 +44,31 @@ import zipfile
 from pathlib import Path
 
 # ── Load config.json when EMBEDDED_CONFIG was not injected ───────────────────
-# ForensicsOperator package mode (Option B+C1): config.json ships next to this
-# script and is read at startup.  EMBEDDED_CONFIG injection still takes priority.
+# ForensicsOperator package mode: config.json ships next to this script.
+# Format: {artifact_key: true/false, output_dir: "path"}
+# Mode, input source, and BitLocker key are CLI arguments — not stored here.
 if not EMBEDDED_CONFIG:
     _cfg_path = Path(__file__).with_name("config.json")
     if _cfg_path.exists():
         try:
             _raw = json.loads(_cfg_path.read_text("utf-8"))
+            # Accept only known category keys with boolean True — safe against
+            # old-format config files that have string/list values.
+            _known_cats = {
+                "evtx", "registry", "prefetch", "mft", "execution", "persistence",
+                "filesystem", "network_cfg", "usb_devices", "credentials", "antivirus",
+                "wer_crashes", "win_logs", "boot_uefi", "encryption", "etw_diagnostics",
+                "browser", "browser_chrome", "browser_edge", "browser_ie",
+                "email_outlook", "email_thunderbird", "teams", "slack", "discord",
+                "signal", "whatsapp", "telegram", "cloud_onedrive", "cloud_google_drive",
+                "cloud_dropbox", "remote_access", "rdp", "ssh_ftp", "lnk", "tasks",
+                "office", "dev_tools", "password_managers", "database_clients", "gaming",
+                "windows_apps", "wsl", "vpn", "iis_web", "active_directory",
+                "virtualization", "recovery", "printing", "pe", "documents", "memory_artifacts",
+            }
             EMBEDDED_CONFIG = {
-                "collect":  _raw.get("categories", []),
-                "path":     _raw.get("image_path") or "",
-                "mode":     _raw.get("mode", "live"),
-                "output":   _raw.get("output_dir", "./output"),
+                "collect": [k for k, v in _raw.items() if k in _known_cats and v is True],
+                "output":  _raw.get("output_dir", "./output"),
             }
         except Exception as _cfg_err:
             print(f"  [!] Warning: could not read config.json: {_cfg_err}", file=sys.stderr)
@@ -2342,7 +2355,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Merge: EMBEDDED_CONFIG < CLI args (CLI wins)
+    # Merge: EMBEDDED_CONFIG (config.json) < CLI args (CLI always wins)
     cfg = {**EMBEDDED_CONFIG}
     if args.api_url:   cfg["api_url"]   = args.api_url
     if args.case_id:   cfg["case_id"]   = args.case_id
@@ -2356,40 +2369,23 @@ def main() -> None:
     output    = Path(cfg["output"]) if cfg.get("output") else \
                 Path.cwd() / f"fo-artifacts-{HOSTNAME}-{TS_NOW}.zip"
 
-    # Resolve path/disk/bitlocker — must happen before the print block
-    path_arg      = getattr(args, "path", None) or cfg.get("path", "")
-    disk          = getattr(args, "disk", None) or cfg.get("disk", "")
-    bitlocker_key = getattr(args, "bitlocker_key", None) or cfg.get("bitlocker_key", "")
+    # Input source — CLI only (not stored in config.json)
+    path_arg      = args.path or ""
+    disk          = args.disk or ""
+    bitlocker_key = args.bitlocker_key or ""
 
-    # ForensicsOperator config.json supplies mode="live"|"image" and image_path.
-    # Map those to the path_arg understood by the rest of main().
-    fo_mode = cfg.get("mode", "")
-    if not path_arg and fo_mode == "image":
-        path_arg = cfg.get("image_path", "") or ""
-
-    # On live Windows with ForensicHarvester categories, route through
-    # ExternalDiskCollector(C:\) so all 45+ _from() methods are available.
-    _fo_live_windows = (
-        IS_WINDOWS
-        and not path_arg
-        and not disk
-        and (fo_mode == "live" or fo_mode == "")
-    )
-    if _fo_live_windows:
+    # Live Windows: route through ExternalDiskCollector(C:\) to get all 45+
+    # _from() collection methods. C:\ is a directory so unlock_and_mount()
+    # returns it immediately — no mounting needed.
+    _live_windows = IS_WINDOWS and not path_arg and not disk
+    if _live_windows:
         path_arg = os.environ.get("SystemDrive", "C:") + "\\"
 
-    # Resolve collect set.
-    # When categories come from config.json (ForensicsOperator) they are already
-    # the full FH category list — don't filter by the narrower DEFAULT_WINDOWS set.
-    # "memory" / "pe" / "documents" are always opt-in (large, slow).
+    # Collect set: honour explicit list (config.json or --collect), else defaults
     raw_collect = cfg.get("collect", [])
-    _OPT_IN = {"memory", "pe", "documents"}
-
     if raw_collect:
-        # Explicit list: honour every category the user asked for
         collect_set = set(raw_collect)
     elif path_arg or disk:
-        # Dead-box default: ExternalDiskCollector safe defaults
         collect_set = ExternalDiskCollector.DEFAULT_COLLECT
     elif IS_WINDOWS:
         collect_set = DEFAULT_WINDOWS
@@ -2405,10 +2401,14 @@ def main() -> None:
     if api_url and case_id:
         print(f"  Upload   : {api_url}  →  case {case_id}")
     print(f"  Collect  : {', '.join(sorted(collect_set)) or '(none)'}")
-    if path_arg:
-        print(f"  Mode     : {'live Windows' if _fo_live_windows else 'dead-box directory'}  ({path_arg})")
+    if _live_windows:
+        print(f"  Mode     : live Windows  ({path_arg})")
+    elif path_arg:
+        print(f"  Mode     : dead-box directory  ({path_arg})")
     elif disk:
-        print(f"  Mode     : dead-box raw device ({disk})")
+        print(f"  Mode     : dead-box raw device  ({disk})")
+    else:
+        print(f"  Mode     : live {platform.system()}")
     print()
 
     # --path: already-mounted Windows filesystem directory (any OS)
@@ -2422,9 +2422,6 @@ def main() -> None:
             print("  [!] Raw block-device collection requires Linux (ntfs-3g + dislocker).", file=sys.stderr)
             print("      If the disk is already mounted as a directory, use --path instead.", file=sys.stderr)
             sys.exit(1)
-        # Default to Windows artifact set (minus live-only triage) when unspecified
-        if not raw_collect:
-            collect_set = ExternalDiskCollector.DEFAULT_COLLECT
         print(f"  Path     : {external_root}")
         if bitlocker_key:
             print(f"  BitLocker: key provided ({len(bitlocker_key)} chars)")

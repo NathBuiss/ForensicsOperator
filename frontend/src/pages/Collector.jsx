@@ -259,8 +259,7 @@ export default function Collector() {
     setDownloading(true)
     setDownloaded(false)
     const url = api.collector.packageUrl({
-      categories: selected.size > 0 ? [...selected] : [],
-      level:      'complete',
+      categories: [...selected],
     })
     const a = document.createElement('a')
     a.href = url
@@ -464,29 +463,38 @@ export default function Collector() {
               </button>
 
               {downloaded && (
-                <div className="mt-4 bg-gray-950 rounded-lg p-4 text-[11px] font-mono leading-relaxed space-y-1">
-                  <div className="text-gray-500 mb-2"># 1. Extract fo-harvester.zip on the target machine</div>
-                  <div className="text-gray-300">
-                    {platformDef?.id === 'win'
-                      ? <>
-                          <span className="text-gray-500"># Windows — run as Administrator</span>{'\n'}
-                          {'double-click run.bat'}{'\n'}
-                          {'   — or —'}{'\n'}
-                          {'python fo-harvester.py'}{'\n'}
-                          {'\n'}
-                          <span className="text-gray-500"># BitLocker-encrypted drive (e.g. E:) — key stays local</span>{'\n'}
-                          {'python fo-harvester.py --path E:\\ ^'}{'\n'}
-                          {'  --bitlocker-key 123456-123456-123456-123456-123456-123456-123456-123456'}
-                        </>
-                      : <>
-                          <span className="text-gray-500"># Linux / macOS — run as root</span>{'\n'}
-                          {'sh run.sh'}{'\n'}
-                          {'   — or — python3 fo-harvester.py'}
-                        </>
-                    }
-                  </div>
-                  <div className="text-gray-500 pt-2"># 2. A ZIP of collected artifacts is created in ./output/</div>
-                  <div className="text-amber-400 pt-1">Upload that ZIP to ForensicsOperator via the Ingest panel.</div>
+                <div className="mt-4 bg-gray-950 rounded-lg p-4 text-[11px] font-mono leading-relaxed space-y-2">
+                  <div className="text-gray-500"># Extract fo-harvester.zip then run on the target machine</div>
+                  {platformDef?.id === 'win' ? <>
+                    <div>
+                      <span className="text-gray-500"># Live OS (run as Administrator):</span>{'\n'}
+                      <span className="text-green-400">python fo-harvester.py</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500"># Dead-box — mounted directory:</span>{'\n'}
+                      <span className="text-green-400">{'python fo-harvester.py --path D:\\'}</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500"># BitLocker — key stays local, never in config.json:</span>{'\n'}
+                      <span className="text-green-400">{'python fo-harvester.py --path E:\\ ^'}</span>{'\n'}
+                      <span className="text-green-400">{'  --bitlocker-key 123456-123456-...'}</span>
+                    </div>
+                  </> : <>
+                    <div>
+                      <span className="text-gray-500"># Live OS (run as root):</span>{'\n'}
+                      <span className="text-green-400">python3 fo-harvester.py</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500"># Dead-box — mounted directory:</span>{'\n'}
+                      <span className="text-green-400">python3 fo-harvester.py --path /mnt/windows</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500"># Dead-box — raw device + BitLocker:</span>{'\n'}
+                      <span className="text-green-400">python3 fo-harvester.py --disk /dev/sdb1 \</span>{'\n'}
+                      <span className="text-green-400">{'  --bitlocker-key 123456-123456-...'}</span>
+                    </div>
+                  </>}
+                  <div className="text-gray-500 pt-1"># Output ZIP is created in ./output/ — upload via Case → Ingest</div>
                 </div>
               )}
             </div>
