@@ -37,24 +37,6 @@ _SCRIPT_CANDIDATES = [
     Path(__file__).parent.parent.parent / "collector" / "collect.py",  # mono-repo root
 ]
 
-# ForensicHarvester source tree (for the package download).
-# /opt/forensic_harvester is baked by the Dockerfile (never shadowed by volume mounts).
-# Remaining entries are fallbacks for local dev (docker-compose bind mount or bare venv).
-_HARVESTER_CANDIDATES = [
-    Path("/opt/forensic_harvester"),                                      # Docker image (K8s / prod)
-    Path("/app/forensic_harvester"),                                      # docker-compose bind mount
-    Path(__file__).parent.parent / "forensic_harvester",                  # local: api/../forensic_harvester
-    Path(__file__).parent.parent.parent / "forensic_harvester",           # mono-repo root
-]
-
-def _find_harvester_dir() -> Path:
-    for p in _HARVESTER_CANDIDATES:
-        if p.is_dir() and (p / "forensic_harvester.py").exists():
-            return p
-    raise FileNotFoundError(
-        "forensic_harvester/ not found — checked: " + ", ".join(str(p) for p in _HARVESTER_CANDIDATES)
-    )
-
 _INJECT_PATTERN = re.compile(
     r"^EMBEDDED_CONFIG\s*:\s*dict\s*=\s*\{\}",
     re.MULTILINE,
@@ -139,40 +121,39 @@ python3 forensic_harvester.py
 """
 
 _README = """\
-ForensicHarvester — Forensic Triage Package
-============================================
+ForensicHarvester — Pre-configured collection package
+======================================================
 
-Requirements
-------------
-  Python 3.8 or newer — no additional packages required.
-  (pyyaml and tqdm are NOT needed; this build uses only the standard library.)
+Step 1 — Get the ForensicHarvester source
+------------------------------------------
+  Download and extract the ForensicHarvester from GitHub:
+  https://github.com/NathBuiss/ForensicHarvester/archive/refs/heads/main.zip
 
-Running
--------
-  Windows:        double-click run.bat   OR   python forensic_harvester.py
-  Linux / macOS:  sh run.sh              OR   python3 forensic_harvester.py
+  Then place config.json (this file's companion) next to forensic_harvester.py.
 
-Configuration
--------------
-  config.json is pre-filled with the categories you selected in the UI.
-  Edit it if you want to change the collection level or add/remove categories.
+Step 2 — Run on the target machine
+------------------------------------
+  Requirements: Python 3.8+ — no additional packages required.
 
-Output
-------
-  A ZIP archive is created in the ./output/ directory when collection finishes.
-  Upload it to ForensicsOperator: open a case → Upload / Ingest tab.
+  Windows (as Administrator):
+      double-click run.bat
+      — or — python forensic_harvester.py
 
-Modes
------
-  Live system (default):
-      python forensic_harvester.py
+  Linux / macOS (as root):
+      sh run.sh
+      — or — python3 forensic_harvester.py
 
-  Dead-box — already mounted directory:
-      python forensic_harvester.py --mode image --image-path /mnt/evidence
+  BitLocker-encrypted drive (e.g. E:):
+      python forensic_harvester.py --mode image --image-path E: ^
+          --bitlocker-key 123456-123456-123456-123456-123456-123456-123456-123456
 
-  Dead-box — raw disk image (.dd / .img):
-      python forensic_harvester.py --mode image --image-path disk.dd
-      (requires pytsk3: pip install pytsk3)
+  Dead-box — mounted directory:
+      python forensic_harvester.py --mode image --image-path D:\\
+
+Step 3 — Upload results to ForensicsOperator
+---------------------------------------------
+  A ZIP of collected artifacts is created in ./output/.
+  Upload it via:  Case → Ingest tab → Upload ZIP
 """
 
 
@@ -183,57 +164,33 @@ def download_harvester_package(
     source_path: Optional[str] = Query(default=None, description="Pre-mounted path for dead-box mode"),
 ):
     """
-    Return a ZIP bundle containing the ForensicHarvester source tree + pre-filled config.json.
-    No external Python packages required — runs with standard-library Python 3.8+.
-    """
-    try:
-        harvester_dir = _find_harvester_dir()
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+    Return a ZIP containing a pre-filled config.json + launch scripts.
+    The caller places these files alongside the ForensicHarvester source
+    (downloaded separately from GitHub) and runs forensic_harvester.py.
 
-    # Build config.json from request params
+    This endpoint is stateless — no filesystem access required.
+    """
     cat_list = [c.strip() for c in categories.split(",") if c.strip()] if categories else []
     config = {
-        "mode":              "image" if source_path else "live",
-        "image_path":        source_path or None,
-        "level":             level,
-        "categories":        cat_list,
-        "output_dir":        "./output",
-        "threads":           4,
-        "create_zip":        True,
-        "keep_unzipped":     False,
-        "hash_collected":    True,
-        "quiet":             False,
-        "max_file_size_mb":  0,
+        "mode":             "image" if source_path else "live",
+        "image_path":       source_path or None,
+        "level":            level,
+        "categories":       cat_list,
+        "output_dir":       "./output",
+        "threads":          4,
+        "create_zip":       True,
+        "keep_unzipped":    False,
+        "hash_collected":   True,
+        "quiet":            False,
+        "max_file_size_mb": 0,
     }
 
-    # Build the ZIP in memory
     buf = io.BytesIO()
-    _SKIP_DIRS = {"__pycache__", ".git", "tests", ".pytest_cache"}
-    _SKIP_EXTS = {".pyc", ".pyo", ".egg-info"}
-
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        # Add all Python source files from the forensic_harvester tree
-        for f in harvester_dir.rglob("*"):
-            if not f.is_file():
-                continue
-            if any(part in _SKIP_DIRS for part in f.parts):
-                continue
-            if f.suffix in _SKIP_EXTS:
-                continue
-            # Skip yaml config — replaced by config.json
-            if f.name in ("config.yaml", "config.yml"):
-                continue
-            arc_name = "fo-harvester/" + str(f.relative_to(harvester_dir))
-            zf.write(f, arc_name)
-
-        # Inject pre-filled config.json
-        zf.writestr("fo-harvester/config.json", json.dumps(config, indent=2))
-
-        # Launchers
-        zf.writestr("fo-harvester/run.bat", _RUN_BAT)
-        zf.writestr("fo-harvester/run.sh",  _RUN_SH)
-        zf.writestr("fo-harvester/README.txt", _README)
+        zf.writestr("fo-harvester/config.json",  json.dumps(config, indent=2))
+        zf.writestr("fo-harvester/run.bat",       _RUN_BAT)
+        zf.writestr("fo-harvester/run.sh",        _RUN_SH)
+        zf.writestr("fo-harvester/README.txt",    _README)
 
     cat_label = f"-{level}" + (f"-{len(cat_list)}cats" if cat_list else "")
     filename = f"fo-harvester{cat_label}.zip"

@@ -110,7 +110,6 @@ services:
       - ./modules:/app/modules
       - ./api:/app
       - ./collector:/app/collector:ro
-      - ./forensic_harvester:/opt/forensic_harvester:ro
     depends_on:
       elasticsearch:
         condition: service_healthy
