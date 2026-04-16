@@ -32,6 +32,7 @@ EMBEDDED_CONFIG: dict = {}
 import argparse
 import datetime
 import json
+import io
 import os
 import platform
 import re
@@ -40,7 +41,9 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 
 # ── Load config.json when EMBEDDED_CONFIG was not injected ───────────────────
@@ -67,8 +70,9 @@ if not EMBEDDED_CONFIG:
                 "virtualization", "recovery", "printing", "pe", "documents", "memory_artifacts",
             }
             EMBEDDED_CONFIG = {
-                "collect": [k for k, v in _raw.items() if k in _known_cats and v is True],
-                "output":  _raw.get("output_dir", "./output"),
+                "collect":    [k for k, v in _raw.items() if k in _known_cats and v is True],
+                "output_dir": _raw.get("output_dir", "./output"),
+                "case_name":  _raw.get("case_name", ""),
             }
         except Exception as _cfg_err:
             print(f"  [!] Warning: could not read config.json: {_cfg_err}", file=sys.stderr)
@@ -82,9 +86,11 @@ IS_LINUX   = platform.system() == "Linux"
 IS_MACOS   = platform.system() == "Darwin"
 
 BANNER = f"""
-╔══════════════════════════════════════════════════════════╗
-║              TraceX Artifact Collector  v{VERSION}             ║
-╚══════════════════════════════════════════════════════════╝"""
+╔══════════════════════════════════════════════════════════════╗
+║         ForensicsOperator Harvester  v{VERSION}                    ║
+╚══════════════════════════════════════════════════════════════╝"""
+
+_HR = "  " + "─" * 62  # section separator line
 
 # Default collection sets — all enabled when nothing is specified
 DEFAULT_WINDOWS = {"evtx", "registry", "prefetch", "lnk", "browser", "tasks", "mft", "triage"}
@@ -188,6 +194,11 @@ class Collector:
         self.staging  = Path(tempfile.mkdtemp(prefix="fo_collect_"))
         self._items: list[tuple[str, Path]] = []
         self._errors: list[str] = []
+        self._seen_arcnames: set[str] = set()   # duplicate path guard
+        # Progress / results tracking
+        self._results: list[dict]  = []
+        self._total_cats: int      = 0
+        self._current_cat: int     = 0
 
     def _want(self, key: str) -> bool:
         return key in self.collect
@@ -198,14 +209,8 @@ class Collector:
 
     def _warn(self, msg: str) -> None:
         self._errors.append(msg)
+        # Buffered during _timed(); written directly otherwise.
         print(f"  [!] {msg}", file=sys.stderr)
-
-    def _section(self, key: str, label: str) -> bool:
-        """Print a section header and return False if the section is disabled."""
-        if not self._want(key):
-            return False
-        print(f"  [*] {label}")
-        return True
 
     def _add(self, src: Path, arcname: str) -> bool:
         if not src.exists() or not src.is_file():
@@ -215,9 +220,117 @@ class Collector:
         if size == 0:
             self._log(f"empty    {src.name}")
             return False
+        # Deduplicate arcnames — same relative path can appear for multiple users
+        if arcname in self._seen_arcnames:
+            if "." in arcname.split("/")[-1]:
+                stem, ext = arcname.rsplit(".", 1)
+            else:
+                stem, ext = arcname, ""
+            n = 2
+            while True:
+                candidate = f"{stem}_{n}.{ext}" if ext else f"{stem}_{n}"
+                if candidate not in self._seen_arcnames:
+                    arcname = candidate
+                    break
+                n += 1
+        self._seen_arcnames.add(arcname)
         self._items.append((arcname, src))
         self._log(f"ok  ({size:>11,} B)  {arcname}")
         return True
+
+    # ── Per-category progress tracking ───────────────────────────────────────
+
+    @contextmanager
+    def _timed(self, key: str, label: str):
+        """
+        Context manager that wraps a single artifact-category collection call.
+        • Prints a live 'collecting…' placeholder on stdout.
+        • Suppresses the [*] section-header that _from() methods print.
+        • Buffers stderr (warnings) so they don't interleave with the status line.
+        • On exit: overwrites the placeholder with a result line (files / time / ✓✗).
+        • Appends a result dict to self._results for the final summary.
+        """
+        self._current_cat += 1
+        idx   = self._current_cat
+        total = self._total_cats or "?"
+        pad   = f"{label:<44}"
+        pfx   = f"  [{idx:>2}/{total}]  {pad}"
+
+        items_before  = len(self._items)
+        errors_before = len(self._errors)
+        t0 = time.monotonic()
+
+        # Live placeholder — overwritten by the result line on exit
+        sys.stdout.write(f"{pfx}  collecting…\r")
+        sys.stdout.flush()
+
+        # ── stdout filter: swallow "  [*] …" lines emitted by _from() methods ──
+        class _FilterOut:
+            def __init__(self, w):
+                self._w = w
+                self._skip_nl = False
+            def write(self, txt):
+                if "  [*]" in txt:
+                    self._skip_nl = True
+                    return
+                if self._skip_nl and txt in ("\n", "\r\n", "\r"):
+                    self._skip_nl = False
+                    return
+                self._skip_nl = False
+                self._w.write(txt)
+            def flush(self):        self._w.flush()
+            def __getattr__(self, n): return getattr(self._w, n)
+
+        # ── stderr capture: keep warnings from interleaving with status lines ──
+        class _BufErr:
+            def __init__(self):
+                self._buf = io.StringIO()
+            def write(self, txt):   self._buf.write(txt)
+            def flush(self):        pass
+            def getvalue(self):     return self._buf.getvalue()
+            def __getattr__(self, n): return getattr(sys.__stderr__, n)
+
+        orig_out = sys.stdout
+        orig_err = sys.stderr
+        ferr = _BufErr()
+        sys.stdout = _FilterOut(orig_out)
+        sys.stderr = ferr
+        try:
+            yield
+        finally:
+            sys.stdout = orig_out
+            sys.stderr = orig_err
+
+            elapsed = time.monotonic() - t0
+            added   = len(self._items) - items_before
+            new_errs = self._errors[errors_before:]
+            ok   = added > 0
+            mark = "✓" if ok else "✗"
+            stat = f"  {added:>5} files  {elapsed:>5.1f}s  {mark}"
+            if not ok and new_errs:
+                stat += f"  ({new_errs[0][:36]})"
+            print(f"{pfx}{stat}")
+
+            # Flush captured warnings in verbose mode only
+            if self.verbose:
+                captured = ferr.getvalue()
+                if captured:
+                    sys.stderr.write(captured)
+
+            self._results.append({
+                "label":    label,
+                "files":    added,
+                "duration": elapsed,
+                "ok":       ok,
+                "errors":   list(new_errs),
+            })
+
+    def _run_cat(self, key: str, fn, *args) -> None:
+        """Run fn(*args) inside a _timed() context if the category is wanted."""
+        if self._want(key):
+            label = ARTIFACT_LABELS.get(key, key)
+            with self._timed(key, label):
+                fn(*args)
 
     def _copy_locked(self, src: Path, dest: Path) -> bool:
         try:
@@ -250,15 +363,33 @@ class Collector:
 
     def package(self) -> None:
         n = len(self._items)
-        print(f"\n  [+] Packaging {n} file{'s' if n != 1 else ''} → {self.output.name}")
+        BAR_W = 44
+        t0 = time.monotonic()
+
+        print(f"\n{_HR}")
+        print(f"  Packaging")
+        print(_HR)
+        print(f"\n  {n} file{'s' if n != 1 else ''} → {self.output.name}\n")
+
+        self.output.parent.mkdir(parents=True, exist_ok=True)
+        last_bar = ""
         with zipfile.ZipFile(str(self.output), "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            for arcname, path in self._items:
+            for i, (arcname, path) in enumerate(self._items, 1):
                 try:
                     zf.write(str(path), arcname)
                 except Exception as exc:
                     self._warn(f"Archive failed for {arcname}: {exc}")
+                filled = int(BAR_W * i / n) if n else BAR_W
+                last_bar = "█" * filled + "░" * (BAR_W - filled)
+                sys.stdout.write(f"\r  [{last_bar}] {i}/{n}  ")
+                sys.stdout.flush()
+
+        elapsed = time.monotonic() - t0
         size_mb = self.output.stat().st_size / (1024 * 1024)
-        print(f"  [+] Archive ready: {self.output}  ({size_mb:.1f} MB)")
+        print(f"\r  [{'█' * BAR_W}] {n}/{n}  done          ")
+        print(f"\n  Archive  : {self.output}")
+        print(f"  Size     : {size_mb:.1f} MB")
+        print(f"  Packed   : {elapsed:.1f}s")
 
     def cleanup(self) -> None:
         shutil.rmtree(self.staging, ignore_errors=True)
@@ -271,17 +402,18 @@ class Collector:
 class WindowsCollector(Collector):
 
     def collect_all(self) -> None:
-        if self._want("evtx"):      self._evtx()
-        if self._want("registry"):  self._registry()
-        if self._want("prefetch"):  self._prefetch()
-        if self._want("lnk"):       self._lnk()
-        if self._want("browser"):   self._browser()
-        if self._want("tasks"):     self._scheduled_tasks()
-        if self._want("mft"):       self._mft()
-        if self._want("pe"):        self._pe_binaries()
-        if self._want("documents"): self._documents()
-        if self._want("triage"):    self._system_triage()
-        if self._want("memory"):    self._memory()
+        self._total_cats = len(self.collect)
+        self._run_cat("evtx",      self._evtx)
+        self._run_cat("registry",  self._registry)
+        self._run_cat("prefetch",  self._prefetch)
+        self._run_cat("lnk",       self._lnk)
+        self._run_cat("browser",   self._browser)
+        self._run_cat("tasks",     self._scheduled_tasks)
+        self._run_cat("mft",       self._mft)
+        self._run_cat("pe",        self._pe_binaries)
+        self._run_cat("documents", self._documents)
+        self._run_cat("triage",    self._system_triage)
+        self._run_cat("memory",    self._memory)
 
     def _evtx(self) -> None:
         print("  [*] Event Logs (EVTX)")
@@ -694,18 +826,19 @@ class WindowsCollector(Collector):
 class LinuxCollector(Collector):
 
     def collect_all(self) -> None:
-        if self._want("logs"):      self._logs()
-        if self._want("history"):   self._shell_history()
-        if self._want("config"):    self._system_config()
-        if self._want("cron"):      self._cron()
-        if self._want("ssh"):       self._ssh_artifacts()
-        if self._want("network"):   self._network_captures()
-        if self._want("suricata"):  self._suricata_logs()
-        if self._want("zeek"):      self._zeek_logs()
-        if self._want("pe"):        self._pe_binaries()
-        if self._want("documents"): self._documents()
-        if self._want("triage"):    self._system_triage()
-        if self._want("memory"):    self._memory()
+        self._total_cats = len(self.collect)
+        self._run_cat("logs",      self._logs)
+        self._run_cat("history",   self._shell_history)
+        self._run_cat("config",    self._system_config)
+        self._run_cat("cron",      self._cron)
+        self._run_cat("ssh",       self._ssh_artifacts)
+        self._run_cat("network",   self._network_captures)
+        self._run_cat("suricata",  self._suricata_logs)
+        self._run_cat("zeek",      self._zeek_logs)
+        self._run_cat("pe",        self._pe_binaries)
+        self._run_cat("documents", self._documents)
+        self._run_cat("triage",    self._system_triage)
+        self._run_cat("memory",    self._memory)
 
     def _logs(self) -> None:
         print("  [*] System Logs")
@@ -1013,17 +1146,18 @@ class LinuxCollector(Collector):
 class MacOSCollector(Collector):
 
     def collect_all(self) -> None:
-        if self._want("logs"):         self._logs()
-        if self._want("history"):      self._shell_history()
-        if self._want("config"):       self._system_config()
-        if self._want("launchagents"): self._launch_agents()
-        if self._want("browser"):      self._browser()
-        if self._want("plist"):        self._plist_preferences()
-        if self._want("network"):      self._network_captures()
-        if self._want("pe"):           self._pe_binaries()
-        if self._want("documents"):    self._documents()
-        if self._want("triage"):       self._system_triage()
-        if self._want("memory"):       self._memory()
+        self._total_cats = len(self.collect)
+        self._run_cat("logs",         self._logs)
+        self._run_cat("history",      self._shell_history)
+        self._run_cat("config",       self._system_config)
+        self._run_cat("launchagents", self._launch_agents)
+        self._run_cat("browser",      self._browser)
+        self._run_cat("plist",        self._plist_preferences)
+        self._run_cat("network",      self._network_captures)
+        self._run_cat("pe",           self._pe_binaries)
+        self._run_cat("documents",    self._documents)
+        self._run_cat("triage",       self._system_triage)
+        self._run_cat("memory",       self._memory)
 
     # ── Logs ──────────────────────────────────────────────────────────────────
 
@@ -1564,73 +1698,76 @@ class ExternalDiskCollector(Collector):
         win_dir   = root / "Windows"
         users_dir = root / "Users"
 
-        print(f"  [+] Filesystem root: {root}")
-        print(f"      Windows dir present: {win_dir.exists()}")
-        print(f"      Users dir present  : {users_dir.exists()}")
+        print(f"  Filesystem root : {root}")
+        print(f"  Windows dir     : {'found' if win_dir.exists() else 'not found'}")
+        print(f"  Users dir       : {'found' if users_dir.exists() else 'not found'}")
+        print()
+
+        self._total_cats = len(self.collect)
 
         # ── Core ─────────────────────────────────────────────────────────────
-        if self._want("evtx"):             self._evtx_from(win_dir)
-        if self._want("registry"):         self._registry_from(win_dir, users_dir)
-        if self._want("prefetch"):         self._prefetch_from(win_dir)
-        if self._want("mft"):              self._mft_from(root)
-        if self._want("execution"):        self._execution_from(win_dir)
-        if self._want("persistence"):      self._persistence_from(win_dir)
-        if self._want("filesystem"):       self._filesystem_from(root)
+        self._run_cat("evtx",            self._evtx_from,            win_dir)
+        self._run_cat("registry",        self._registry_from,        win_dir, users_dir)
+        self._run_cat("prefetch",        self._prefetch_from,        win_dir)
+        self._run_cat("mft",             self._mft_from,             root)
+        self._run_cat("execution",       self._execution_from,       win_dir)
+        self._run_cat("persistence",     self._persistence_from,     win_dir)
+        self._run_cat("filesystem",      self._filesystem_from,      root)
         # ── Network & USB ────────────────────────────────────────────────────
-        if self._want("network_cfg"):      self._network_cfg_from(root, win_dir)
-        if self._want("usb_devices"):      self._usb_devices_from(win_dir)
+        self._run_cat("network_cfg",     self._network_cfg_from,     root, win_dir)
+        self._run_cat("usb_devices",     self._usb_devices_from,     win_dir)
         # ── Credentials & Security ───────────────────────────────────────────
-        if self._want("credentials"):      self._credentials_from(win_dir, users_dir)
-        if self._want("antivirus"):        self._antivirus_from(root)
-        if self._want("wer_crashes"):      self._wer_crashes_from(root)
-        if self._want("win_logs"):         self._win_logs_from(win_dir)
-        if self._want("boot_uefi"):        self._boot_uefi_from(win_dir)
-        if self._want("encryption"):       self._encryption_from(win_dir)
-        if self._want("etw_diagnostics"):  self._etw_diagnostics_from(win_dir)
+        self._run_cat("credentials",     self._credentials_from,     win_dir, users_dir)
+        self._run_cat("antivirus",       self._antivirus_from,       root)
+        self._run_cat("wer_crashes",     self._wer_crashes_from,     root)
+        self._run_cat("win_logs",        self._win_logs_from,        win_dir)
+        self._run_cat("boot_uefi",       self._boot_uefi_from,       win_dir)
+        self._run_cat("encryption",      self._encryption_from,      win_dir)
+        self._run_cat("etw_diagnostics", self._etw_diagnostics_from, win_dir)
         # ── Browsers ─────────────────────────────────────────────────────────
-        if self._want("browser"):          self._browser_from(users_dir)
-        if self._want("browser_chrome"):   self._browser_chrome_from(users_dir)
-        if self._want("browser_edge"):     self._browser_edge_from(users_dir)
-        if self._want("browser_ie"):       self._browser_ie_from(users_dir)
+        self._run_cat("browser",         self._browser_from,         users_dir)
+        self._run_cat("browser_chrome",  self._browser_chrome_from,  users_dir)
+        self._run_cat("browser_edge",    self._browser_edge_from,    users_dir)
+        self._run_cat("browser_ie",      self._browser_ie_from,      users_dir)
         # ── Email ────────────────────────────────────────────────────────────
-        if self._want("email_outlook"):    self._email_outlook_from(users_dir)
-        if self._want("email_thunderbird"):self._email_thunderbird_from(users_dir)
+        self._run_cat("email_outlook",    self._email_outlook_from,    users_dir)
+        self._run_cat("email_thunderbird",self._email_thunderbird_from,users_dir)
         # ── Messaging ────────────────────────────────────────────────────────
-        if self._want("teams"):            self._teams_from(users_dir)
-        if self._want("slack"):            self._slack_from(users_dir)
-        if self._want("discord"):          self._discord_from(users_dir)
-        if self._want("signal"):           self._signal_from(users_dir)
-        if self._want("whatsapp"):         self._whatsapp_from(users_dir)
-        if self._want("telegram"):         self._telegram_from(users_dir)
+        self._run_cat("teams",           self._teams_from,            users_dir)
+        self._run_cat("slack",           self._slack_from,            users_dir)
+        self._run_cat("discord",         self._discord_from,          users_dir)
+        self._run_cat("signal",          self._signal_from,           users_dir)
+        self._run_cat("whatsapp",        self._whatsapp_from,         users_dir)
+        self._run_cat("telegram",        self._telegram_from,         users_dir)
         # ── Cloud ────────────────────────────────────────────────────────────
-        if self._want("cloud_onedrive"):   self._cloud_onedrive_from(users_dir)
-        if self._want("cloud_google_drive"):self._cloud_google_drive_from(users_dir)
-        if self._want("cloud_dropbox"):    self._cloud_dropbox_from(users_dir)
+        self._run_cat("cloud_onedrive",    self._cloud_onedrive_from,    users_dir)
+        self._run_cat("cloud_google_drive",self._cloud_google_drive_from,users_dir)
+        self._run_cat("cloud_dropbox",     self._cloud_dropbox_from,     users_dir)
         # ── Remote access ────────────────────────────────────────────────────
-        if self._want("remote_access"):    self._remote_access_from(root, users_dir)
-        if self._want("rdp"):              self._rdp_from(users_dir)
-        if self._want("ssh_ftp"):          self._ssh_ftp_from(users_dir)
+        self._run_cat("remote_access",   self._remote_access_from,   root, users_dir)
+        self._run_cat("rdp",             self._rdp_from,             users_dir)
+        self._run_cat("ssh_ftp",         self._ssh_ftp_from,         users_dir)
         # ── Apps & user data ─────────────────────────────────────────────────
-        if self._want("lnk"):              self._lnk_from(users_dir)
-        if self._want("tasks"):            self._tasks_from(win_dir)
-        if self._want("office"):           self._office_from(users_dir)
-        if self._want("dev_tools"):        self._dev_tools_from(users_dir)
-        if self._want("password_managers"):self._password_managers_from(users_dir)
-        if self._want("database_clients"): self._database_clients_from(users_dir)
-        if self._want("gaming"):           self._gaming_from(root, users_dir)
-        if self._want("windows_apps"):     self._windows_apps_from(users_dir)
-        if self._want("wsl"):              self._wsl_from(users_dir)
+        self._run_cat("lnk",             self._lnk_from,             users_dir)
+        self._run_cat("tasks",           self._tasks_from,           win_dir)
+        self._run_cat("office",          self._office_from,          users_dir)
+        self._run_cat("dev_tools",       self._dev_tools_from,       users_dir)
+        self._run_cat("password_managers",self._password_managers_from,users_dir)
+        self._run_cat("database_clients",self._database_clients_from,users_dir)
+        self._run_cat("gaming",          self._gaming_from,          root, users_dir)
+        self._run_cat("windows_apps",    self._windows_apps_from,    users_dir)
+        self._run_cat("wsl",             self._wsl_from,             users_dir)
         # ── Infrastructure ───────────────────────────────────────────────────
-        if self._want("vpn"):              self._vpn_from(root)
-        if self._want("iis_web"):          self._iis_web_from(root)
-        if self._want("active_directory"): self._active_directory_from(win_dir)
-        if self._want("virtualization"):   self._virtualization_from(root)
-        if self._want("recovery"):         self._recovery_from(root)
-        if self._want("printing"):         self._printing_from(win_dir)
+        self._run_cat("vpn",             self._vpn_from,             root)
+        self._run_cat("iis_web",         self._iis_web_from,         root)
+        self._run_cat("active_directory",self._active_directory_from,win_dir)
+        self._run_cat("virtualization",  self._virtualization_from,  root)
+        self._run_cat("recovery",        self._recovery_from,        root)
+        self._run_cat("printing",        self._printing_from,        win_dir)
         # ── Heavy / opt-in ───────────────────────────────────────────────────
-        if self._want("pe"):               self._pe_from(win_dir, users_dir)
-        if self._want("documents"):        self._documents_from(users_dir)
-        if self._want("memory_artifacts"): self._memory_artifacts_from(root)
+        self._run_cat("pe",              self._pe_from,              win_dir, users_dir)
+        self._run_cat("documents",       self._documents_from,       users_dir)
+        self._run_cat("memory_artifacts",self._memory_artifacts_from,root)
 
     def _evtx_from(self, win_dir: Path) -> None:
         print("  [*] Event Logs (EVTX)")
@@ -2324,64 +2461,70 @@ def upload_to_fo(zip_path: Path, api_url: str, case_id: str, api_token: str = ""
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="tracex-collector",
-        description="TraceX Artifact Collector",
+        prog="fo-harvester",
+        description="ForensicsOperator Harvester",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--output",    "-o", type=Path, default=None)
+    parser.add_argument("--output",    "-o", type=Path, default=None,
+                        help="Full path for the output ZIP (overrides config.json output_dir)")
     parser.add_argument("--api-url",   type=str, default=None)
     parser.add_argument("--case-id",   type=str, default=None)
-    parser.add_argument("--api-token", type=str, default=None,
-                        help="JWT bearer token for authenticated upload")
+    parser.add_argument("--api-token", type=str, default=None)
     parser.add_argument("--collect",   type=str, default=None,
-                        help="Comma-separated artifact types (e.g. evtx,registry,prefetch)")
+                        help="Override categories: comma-separated keys (e.g. evtx,registry)")
     parser.add_argument("--dry-run",   action="store_true")
     parser.add_argument("--verbose",   "-v", action="store_true")
     parser.add_argument(
         "--path", type=str, default=None,
-        help="Path to a mounted Windows filesystem directory (e.g. /mnt/evidence or E:\\). "
-             "Collects Windows artifacts from the given root — works on any OS.",
+        help="Already-mounted Windows filesystem root (e.g. /mnt/evidence or E:\\)",
     )
     parser.add_argument(
         "--disk", type=str, default=None,
-        help="Raw block device or partition to mount and collect from (e.g. /dev/sdb1). "
-             "Linux only — requires ntfs-3g and optionally dislocker for BitLocker volumes. "
-             "For already-mounted directories use --path instead.",
+        help="Raw block device to mount — Linux only (requires ntfs-3g / dislocker)",
     )
     parser.add_argument(
         "--bitlocker-key", type=str, default=None, dest="bitlocker_key",
-        help="BitLocker recovery key (48-digit) or password to unlock the disk before mounting. "
-             "Example: 123456-789012-345678-901234-567890-123456-789012-345678",
+        help="BitLocker recovery key — stays local, never stored in config.json",
     )
     args = parser.parse_args()
 
-    # Merge: EMBEDDED_CONFIG (config.json) < CLI args (CLI always wins)
+    t_start = time.monotonic()
+
+    # Merge: config.json (EMBEDDED_CONFIG) < CLI args (CLI always wins)
     cfg = {**EMBEDDED_CONFIG}
     if args.api_url:   cfg["api_url"]   = args.api_url
     if args.case_id:   cfg["case_id"]   = args.case_id
     if args.api_token: cfg["api_token"] = args.api_token
     if args.collect:   cfg["collect"]   = args.collect.split(",")
-    if args.output:    cfg["output"]    = str(args.output)
 
     api_url   = cfg.get("api_url",   "")
     case_id   = cfg.get("case_id",   "")
     api_token = cfg.get("api_token", "")
-    output    = Path(cfg["output"]) if cfg.get("output") else \
-                Path.cwd() / f"fo-artifacts-{HOSTNAME}-{TS_NOW}.zip"
+    case_name = cfg.get("case_name", "") or ""
 
-    # Input source — CLI only (not stored in config.json)
+    # Build output path — case_name goes in the filename if provided
+    if args.output:
+        output = Path(args.output)
+    else:
+        out_dir   = Path(cfg.get("output_dir", "./output"))
+        name_parts = ["fo-artifacts"]
+        if case_name:
+            name_parts.append(case_name.replace(" ", "_"))
+        name_parts += [HOSTNAME, TS_NOW]
+        filename = "-".join(name_parts) + ".zip"
+        output   = out_dir / filename
+
+    # Input source — CLI only (never stored in config.json)
     path_arg      = args.path or ""
     disk          = args.disk or ""
     bitlocker_key = args.bitlocker_key or ""
 
-    # Live Windows: route through ExternalDiskCollector(C:\) to get all 45+
-    # _from() collection methods. C:\ is a directory so unlock_and_mount()
-    # returns it immediately — no mounting needed.
+    # Live Windows: use ExternalDiskCollector(C:\) to get all 52 _from() methods
     _live_windows = IS_WINDOWS and not path_arg and not disk
     if _live_windows:
         path_arg = os.environ.get("SystemDrive", "C:") + "\\"
 
-    # Collect set: honour explicit list (config.json or --collect), else defaults
+    # Collect set
     raw_collect = cfg.get("collect", [])
     if raw_collect:
         collect_set = set(raw_collect)
@@ -2394,37 +2537,40 @@ def main() -> None:
     else:
         collect_set = DEFAULT_LINUX
 
+    # ── Header ───────────────────────────────────────────────────────────────
     print(BANNER)
-    print(f"  Host     : {HOSTNAME}")
-    print(f"  OS       : {platform.system()} {platform.release()} {platform.machine()}")
-    print(f"  Output   : {output}")
+    print(f"  Host      : {HOSTNAME}")
+    print(f"  OS        : {platform.system()} {platform.release()} {platform.machine()}")
+    if case_name:
+        print(f"  Case      : {case_name}")
+    print(f"  Output    : {output}")
     if api_url and case_id:
-        print(f"  Upload   : {api_url}  →  case {case_id}")
-    print(f"  Collect  : {', '.join(sorted(collect_set)) or '(none)'}")
+        print(f"  Upload    : {api_url}  →  case {case_id}")
+    print(f"  Categories: {len(collect_set)}")
     if _live_windows:
-        print(f"  Mode     : live Windows  ({path_arg})")
+        print(f"  Mode      : live Windows  ({path_arg})")
     elif path_arg:
-        print(f"  Mode     : dead-box directory  ({path_arg})")
+        print(f"  Mode      : dead-box directory  ({path_arg})")
     elif disk:
-        print(f"  Mode     : dead-box raw device  ({disk})")
+        print(f"  Mode      : dead-box raw device  ({disk})")
     else:
-        print(f"  Mode     : live {platform.system()}")
-    print()
+        print(f"  Mode      : live {platform.system()}")
+    if bitlocker_key:
+        print(f"  BitLocker : key provided ({len(bitlocker_key)} chars)")
 
-    # --path: already-mounted Windows filesystem directory (any OS)
-    # --disk: raw block device that needs mounting (Linux only)
+    # ── Collection ───────────────────────────────────────────────────────────
+    print(f"\n{_HR}")
+    print(f"  Collecting forensic artifacts")
+    print(f"{_HR}\n")
+
     external_root = path_arg or disk or ""
 
     if external_root:
         ext_path = Path(external_root)
-        is_raw_device = disk and not ext_path.is_dir()
-        if is_raw_device and not IS_LINUX:
-            print("  [!] Raw block-device collection requires Linux (ntfs-3g + dislocker).", file=sys.stderr)
-            print("      If the disk is already mounted as a directory, use --path instead.", file=sys.stderr)
+        if disk and not ext_path.is_dir() and not IS_LINUX:
+            print("  Raw block-device collection requires Linux (ntfs-3g + dislocker).",
+                  file=sys.stderr)
             sys.exit(1)
-        print(f"  Path     : {external_root}")
-        if bitlocker_key:
-            print(f"  BitLocker: key provided ({len(bitlocker_key)} chars)")
         collector: Collector = ExternalDiskCollector(
             external_root, bitlocker_key=bitlocker_key,
             output=output, collect=collect_set, verbose=args.verbose, dry_run=args.dry_run,
@@ -2436,26 +2582,69 @@ def main() -> None:
     elif IS_LINUX:
         collector = LinuxCollector(output, collect_set, args.verbose, args.dry_run)
     else:
-        print(f"  [!] Unsupported OS: {platform.system()}", file=sys.stderr)
+        print(f"  Unsupported OS: {platform.system()}", file=sys.stderr)
         sys.exit(1)
 
     collector.collect_all()
+    t_collect = time.monotonic() - t_start
 
+    # ── Dry-run report ───────────────────────────────────────────────────────
     if args.dry_run:
-        print(f"\n  [Dry run] Would archive {len(collector._items)} files:")
+        print(f"\n{_HR}")
+        print(f"  Dry run — {len(collector._items)} files would be archived")
+        print(_HR)
         for arcname, _ in collector._items:
             print(f"    {arcname}")
-    else:
-        collector.package()
-        if api_url and case_id:
-            upload_to_fo(output, api_url, case_id, api_token=api_token)
-        elif api_url or case_id:
-            print("  [!] Both --api-url and --case-id required for upload.", file=sys.stderr)
+        collector.cleanup()
+        return
+
+    # ── Package ──────────────────────────────────────────────────────────────
+    collector.package()
+    t_total = time.monotonic() - t_start
+
+    # ── Upload ───────────────────────────────────────────────────────────────
+    if api_url and case_id:
+        upload_to_fo(output, api_url, case_id, api_token=api_token)
+    elif api_url or case_id:
+        print("  Both --api-url and --case-id are required for upload.", file=sys.stderr)
 
     collector.cleanup()
 
-    if collector._errors:
-        print(f"\n  [{len(collector._errors)} warning(s) — some artifacts may be missing]")
+    # ── Results summary ───────────────────────────────────────────────────────
+    results  = collector._results
+    n_ok     = sum(1 for r in results if r["ok"])
+    n_fail   = len(results) - n_ok
+    n_files  = len(collector._items)
+    n_warns  = len(collector._errors)
+
+    print(f"\n{_HR}")
+    print(f"  Results")
+    print(_HR)
+    print()
+
+    if n_fail == 0:
+        print(f"  ✓  All {n_ok} categories collected")
+    else:
+        print(f"  ✓  {n_ok} categor{'y' if n_ok == 1 else 'ies'} collected")
+        print(f"  ✗  {n_fail} categor{'y' if n_fail == 1 else 'ies'} found no files:")
+        for r in results:
+            if not r["ok"]:
+                hint = f"  ({r['errors'][0][:50]})" if r["errors"] else ""
+                print(f"       · {r['label']}{hint}")
+
+    print()
+    print(f"  Files     : {n_files}")
+    print(f"  Collection: {t_collect:.1f}s")
+    print(f"  Total     : {t_total:.1f}s")
+
+    if n_warns:
+        print(f"\n  ⚠  {n_warns} warning(s):")
+        for msg in collector._errors[:8]:
+            print(f"       · {msg[:72]}")
+        if n_warns > 8:
+            print(f"       · … and {n_warns - 8} more")
+
+    print(f"\n{_HR}\n")
 
 
 if __name__ == "__main__":

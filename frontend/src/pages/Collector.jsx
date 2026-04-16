@@ -223,6 +223,7 @@ export default function Collector() {
   const [step, setStep]           = useState(1)
   const [platIdx, setPlatIdx]     = useState(null)
   const [selected, setSelected]   = useState(new Set())
+  const [caseName, setCaseName]   = useState('')
   const [downloading, setDownloading] = useState(false)
   const [downloaded, setDownloaded]   = useState(false)
 
@@ -260,6 +261,7 @@ export default function Collector() {
     setDownloaded(false)
     const url = api.collector.packageUrl({
       categories: [...selected],
+      caseName:   caseName.trim() || undefined,
     })
     const a = document.createElement('a')
     a.href = url
@@ -432,9 +434,24 @@ export default function Collector() {
               <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
                 Configuration summary
               </h3>
-              <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+              <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm mb-4">
                 <SummaryRow label="Platform"  value={platformDef?.label} />
                 <SummaryRow label="Artifacts" value={`${selected.size} types`} />
+                {caseName.trim() && <SummaryRow label="Case name" value={caseName.trim()} mono />}
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">
+                  Case name <span className="text-gray-400 font-normal">(optional — used in output ZIP filename)</span>
+                </label>
+                <input
+                  type="text"
+                  value={caseName}
+                  onChange={e => setCaseName(e.target.value)}
+                  placeholder="e.g. ACME-2024-IR01"
+                  className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2
+                             focus:outline-none focus:ring-2 focus:ring-brand-accent/30 focus:border-brand-accent
+                             placeholder:text-gray-300"
+                />
               </div>
             </div>
 

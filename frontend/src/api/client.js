@@ -298,9 +298,10 @@ export const api = {
     },
     // New: fo-harvester ZIP — config.json has true/false per artifact category.
     // Input source (--path/--disk) and BitLocker key are CLI args on the target.
-    packageUrl: ({ categories = [] } = {}) => {
+    packageUrl: ({ categories = [], caseName } = {}) => {
       const params = new URLSearchParams()
       if (categories.length > 0) params.set('categories', categories.join(','))
+      if (caseName)              params.set('case_name', caseName)
       const token = getToken()
       if (token) params.set('_token', token)
       const qs = params.toString()

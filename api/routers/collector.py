@@ -209,13 +209,17 @@ def download_harvester_package(
         default=None,
         description="Comma-separated enabled category keys. All others set to false.",
     ),
+    case_name: Optional[str] = Query(
+        default=None,
+        description="Case name — used only in the output ZIP filename.",
+    ),
 ):
     """
     Return a self-contained ZIP: fo-harvester.py + config.json (true/false per
     artifact category) + launch scripts.
 
     config.json format:
-      { "output_dir": "./output", "evtx": true, "registry": true, ... }
+      { "output_dir": "./output", "case_name": "...", "evtx": true, ... }
 
     Input source (--path / --disk) and BitLocker key (--bitlocker-key) are
     CLI arguments on the target machine — never stored in config.json.
@@ -223,6 +227,8 @@ def download_harvester_package(
     enabled = {c.strip() for c in categories.split(",") if c.strip()} if categories else set()
 
     config: dict = {"output_dir": "./output"}
+    if case_name:
+        config["case_name"] = case_name.strip()
     for cat in _ALL_CATEGORIES:
         config[cat] = cat in enabled
 
