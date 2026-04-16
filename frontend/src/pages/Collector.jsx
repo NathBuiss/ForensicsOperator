@@ -8,9 +8,8 @@
 import { useState, useEffect } from 'react'
 import {
   Monitor, Terminal, FileCode, Download, Check,
-  ChevronRight, ChevronLeft, Wifi, RefreshCw,
-  PackageOpen, AlertTriangle, Globe, Loader2, Trash2,
-  Info, Copy, ExternalLink,
+  ChevronRight, ChevronLeft,
+  PackageOpen, AlertTriangle,
 } from 'lucide-react'
 import { api } from '../api/client'
 
@@ -221,36 +220,14 @@ const PLATFORM_GROUPS = ['Endpoint', 'Network', 'Other']
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function Collector() {
-  // ── shared state ──────────────────────────────────────────────────────────
-  const [step, setStep]               = useState(1)
-  const [platIdx, setPlatIdx]         = useState(null)
-  const [cases, setCases]             = useState([])
-  const [caseId, setCaseId]           = useState('')
-
-  // Script-mode state
-  const [selected, setSelected]       = useState(new Set())
-  const [apiUrl, setApiUrl]           = useState('')
-  const [netIps, setNetIps]           = useState([])
-  const [inK8s, setInK8s]             = useState(false)
-  const [netLoading, setNetLoading]   = useState(false)
-  const [ipHint, setIpHint]           = useState(null)
-  const [ingress, setIngress]         = useState(null)
-  const [ingressBusy, setIngressBusy] = useState(false)
+  const [step, setStep]           = useState(1)
+  const [platIdx, setPlatIdx]     = useState(null)
+  const [selected, setSelected]   = useState(new Set())
   const [downloading, setDownloading] = useState(false)
   const [downloaded, setDownloaded]   = useState(false)
 
-
   const platformDef = platIdx !== null ? PLATFORMS[platIdx] : null
   const artifacts   = platformDef?.artifacts || []
-
-  // ── data loading ──────────────────────────────────────────────────────────
-  useEffect(() => {
-    api.cases.list().then(r => {
-      const cs = r.cases || []
-      setCases(cs)
-      if (cs.length === 1) setCaseId(cs[0].case_id)
-    }).catch(() => {})
-  }, [])
 
   // Pre-select artifacts when platform chosen
   useEffect(() => {
@@ -262,7 +239,6 @@ export default function Collector() {
     setStep(1)
   }, [platIdx])
 
-  // ── script handlers ───────────────────────────────────────────────────────
   function toggleArtifact(key) {
     setSelected(prev => {
       const next = new Set(prev)
@@ -279,82 +255,22 @@ export default function Collector() {
     )
   }
 
-  function detectIps() {
-    setNetLoading(true)
-    api.collector.networkInterfaces()
-      .then(r => {
-        const candidates = r.candidates || []
-        setNetIps(candidates)
-        setInK8s(r.in_kubernetes || false)
-        setIpHint(r.public_url_hint || null)
-        const lbEntry  = candidates.find(c => c.k8s && c.label?.includes('LoadBalancer'))
-        const lanEntry = candidates.find(c => c.label === 'LAN' || c.label === 'host machine (Docker Desktop)')
-        const best     = lbEntry || lanEntry
-        if (best && !apiUrl) setApiUrl(best.url)
-      })
-      .catch(() => {})
-      .finally(() => setNetLoading(false))
-  }
-
-  async function createIngress() {
-    setIngressBusy(true)
-    try {
-      const r = await api.collector.createIngress()
-      setIngress(r)
-      if (r.external_url) setApiUrl(r.external_url)
-    } catch (e) {
-      setIngress({ status: 'error', error: e.message })
-    } finally {
-      setIngressBusy(false)
-    }
-  }
-
-  async function pollIngress() {
-    setIngressBusy(true)
-    try {
-      const r = await api.collector.getIngress()
-      setIngress(r)
-      if (r.external_url) setApiUrl(r.external_url)
-    } catch { /* ignore */ } finally {
-      setIngressBusy(false)
-    }
-  }
-
-  async function removeIngress() {
-    setIngressBusy(true)
-    try {
-      await api.collector.deleteIngress()
-      setIngress(null)
-    } catch { /* ignore */ } finally {
-      setIngressBusy(false)
-    }
-  }
-
-  function handleCaseSelect(id) {
-    setCaseId(id)
-    if (!apiUrl) detectIps()
-  }
-
   function handleDownload() {
     setDownloading(true)
     setDownloaded(false)
-    const url = api.collector.downloadUrl({
-      platform: platformDef?.id,
-      caseId:  caseId  || undefined,
-      apiUrl:  apiUrl  || undefined,
-      collect: selected.size > 0 ? [...selected] : undefined,
+    const url = api.collector.packageUrl({
+      categories: selected.size > 0 ? [...selected] : [],
+      level:      'complete',
     })
     const a = document.createElement('a')
     a.href = url
-    a.download = 'fo-collector.py'
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
     setTimeout(() => { setDownloading(false); setDownloaded(true) }, 1200)
   }
 
-  // ── derived / display ─────────────────────────────────────────────────────
-  const stepLabels = ['Platform', 'Artifacts', 'Configure & Download']
+  const stepLabels = ['Platform', 'Artifacts', 'Download']
 
   // ── render ────────────────────────────────────────────────────────────────
   return (
@@ -523,155 +439,53 @@ export default function Collector() {
               </div>
             </div>
 
-            {/* Case selector */}
+            {/* Download package */}
             <div className="card p-4">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
-                Upload target <span className="text-gray-300 normal-case font-normal">— optional</span>
+              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
+                Download Package
               </h3>
-              <p className="text-xs text-gray-500 mb-3">
-                Link the collector to a case so artifacts upload automatically when it runs.
+              <p className="text-xs text-gray-500 mb-4 leading-relaxed">
+                Downloads <code className="text-[10px] bg-gray-100 px-1 py-0.5 rounded">fo-harvester.zip</code> — the ForensicHarvester
+                bundled with your pre-selected artifact categories. Requires{' '}
+                <strong className="text-gray-500">Python 3.8+</strong> on the target — no extra packages needed.
               </p>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Case</label>
-                  <select className="input text-sm" value={caseId} onChange={e => handleCaseSelect(e.target.value)}>
-                    <option value="">— No case (save locally) —</option>
-                    {cases.map(c => <option key={c.case_id} value={c.case_id}>{c.name}</option>)}
-                  </select>
-                </div>
-
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="text-xs font-medium text-gray-600">API URL</label>
-                    <button className="btn-ghost text-xs py-0.5 gap-1" onClick={detectIps}>
-                      {netLoading ? <RefreshCw size={10} className="animate-spin" /> : <Wifi size={10} />}
-                      Detect
-                    </button>
-                  </div>
-                  <input
-                    type="text"
-                    className="input text-xs font-mono"
-                    value={apiUrl}
-                    onChange={e => setApiUrl(e.target.value)}
-                    placeholder="http://192.168.1.x:8000/api/v1"
-                  />
-                </div>
-              </div>
-
-              {ipHint && (
-                <div className="mt-3 flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
-                  <AlertTriangle size={13} className="flex-shrink-0 mt-0.5 text-amber-500" />
-                  <div>
-                    <strong>Only Docker-internal IPs detected.</strong>{' '}
-                    Set <code className="bg-amber-100 px-1 rounded">FO_PUBLIC_URL</code> in your docker-compose.yml.
-                  </div>
-                </div>
-              )}
-
-              {netIps.length > 0 && (
-                <div className="mt-3">
-                  <p className="text-[11px] text-gray-400 mb-2 flex items-center gap-1">
-                    <Wifi size={10} /> Detected addresses — click to use
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    {netIps.map(c => {
-                      const isInternal = c.ip.startsWith('172.') || c.label === 'docker bridge'
-                      return (
-                        <button
-                          key={c.url}
-                          onClick={() => setApiUrl(c.url)}
-                          title={`Interface: ${c.iface}`}
-                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-mono transition-all ${
-                            apiUrl === c.url
-                              ? 'border-brand-accent bg-brand-accentlight text-brand-accent'
-                              : isInternal
-                              ? 'border-gray-200 bg-gray-50 text-gray-400 hover:border-amber-300'
-                              : 'border-gray-200 bg-white text-gray-600 hover:border-brand-accent/50'
-                          }`}
-                        >
-                          {c.k8s ? <Globe size={10} /> : isInternal ? <AlertTriangle size={10} className="text-amber-400" /> : <Wifi size={10} />}
-                          <span>{c.ip}</span>
-                          {c.label && <span className="text-gray-400 font-sans text-[10px]">({c.label})</span>}
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {inK8s && (
-                <div className="mt-4 pt-4 border-t border-gray-100">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-1.5">
-                      <Globe size={12} className="text-brand-accent" />
-                      <span className="text-xs font-medium text-gray-600">Kubernetes LoadBalancer</span>
-                      {ingress?.status === 'ready'   && <span className="badge bg-green-100 text-green-700 border border-green-200 text-[10px]">ready</span>}
-                      {ingress?.status === 'pending' && <span className="badge bg-amber-100 text-amber-700 border border-amber-200 text-[10px]">pending IP…</span>}
-                    </div>
-                    <div className="flex gap-1.5">
-                      {ingress ? (
-                        <>
-                          <button className="btn-ghost text-xs py-0.5 gap-1" onClick={pollIngress} disabled={ingressBusy}>
-                            {ingressBusy ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />} Refresh
-                          </button>
-                          <button className="btn-ghost text-xs py-0.5 gap-1 text-red-500 hover:text-red-600" onClick={removeIngress} disabled={ingressBusy}>
-                            <Trash2 size={10} /> Delete
-                          </button>
-                        </>
-                      ) : (
-                        <button className="btn-primary text-xs py-0.5 gap-1" onClick={createIngress} disabled={ingressBusy || !caseId}>
-                          {ingressBusy ? <Loader2 size={10} className="animate-spin" /> : <Globe size={10} />} Create LoadBalancer
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                  {ingress?.external_url && (
-                    <div className="flex items-center gap-2 px-3 py-2 bg-green-50 border border-green-200 rounded-lg text-xs">
-                      <Check size={11} className="text-green-600 flex-shrink-0" />
-                      <span className="font-mono text-green-800 flex-1 truncate">{ingress.external_url}</span>
-                      <button className="text-green-600 hover:text-green-800 text-[10px]" onClick={() => setApiUrl(ingress.external_url)}>Use</button>
-                    </div>
-                  )}
-                  {ingress?.status === 'error' && <RbacErrorBanner error={ingress.error} />}
-                </div>
-              )}
-            </div>
-
-            {/* Download */}
-            <div className="card p-4">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Download</h3>
               <button
                 className={`btn-primary w-full justify-center h-10 gap-2 ${downloaded ? '!bg-green-600' : ''}`}
                 onClick={handleDownload}
                 disabled={selected.size === 0 || downloading}
               >
                 {downloading
-                  ? 'Generating…'
+                  ? 'Preparing…'
                   : downloaded
-                  ? <><Check size={14} /> Downloaded — fo-collector.py</>
-                  : <><Download size={14} /> Download fo-collector.py</>
+                  ? <><Check size={14} /> fo-harvester.zip downloaded</>
+                  : <><Download size={14} /> Download fo-harvester.zip</>
                 }
               </button>
 
               {downloaded && (
-                <div className="mt-3 bg-gray-950 rounded-lg p-3.5 text-[11px] font-mono text-gray-300 leading-relaxed">
-                  <span className="text-gray-500"># Run on the target machine</span>{'\n'}
-                  {platformDef?.id === 'win'
-                    ? 'python fo-collector.py     # as Administrator'
-                    : 'python3 fo-collector.py   # as root'
-                  }
-                  {caseId && apiUrl && (<>{'\n\n'}<span className="text-gray-500"># Artifacts auto-upload to case </span><span className="text-brand-accent">{caseId}</span></>)}
-                  {!caseId && (<>{'\n\n'}<span className="text-amber-400">⚠ No case linked — ZIP saved locally.</span></>)}
+                <div className="mt-4 bg-gray-950 rounded-lg p-4 text-[11px] font-mono leading-relaxed space-y-1">
+                  <div className="text-gray-500 mb-2"># 1. Extract the ZIP on the target machine</div>
+                  <div className="text-gray-300">
+                    {platformDef?.id === 'win'
+                      ? <>
+                          <span className="text-gray-500"># Windows — run as Administrator</span>{'\n'}
+                          {'double-click run.bat'}
+                          {'\n'}
+                          {'   — or — python forensic_harvester.py'}
+                        </>
+                      : <>
+                          <span className="text-gray-500"># Linux / macOS — run as root</span>{'\n'}
+                          {'sh run.sh'}
+                          {'\n'}
+                          {'   — or — python3 forensic_harvester.py'}
+                        </>
+                    }
+                  </div>
+                  <div className="text-gray-500 pt-2"># 2. A ZIP of collected artifacts is created in ./output/</div>
+                  <div className="text-amber-400 pt-1">Upload that ZIP to ForensicsOperator via the Ingest panel.</div>
                 </div>
               )}
-
-              <p className="text-[11px] text-gray-400 mt-3 leading-relaxed">
-                Requires <strong className="text-gray-500">Python 3.8+</strong> on the target.
-                Build zero-dependency binary:{' '}
-                <code className="text-[10px] bg-gray-100 px-1 py-0.5 rounded">build.bat</code> (Windows) or{' '}
-                <code className="text-[10px] bg-gray-100 px-1 py-0.5 rounded">./build.sh</code> (Linux).
-              </p>
             </div>
           </div>
         )}
@@ -711,43 +525,3 @@ function SummaryRow({ label, value, mono }) {
   )
 }
 
-// ── RbacErrorBanner ───────────────────────────────────────────────────────────
-function RbacErrorBanner({ error }) {
-  const [yaml, setYaml]     = useState(null)
-  const [copied, setCopied] = useState(false)
-  const is403 = error?.includes('403') || error?.toLowerCase().includes('forbidden')
-
-  useEffect(() => {
-    if (!is403) return
-    api.collector.getRbacYaml().then(text => setYaml(text)).catch(() => {})
-  }, [is403])
-
-  function copyYaml() {
-    if (!yaml) return
-    navigator.clipboard.writeText(yaml).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000) })
-  }
-
-  return (
-    <div className="mt-2 space-y-1.5">
-      <p className="text-[11px] text-red-500">{error}</p>
-      {is403 && (
-        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-[11px] text-amber-800 space-y-2">
-          <p className="font-semibold flex items-center gap-1.5"><Info size={11} /> RBAC setup required</p>
-          <p>Download and apply from a machine with kubectl access:</p>
-          <div className="flex items-center gap-2">
-            <a href={api.collector.rbacUrl()} download="fo-rbac.yaml"
-               className="inline-flex items-center gap-1 px-2 py-1 bg-amber-100 rounded border border-amber-300 text-amber-800 hover:bg-amber-200 font-medium">
-              <ExternalLink size={10} /> Download fo-rbac.yaml
-            </a>
-            {yaml && (
-              <button onClick={copyYaml} className="inline-flex items-center gap-1 px-2 py-1 bg-amber-100 rounded border border-amber-300 text-amber-800 hover:bg-amber-200">
-                <Copy size={10} /> {copied ? 'Copied!' : 'Copy YAML'}
-              </button>
-            )}
-          </div>
-          {yaml && <pre className="bg-gray-900 text-green-300 rounded p-2 text-[10px] font-mono overflow-x-auto max-h-40">{`kubectl apply -f fo-rbac.yaml`}</pre>}
-        </div>
-      )}
-    </div>
-  )
-}

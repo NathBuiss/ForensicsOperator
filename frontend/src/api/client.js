@@ -286,19 +286,24 @@ export const api = {
   },
 
   collector: {
+    // Legacy: single-file collect.py with embedded config (still available)
     downloadUrl: ({ platform = 'py', caseId, apiUrl, collect } = {}) => {
       const params = new URLSearchParams({ platform })
       if (caseId)  params.set('case_id',  caseId)
       if (apiUrl)  params.set('api_url',  apiUrl)
       if (collect && collect.length > 0) params.set('collect', collect.join(','))
-      // _token  → authenticates the download request (read by auth dependency)
-      // api_token → embedded in the script so it can upload artifacts without prompting
       const token = getToken()
-      if (token) {
-        params.set('_token',    token)
-        params.set('api_token', token)
-      }
+      if (token) { params.set('_token', token); params.set('api_token', token) }
       return `/api/v1/collector/download?${params.toString()}`
+    },
+    // New: full ForensicHarvester ZIP bundle with pre-filled config.json
+    packageUrl: ({ categories = [], level = 'complete', sourcePath } = {}) => {
+      const params = new URLSearchParams({ level })
+      if (categories.length > 0) params.set('categories', categories.join(','))
+      if (sourcePath)            params.set('source_path', sourcePath)
+      const token = getToken()
+      if (token) params.set('_token', token)
+      return `/api/v1/collector/package?${params.toString()}`
     },
     networkInterfaces: () => request('GET',    '/network/interfaces'),
     createIngress:     () => request('POST',   '/collector/ingress'),
