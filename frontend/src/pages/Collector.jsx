@@ -445,8 +445,8 @@ export default function Collector() {
                 Download Package
               </h3>
               <p className="text-xs text-gray-500 mb-4 leading-relaxed">
-                Downloads <code className="text-[10px] bg-gray-100 px-1 py-0.5 rounded">fo-harvester.zip</code> — the ForensicHarvester
-                bundled with your pre-selected artifact categories. Requires{' '}
+                Downloads <code className="text-[10px] bg-gray-100 px-1 py-0.5 rounded">fo-harvester.zip</code> — a self-contained collector
+                with your pre-selected artifact categories baked into <code className="text-[10px] bg-gray-100 px-1 py-0.5 rounded">config.json</code>. Requires{' '}
                 <strong className="text-gray-500">Python 3.8+</strong> on the target — no extra packages needed.
               </p>
 
@@ -472,16 +472,16 @@ export default function Collector() {
                           <span className="text-gray-500"># Windows — run as Administrator</span>{'\n'}
                           {'double-click run.bat'}{'\n'}
                           {'   — or —'}{'\n'}
-                          {'python forensic_harvester.py'}{'\n'}
+                          {'python fo-harvester.py'}{'\n'}
                           {'\n'}
-                          <span className="text-gray-500"># BitLocker-encrypted drive (e.g. E:)</span>{'\n'}
-                          {'python forensic_harvester.py --mode image --image-path E:'}{'\n'}
+                          <span className="text-gray-500"># BitLocker-encrypted drive (e.g. E:) — key stays local</span>{'\n'}
+                          {'python fo-harvester.py --path E:\\ ^'}{'\n'}
                           {'  --bitlocker-key 123456-123456-123456-123456-123456-123456-123456-123456'}
                         </>
                       : <>
                           <span className="text-gray-500"># Linux / macOS — run as root</span>{'\n'}
                           {'sh run.sh'}{'\n'}
-                          {'   — or — python3 forensic_harvester.py'}
+                          {'   — or — python3 fo-harvester.py'}
                         </>
                     }
                   </div>

@@ -31,6 +31,7 @@ EMBEDDED_CONFIG: dict = {}
 
 import argparse
 import datetime
+import json
 import os
 import platform
 import shutil
@@ -40,6 +41,23 @@ import sys
 import tempfile
 import zipfile
 from pathlib import Path
+
+# ── Load config.json when EMBEDDED_CONFIG was not injected ───────────────────
+# ForensicsOperator package mode (Option B+C1): config.json ships next to this
+# script and is read at startup.  EMBEDDED_CONFIG injection still takes priority.
+if not EMBEDDED_CONFIG:
+    _cfg_path = Path(__file__).with_name("config.json")
+    if _cfg_path.exists():
+        try:
+            _raw = json.loads(_cfg_path.read_text("utf-8"))
+            EMBEDDED_CONFIG = {
+                "collect":  _raw.get("categories", []),
+                "path":     _raw.get("image_path") or "",
+                "mode":     _raw.get("mode", "live"),
+                "output":   _raw.get("output_dir", "./output"),
+            }
+        except Exception as _cfg_err:
+            print(f"  [!] Warning: could not read config.json: {_cfg_err}", file=sys.stderr)
 
 VERSION  = "1.1.0"
 HOSTNAME = socket.gethostname()
@@ -2334,23 +2352,50 @@ def main() -> None:
     api_url   = cfg.get("api_url",   "")
     case_id   = cfg.get("case_id",   "")
     api_token = cfg.get("api_token", "")
-    output   = Path(cfg["output"]) if cfg.get("output") else \
-               Path.cwd() / f"fo-artifacts-{HOSTNAME}-{TS_NOW}.zip"
+    output    = Path(cfg["output"]) if cfg.get("output") else \
+                Path.cwd() / f"fo-artifacts-{HOSTNAME}-{TS_NOW}.zip"
+
+    # Resolve path/disk/bitlocker — must happen before the print block
+    path_arg      = getattr(args, "path", None) or cfg.get("path", "")
+    disk          = getattr(args, "disk", None) or cfg.get("disk", "")
+    bitlocker_key = getattr(args, "bitlocker_key", None) or cfg.get("bitlocker_key", "")
+
+    # ForensicsOperator config.json supplies mode="live"|"image" and image_path.
+    # Map those to the path_arg understood by the rest of main().
+    fo_mode = cfg.get("mode", "")
+    if not path_arg and fo_mode == "image":
+        path_arg = cfg.get("image_path", "") or ""
+
+    # On live Windows with ForensicHarvester categories, route through
+    # ExternalDiskCollector(C:\) so all 45+ _from() methods are available.
+    _fo_live_windows = (
+        IS_WINDOWS
+        and not path_arg
+        and not disk
+        and (fo_mode == "live" or fo_mode == "")
+    )
+    if _fo_live_windows:
+        path_arg = os.environ.get("SystemDrive", "C:") + "\\"
 
     # Resolve collect set.
-    # "memory" is opt-in only (large dumps) so it's never added by default,
-    # but is always accepted when the user explicitly names it.
+    # When categories come from config.json (ForensicsOperator) they are already
+    # the full FH category list — don't filter by the narrower DEFAULT_WINDOWS set.
+    # "memory" / "pe" / "documents" are always opt-in (large, slow).
     raw_collect = cfg.get("collect", [])
-    _OPT_IN = {"memory", "pe", "documents"}  # never added by default — must be explicit
-    if IS_WINDOWS:
-        allowed = DEFAULT_WINDOWS | _OPT_IN
-        collect_set = (set(raw_collect) & allowed) if raw_collect else DEFAULT_WINDOWS
+    _OPT_IN = {"memory", "pe", "documents"}
+
+    if raw_collect:
+        # Explicit list: honour every category the user asked for
+        collect_set = set(raw_collect)
+    elif path_arg or disk:
+        # Dead-box default: ExternalDiskCollector safe defaults
+        collect_set = ExternalDiskCollector.DEFAULT_COLLECT
+    elif IS_WINDOWS:
+        collect_set = DEFAULT_WINDOWS
     elif IS_MACOS:
-        allowed = DEFAULT_MACOS | _OPT_IN
-        collect_set = (set(raw_collect) & allowed) if raw_collect else DEFAULT_MACOS
+        collect_set = DEFAULT_MACOS
     else:
-        allowed = DEFAULT_LINUX | _OPT_IN
-        collect_set = (set(raw_collect) & allowed) if raw_collect else DEFAULT_LINUX
+        collect_set = DEFAULT_LINUX
 
     print(BANNER)
     print(f"  Host     : {HOSTNAME}")
@@ -2360,14 +2405,10 @@ def main() -> None:
         print(f"  Upload   : {api_url}  →  case {case_id}")
     print(f"  Collect  : {', '.join(sorted(collect_set)) or '(none)'}")
     if path_arg:
-        print(f"  Mode     : dead-box directory  ({path_arg})")
+        print(f"  Mode     : {'live Windows' if _fo_live_windows else 'dead-box directory'}  ({path_arg})")
     elif disk:
         print(f"  Mode     : dead-box raw device ({disk})")
     print()
-
-    path_arg      = getattr(args, "path", None) or cfg.get("path", "")
-    disk          = getattr(args, "disk", None) or cfg.get("disk", "")
-    bitlocker_key = getattr(args, "bitlocker_key", None) or cfg.get("bitlocker_key", "")
 
     # --path: already-mounted Windows filesystem directory (any OS)
     # --disk: raw block device that needs mounting (Linux only)
