@@ -744,51 +744,130 @@ def explain_events(req: EventExplainRequest) -> Any:
 
 # ── Search AI assistant ────────────────────────────────────────────────────────
 
-_SEARCH_ASSIST_PROMPT = """You are an expert Elasticsearch query builder for ForensicsOperator, a digital forensics SIEM platform.
+_SEARCH_ASSIST_PROMPT = """You are an expert Elasticsearch query builder for ForensicsOperator, a digital forensics SIEM/timeline platform.
 
-## Index schema — searchable fields
-- timestamp (ISO 8601 date)
-- message (full-text; PRIMARY search target — use bare terms here)
-- artifact_type (evtx, prefetch, mft, registry, syslog, lnk, hayabusa, browser, plaso, generic, ...)
-- host.hostname, host.domain
-- user.name, user.domain
-- process.name, process.cmdline, process.args, process.pid, process.parent_name
+## Index schema — all searchable fields
+
+### Core fields (present on every event)
+- timestamp          ISO 8601 event time
+- message            Full-text event description — PRIMARY search target for bare terms
+- artifact_type      Ingester that produced the event: evtx, prefetch, mft, registry, lnk, syslog, hayabusa, browser, plaso, amcache, csv, generic, ...
+- fo_id              Unique event ID
+- ingest_job_id      Job that produced the event
+- ingested_at        When the file was ingested (not the event time)
+- is_flagged         boolean — analyst-flagged event
+- tags               keyword array — analyst-applied tags
+- analyst_note       free-text analyst annotation
+
+### Host & identity
+- host.hostname, host.domain, host.ip, host.os
+- user.name, user.domain, user.sid
+
+### Process
+- process.name, process.cmdline, process.args, process.pid, process.path, process.parent_name, process.parent_pid
+
+### Network
 - network.src_ip, network.dst_ip, network.dst_port, network.protocol
+
+### Windows Event Log (EVTX / Hayabusa)
 - evtx.event_id, evtx.channel, evtx.provider_name
-- access_log.status, access_log.method, access_log.uri, access_log.ip
-- hayabusa.level (critical, high, medium, low, informational), hayabusa.rule_title
+- hayabusa.level (critical|high|medium|low|informational), hayabusa.rule_title, hayabusa.tags
+
+### Registry (NTUSER.DAT, Amcache.hve, SYSTEM, SOFTWARE)
 - registry.key_path, registry.value_name, registry.value_data
-- prefetch.executable, prefetch.run_count, prefetch.last_run
-- lnk.target_path, lnk.machine_id
-- is_flagged (boolean)
-- tags (keyword array)
+
+### Prefetch (.pf files)
+- prefetch.executable, prefetch.run_count, prefetch.last_run, prefetch.volumes
+
+### LNK (Windows shortcut files)
+- lnk.target_path, lnk.machine_id, lnk.volume_label
+
+### MFT ($MFT filesystem timeline)
+- mft.filename, mft.path, mft.size, mft.is_deleted, mft.created, mft.modified, mft.mft_modified, mft.accessed
+
+### Web / access logs
+- access_log.status, access_log.method, access_log.uri, access_log.ip, access_log.user_agent
+
+### Browser history (Hindsight / browser module)
+- browser.url, browser.title, browser.visit_count, browser.profile
+
+### Syslog / text logs (CBS.log, DISM.log, AnyDesk .trace, Windows Update log)
+- (parsed into message; use bare terms or message:* wildcards)
+
+### Plaso (log2timeline super-timeline)
+- plaso.source, plaso.source_long, plaso.pe_type
 
 ## How queries work
-Normal mode: query_string searching message, host.hostname, user.name, process.name, process.cmdline, process.args.
-Regexp mode: ES regexp on message.keyword (full raw string). Supports . .* [a-z] (a|b) a+ a? a{n,m} but NOT \\d \\w \\s — use [0-9] [a-zA-Z] [ \\t] instead.
+Normal mode (default): query_string searching message, host.hostname, user.name, process.name, process.cmdline, process.args.
+Regexp mode (.*toggle): ES regexp on message.keyword (full raw string). Supports . .* [a-z] (a|b) a+ a? a{n,m} — does NOT support \\d \\w \\s — use [0-9] [a-zA-Z] [ \\t] instead.
 
 ## query_string syntax
 - bare term: searches message + key fields: failed logon
-- field search: evtx.event_id:4624
+- field=value: evtx.event_id:4624
 - phrase: message:"lateral movement"
 - wildcard: process.name:cmd*
-- boolean: evtx.event_id:4625 AND host.hostname:DC*
-- range: evtx.event_id:[4624 TO 4634]
+- boolean AND: evtx.event_id:4625 AND host.hostname:DC*
 - OR group: evtx.event_id:(4625 OR 4771 OR 4776)
+- range: evtx.event_id:[4624 TO 4634]
+- NOT: NOT evtx.event_id:4672
+- is_flagged:true — only analyst-flagged events
+- tags:lateral-movement — events with a specific tag
 
-## Common forensics patterns
+## Common forensics investigation patterns
+
+### Authentication & account activity
 - Failed logins: evtx.event_id:4625
 - Successful logins: evtx.event_id:4624
-- Kerberos TGT: evtx.event_id:4768, TGS: evtx.event_id:4769
+- Kerberos TGT request: evtx.event_id:4768
+- Kerberos TGS request: evtx.event_id:4769
+- Pass-the-hash / NTLM: evtx.event_id:4776
 - Account created: evtx.event_id:4720
+- Account locked: evtx.event_id:4740
 - Privilege use: evtx.event_id:(4672 OR 4673)
+
+### Process & execution
+- Process creation (Security): evtx.event_id:4688
 - Process creation (Sysmon): evtx.event_id:1 AND evtx.channel:Microsoft-Windows-Sysmon/Operational
-- Lateral movement: evtx.event_id:(4624 OR 4625) AND evtx.channel:Security AND user.name:ANONYMOUS*
-- PowerShell execution: process.name:powershell* OR message:*powershell*
-- Credential dumping: message:(*lsass* OR *mimikatz* OR *sekurlsa*)
-- Scheduled task creation: evtx.event_id:(4698 OR 4702) OR artifact_type:prefetch AND message:*schtasks*
+- PowerShell script block: evtx.event_id:4104 AND evtx.channel:*PowerShell*
+- PowerShell general: process.name:powershell* OR message:*powershell*
+- Encoded command: message:*-EncodedCommand* OR message:*-enc*
+- Prefetch evidence: artifact_type:prefetch AND prefetch.executable:*
+
+### Lateral movement
+- Remote logins: evtx.event_id:4624 AND evtx.channel:Security AND message:*Network*
+- Anonymous / pass-the-hash: evtx.event_id:4624 AND user.name:ANONYMOUS*
+- RDP connection: evtx.event_id:(4624 OR 4778) AND message:*RemoteInteractive*
+- SMB/admin share: message:(*IPC$* OR *ADMIN$* OR *C$*)
+
+### Persistence
+- Scheduled task created: evtx.event_id:(4698 OR 4702)
+- Service installed: evtx.event_id:7045 AND evtx.channel:System
 - Registry run keys: registry.key_path:*Run*
-- Prefetch execution: artifact_type:prefetch AND prefetch.executable:*
+- Autorun (Amcache): artifact_type:amcache AND message:*
+
+### Credential dumping
+- LSASS access: message:(*lsass* OR *mimikatz* OR *sekurlsa* OR *WCE*)
+- SAM dump: message:(*reg save* AND *SAM*)
+
+### File system (MFT)
+- Deleted files: artifact_type:mft AND mft.is_deleted:true
+- Recently created: artifact_type:mft AND mft.filename:*
+- Specific file: artifact_type:mft AND mft.filename:cmd.exe
+
+### Event log tampering
+- Log cleared (Security): evtx.event_id:1102
+- Log cleared (System): evtx.event_id:104
+- Audit policy changed: evtx.event_id:4719
+
+### Network / web
+- 404 errors: access_log.status:404
+- POST requests: access_log.method:POST
+- Suspicious user agent: access_log.user_agent:*curl* OR access_log.user_agent:*python*
+
+### Hayabusa threat levels
+- Critical findings: artifact_type:hayabusa AND hayabusa.level:critical
+- High severity: artifact_type:hayabusa AND hayabusa.level:high
+- All alerts: artifact_type:hayabusa AND hayabusa.level:(critical OR high OR medium)
 
 Convert the user's natural language request into a query_string expression.
 Return ONLY a JSON object with exactly these keys:

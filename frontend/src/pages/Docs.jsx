@@ -585,7 +585,7 @@ evtx.event_id:4688 AND (message:*winword* OR message:*excel*)`} />
             <H3>Sorting</H3>
             <P>
               Click any sortable column header (Timestamp ↑↓, Type, Host, User) to sort by that field.
-              Click again to reverse the order. Default: timestamp ascending.
+              Click again to reverse the order. Default: newest first (timestamp descending).
             </P>
 
             <H3>Event deduplication</H3>
