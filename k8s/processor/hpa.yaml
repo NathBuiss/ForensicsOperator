@@ -17,6 +17,22 @@ spec:
       target:
         type: Utilization
         averageUtilization: 75
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
   behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30   # scale out fast during ingest bursts
+      policies:
+      - type: Pods
+        value: 2
+        periodSeconds: 60
     scaleDown:
       stabilizationWindowSeconds: 300  # 5 min cool-down — avoid thrashing during ingest bursts
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 120

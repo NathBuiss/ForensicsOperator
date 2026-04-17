@@ -17,24 +17,53 @@ spec:
         - name: redis
           image: redis:7.2-alpine
           args:
+            # Persistence: AOF only — RDB snapshots disabled to prevent fork() OOM.
+            # BGSAVE forks double peak memory (COW); AOF alone provides durability.
             - "--appendonly"
             - "yes"
             - "--appendfsync"
             - "everysec"
+            - "--save"
+            - ""
+            # AOF rewrite: trigger only when the AOF grows substantially.
+            # Keeps rewrite forks infrequent and predictable.
+            - "--auto-aof-rewrite-percentage"
+            - "100"
+            - "--auto-aof-rewrite-min-size"
+            - "128mb"
+            # Memory cap: 1.5Gi leaves 500Mi headroom inside the 2Gi container
+            # limit for the AOF rewrite fork's copy-on-write pages.
             - "--maxmemory"
-            - "800mb"
+            - "1536mb"
             - "--maxmemory-policy"
             - "allkeys-lru"
             - "--tcp-keepalive"
             - "300"
+            # Lazily free expired/evicted keys off the main thread.
+            - "--lazyfree-lazy-eviction"
+            - "yes"
+            - "--lazyfree-lazy-expire"
+            - "yes"
           ports:
             - containerPort: 6379
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
           resources:
             requests:
-              memory: "256Mi"
+              memory: "512Mi"
               cpu: "250m"
             limits:
-              memory: "1Gi"
+              memory: "2Gi"
               cpu: "500m"
           volumeMounts:
             - name: redis-data

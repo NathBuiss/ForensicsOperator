@@ -578,10 +578,15 @@ def apply_all_manifests(cfg, pull_policy, setup_traefik=False):
         for line in r.stdout.strip().splitlines():
             info(line)
 
+    _vpa_available = vpa_crds_available()
+
     for item in APPLY_ORDER:
         if item.is_file() and item.suffix == ".yaml":
             if _targets_kube_system(item) and not setup_traefik:
                 warn(f"Skipping {item.name} — targets kube-system (use --setup-traefik to apply)")
+                continue
+            if not _vpa_available and _is_vpa_manifest(item):
+                warn(f"Skipping {item.name} — VPA CRDs not installed")
                 continue
             info(str(item.relative_to(ROOT)))
             apply_one(item)
@@ -590,10 +595,20 @@ def apply_all_manifests(cfg, pull_policy, setup_traefik=False):
                 if _targets_kube_system(f) and not setup_traefik:
                     warn(f"Skipping {f.name} — targets kube-system (use --setup-traefik to apply)")
                     continue
+                if not _vpa_available and _is_vpa_manifest(f):
+                    warn(f"Skipping {f.name} — VPA CRDs not installed")
+                    continue
                 info(str(f.relative_to(ROOT)))
                 apply_one(f)
 
     ok("All manifests applied")
+
+
+def _is_vpa_manifest(path):
+    try:
+        return "VerticalPodAutoscaler" in path.read_text()
+    except OSError:
+        return False
 
 
 # ── Post-deploy ───────────────────────────────────────────────────────────────
@@ -778,10 +793,41 @@ def print_summary(cfg):
 
 # ── Status / Logs / Destroy ───────────────────────────────────────────────────
 
+def vpa_crds_available():
+    """Return True if the VPA CRDs are installed in the cluster."""
+    r = run(
+        ["kubectl", "get", "crd", "verticalpodautoscalers.autoscaling.k8s.io"],
+        capture=True, check=False,
+    )
+    return r.returncode == 0
+
+
+def ensure_vpa_controller():
+    """
+    Warn if VPA CRDs are missing; the VPA yamls in APPLY_ORDER will be skipped
+    gracefully so the rest of the deploy still succeeds.
+    """
+    if vpa_crds_available():
+        ok("VPA controller is available")
+        return
+    warn(
+        "VPA CRDs not found — VerticalPodAutoscaler manifests will be skipped.\n"
+        "     To install the VPA controller:\n"
+        "       kubectl apply -f https://github.com/kubernetes/autoscaler/releases/latest/download/vpa-v1.yaml\n"
+        "     Then re-run deploy to apply the VPA manifests."
+    )
+
+
 def cmd_status():
     run(["kubectl", "get", "pods",    "-n", NS, "-o", "wide"])
     run(["kubectl", "get", "svc",     "-n", NS])
     run(["kubectl", "get", "ingress", "-n", NS])
+    run(["kubectl", "get", "hpa",     "-n", NS], check=False)
+    r = run(["kubectl", "get", "vpa", "-n", NS], capture=True, check=False)
+    if r.returncode == 0:
+        print(r.stdout)
+    else:
+        info("VPA: not installed (kubectl get vpa failed — VPA controller may be missing)")
 
 
 def cmd_logs(svc):
@@ -881,6 +927,10 @@ def main():
 
     # 7. Remove any cluster objects that were deleted from the manifests
     cleanup_stale_resources()
+
+    # 7b. Check for VPA controller — warn if missing (VPA yamls will be skipped)
+    step("Checking VPA controller")
+    ensure_vpa_controller()
 
     # 8. Apply all manifests with substituted values
     apply_all_manifests(cfg, pull_policy, setup_traefik=args.setup_traefik)

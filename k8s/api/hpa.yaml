@@ -17,6 +17,22 @@ spec:
       target:
         type: Utilization
         averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
   behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60   # react quickly to spikes
+      policies:
+      - type: Pods
+        value: 2
+        periodSeconds: 60
     scaleDown:
       stabilizationWindowSeconds: 180  # 3 min cool-down before scaling down
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 120
