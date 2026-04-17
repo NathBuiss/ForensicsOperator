@@ -71,9 +71,28 @@ def delete_case(case_id: str) -> bool:
     r = get_redis()
     if not r.exists(f"case:{case_id}"):
         return False
+
+    # Delete all per-job MinIO files and Redis job records
+    from services.jobs import list_case_jobs
+    from services import storage
+    jobs = list_case_jobs(case_id)
+    for job in jobs:
+        minio_key = job.get("minio_object_key", "")
+        if minio_key:
+            try:
+                storage.delete_object(minio_key)
+            except Exception as exc:
+                logger.warning("Failed to delete MinIO object %s for case %s: %s", minio_key, case_id, exc)
+        job_id = job.get("job_id", "")
+        if job_id:
+            r.delete(f"job:{job_id}")
+    r.delete(f"case:{case_id}:jobs")
+
+    # Delete case record and set membership
     r.delete(f"case:{case_id}")
     r.srem("cases:all", case_id)
-    # Also delete from ES
+
+    # Delete all ES indices for this case
     from services.elasticsearch import delete_case_indices
     delete_case_indices(case_id)
     return True

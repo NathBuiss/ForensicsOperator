@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate, useLocation, useSearchParams } from 'react-router-dom'
 import {
   Upload, Search, Bell, X, ChevronRight, AlertTriangle,
   CheckCircle, Clock, Database, Loader2, Shield,
@@ -124,7 +124,7 @@ function AlertMatchCard({ match, caseId, navigate }) {
   const rule = match.rule || {}
 
   function goToSearch(q) {
-    navigate(`/cases/${caseId}/search`, { state: { pivotQuery: q } })
+    navigate(`/cases/${caseId}`, { state: { pivotQuery: q } })
   }
 
   return (
@@ -437,14 +437,18 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
   }
 
   useEffect(() => {
-    Promise.all([api.modules.list(), api.modules.listSources(caseId)])
-      .then(([modResp, srcResp]) => {
-        // Only show available modules
-        setModules((modResp.modules || []).filter(m => m.available))
-        setSources(srcResp.sources || [])
+    Promise.allSettled([api.modules.list(), api.modules.listSources(caseId)])
+      .then(([modResult, srcResult]) => {
+        if (modResult.status === 'fulfilled') {
+          setModules((modResult.value.modules || []).filter(m => m.available))
+        } else {
+          setError('Could not load modules: ' + (modResult.reason?.message || 'server error'))
+        }
+        if (srcResult.status === 'fulfilled') {
+          setSources(srcResult.value.sources || [])
+        }
         setLoading(false)
       })
-      .catch(err => { setError(err.message); setLoading(false) })
   }, [caseId])
 
   // Load YARA library rules when YARA module is selected
@@ -649,6 +653,12 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
             <X size={16} />
           </button>
         </div>
+
+        {error && (
+          <div className="mx-6 mt-3 flex items-center gap-2 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex-shrink-0">
+            <AlertCircle size={13} className="flex-shrink-0" /> {error}
+          </div>
+        )}
 
         {loading ? (
           <div className="flex-1 flex items-center justify-center text-gray-400">
@@ -1850,6 +1860,9 @@ function ModuleRunsPanel({ caseId, onClose }) {
 export default function CaseTimeline() {
   const { caseId } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
+  const [searchParams] = useSearchParams()
+  const initialQuery = location.state?.pivotQuery || searchParams.get('q') || ''
 
   const [caseData, setCaseData]             = useState(null)
   const [loading, setLoading]               = useState(true)
@@ -2058,7 +2071,7 @@ export default function CaseTimeline() {
 
       {/* ── Timeline ─────────────────────────────────────────────────────── */}
       <div className="flex-1 overflow-hidden">
-        <Timeline caseId={caseId} artifactTypes={artifactTypes} />
+        <Timeline caseId={caseId} artifactTypes={artifactTypes} initialQuery={initialQuery} />
       </div>
 
       {/* ── Modals / Panels ───────────────────────────────────────────────── */}
@@ -2113,7 +2126,7 @@ export default function CaseTimeline() {
               caseId={caseId}
               onSearchQuery={q => {
                 setShowAlertRules(false)
-                navigate(`/cases/${caseId}/search`, { state: { pivotQuery: q } })
+                navigate(`/cases/${caseId}`, { state: { pivotQuery: q } })
               }}
             />
           </div>

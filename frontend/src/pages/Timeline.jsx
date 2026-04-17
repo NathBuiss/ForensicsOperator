@@ -96,7 +96,7 @@ const SORT_ES_FIELDS = {
   user:      'user.name.keyword',
 }
 
-export default function Timeline({ caseId, artifactTypes }) {
+export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
   const [events, setEvents]               = useState([])
   const [total, setTotal]                 = useState(0)
   const [page, setPage]                   = useState(0)
@@ -104,8 +104,8 @@ export default function Timeline({ caseId, artifactTypes }) {
   const [selectedType, setSelectedType]   = useState('')
   const [fromTs, setFromTs]               = useState('')
   const [toTs, setToTs]                   = useState('')
-  const [query, setQuery]                 = useState('')
-  const [inputVal, setInputVal]           = useState('')
+  const [query, setQuery]                 = useState(initialQuery)
+  const [inputVal, setInputVal]           = useState(initialQuery)
   const [selectedEvent, setSelectedEvent] = useState(null)
   const [histogram, setHistogram]         = useState([])
   const [showHistogram, setShowHistogram] = useState(true)
@@ -134,7 +134,7 @@ export default function Timeline({ caseId, artifactTypes }) {
   const [showAiAssist, setShowAiAssist]     = useState(false)
 
   const [sortField, setSortField]           = useState('timestamp')
-  const [sortOrder, setSortOrder]           = useState('asc')
+  const [sortOrder, setSortOrder]           = useState('desc')
 
   const loaderRef = useRef(null)
   const searchRef = useRef(null)

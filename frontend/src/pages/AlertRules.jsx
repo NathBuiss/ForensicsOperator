@@ -63,7 +63,7 @@ function SingleRunResult({ result, rule, caseId, analysis, analyzing, onAnalyze 
   if (!result || result.error) return null
 
   function openInSearch(query) {
-    window.open(`/cases/${caseId}/search?q=${encodeURIComponent(query)}`, '_blank')
+    window.open(`/cases/${caseId}?q=${encodeURIComponent(query)}`, '_blank')
   }
 
   return (
@@ -427,7 +427,7 @@ export default function AlertRules({ caseId, onSearchQuery }) {
         {expandedMatch === i && (
           <div className="px-3 py-3 space-y-2 bg-white">
             <button
-              onClick={() => window.open(`/cases/${caseId}/search?q=${encodeURIComponent(m.rule.query)}`, '_blank')}
+              onClick={() => window.open(`/cases/${caseId}?q=${encodeURIComponent(m.rule.query)}`, '_blank')}
               className="w-full flex items-center justify-between bg-brand-accent/10 hover:bg-brand-accent/20 border border-brand-accent/30 rounded-lg px-3 py-1.5 transition-colors"
             >
               <span className="text-[11px] font-medium text-brand-accent">
@@ -438,7 +438,7 @@ export default function AlertRules({ caseId, onSearchQuery }) {
             {m.sample_events?.map((ev, j) => (
               <button
                 key={j}
-                onClick={() => window.open(`/cases/${caseId}/search?q=${encodeURIComponent(ev.fo_id ? `fo_id:${ev.fo_id}` : m.rule.query)}`, '_blank')}
+                onClick={() => window.open(`/cases/${caseId}?q=${encodeURIComponent(ev.fo_id ? `fo_id:${ev.fo_id}` : m.rule.query)}`, '_blank')}
                 className="w-full text-left bg-white hover:bg-blue-50 rounded border border-gray-200 hover:border-blue-300 px-2.5 py-2 transition-colors group cursor-pointer"
               >
                 <div className="flex items-center justify-between gap-2 mb-0.5">
