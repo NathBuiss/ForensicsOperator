@@ -5,6 +5,7 @@ metadata:
   namespace: __FO_NAMESPACE__
 spec:
   replicas: 2
+  revisionHistoryLimit: 2
   strategy:
     type: RollingUpdate
     rollingUpdate:
