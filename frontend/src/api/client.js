@@ -307,6 +307,12 @@ export const api = {
       const qs = params.toString()
       return `/api/v1/collector/package${qs ? '?' + qs : ''}`
     },
+    // Admin-only: returns fo-uploader.zip with S3 triage credentials injected.
+    // Uses _token query param so browser-initiated downloads can carry the JWT.
+    uploaderUrl: () => {
+      const token = getToken()
+      return `/api/v1/collector/uploader${token ? `?_token=${encodeURIComponent(token)}` : ''}`
+    },
     networkInterfaces: () => request('GET',    '/network/interfaces'),
     createIngress:     () => request('POST',   '/collector/ingress'),
     getIngress:        () => request('GET',    '/collector/ingress'),

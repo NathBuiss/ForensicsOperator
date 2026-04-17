@@ -22,8 +22,10 @@ import zipfile
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
+
+from auth.dependencies import require_admin
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["collector"])
@@ -254,6 +256,148 @@ def download_harvester_package(
         media_type="application/zip",
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+# ── fo-uploader package download ─────────────────────────────────────────────
+
+_UPLOADER_CANDIDATES = [
+    Path("/app/collector/fo_uploader.py"),                              # docker
+    Path(__file__).parent.parent / "collector" / "fo_uploader.py",     # api/../collector/
+    Path(__file__).parent.parent.parent / "collector" / "fo_uploader.py",  # mono-repo root
+]
+
+_UPLOADER_REQUIREMENTS = "boto3\n"
+
+_UPLOADER_RUN_BAT = """\
+@echo off
+echo Installing dependencies...
+pip install boto3
+echo.
+echo Uploading artifacts...
+python fo-uploader.py
+pause
+"""
+
+_UPLOADER_RUN_SH = """\
+#!/bin/sh
+echo "Installing dependencies..."
+pip3 install boto3
+echo
+echo "Uploading artifacts..."
+python3 fo-uploader.py
+"""
+
+_UPLOADER_README = """\
+fo-uploader — S3 Evidence Uploader
+====================================
+
+Uploads fo-harvester artifacts (fo-artifacts-*.zip) to the configured S3 bucket.
+Pre-filled with your ForensicsOperator S3 triage configuration.
+
+WARNING: This script contains your S3 credentials.
+         Do not share it or commit it to source control.
+
+Requirements
+------------
+  pip install boto3      (or: pip3 install boto3)
+
+Usage
+-----
+  1. Run fo-harvester.py to collect artifacts → creates ./output/fo-artifacts-*.zip
+  2. Run fo-uploader.py (or the included run.bat / run.sh):
+
+       Windows:
+           run.bat
+           — or —
+           pip install boto3 && python fo-uploader.py
+
+       Linux / macOS:
+           chmod +x run.sh && ./run.sh
+           — or —
+           pip3 install boto3 && python3 fo-uploader.py
+
+Options
+-------
+  --file PATH      Upload a specific file instead of auto-detecting
+  --dir  DIR       Directory to scan for fo-artifacts-*.zip (default: ./output)
+  --prefix PREFIX  S3 key prefix / sub-folder inside the bucket
+
+After upload, open ForensicsOperator → Admin → S3 Triage browser,
+locate the file, and pull it into a case for analysis.
+"""
+
+
+def _find_uploader_script() -> Path:
+    for p in _UPLOADER_CANDIDATES:
+        if p.exists():
+            return p
+    raise FileNotFoundError(
+        "fo_uploader.py not found — checked: "
+        + ", ".join(str(p) for p in _UPLOADER_CANDIDATES)
+    )
+
+
+def _inject_uploader_config(source: str, cfg: dict) -> str:
+    """Replace the six blank constants in fo_uploader.py with the S3 triage config values."""
+    use_ssl_str = "true" if cfg.get("use_ssl", True) else "false"
+    replacements = [
+        ('ENDPOINT   = ""', f'ENDPOINT   = {json.dumps(cfg.get("endpoint", ""))}'),
+        ('ACCESS_KEY = ""', f'ACCESS_KEY = {json.dumps(cfg.get("access_key", ""))}'),
+        ('SECRET_KEY = ""', f'SECRET_KEY = {json.dumps(cfg.get("secret_key", ""))}'),
+        ('BUCKET     = ""', f'BUCKET     = {json.dumps(cfg.get("bucket", ""))}'),
+        ('REGION     = ""', f'REGION     = {json.dumps(cfg.get("region", ""))}'),
+        ('USE_SSL    = "true"', f'USE_SSL    = {json.dumps(use_ssl_str)}'),
+    ]
+    for old, new in replacements:
+        source = source.replace(old, new, 1)
+    return source
+
+
+@router.get("/collector/uploader", dependencies=[Depends(require_admin)])
+def download_uploader_package():
+    """
+    Return a pre-configured fo-uploader.zip with S3 triage credentials injected.
+
+    Admin-only: the ZIP contains the raw S3 secret key for the triage upload bucket.
+    Requires the S3 triage config to be saved in Admin → S3 Triage Upload.
+    """
+    from config import get_redis as _get_redis
+    r = _get_redis()
+    raw = r.get("fo:s3_triage_config")
+    if not raw:
+        raise HTTPException(
+            status_code=404,
+            detail="No S3 triage upload config saved. Configure it in Admin → S3 Triage Upload first.",
+        )
+    cfg = json.loads(raw)
+
+    try:
+        source = _find_uploader_script().read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        logger.error("fo_uploader.py not found: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        logger.error("Failed to read fo_uploader.py: %s", exc)
+        raise HTTPException(status_code=500, detail="Could not load uploader script")
+
+    injected = _inject_uploader_config(source, cfg)
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        zf.writestr("fo-uploader/fo-uploader.py",   injected.encode("utf-8"))
+        zf.writestr("fo-uploader/requirements.txt",  _UPLOADER_REQUIREMENTS)
+        zf.writestr("fo-uploader/run.bat",           _UPLOADER_RUN_BAT)
+        zf.writestr("fo-uploader/run.sh",            _UPLOADER_RUN_SH)
+        zf.writestr("fo-uploader/README.txt",        _UPLOADER_README)
+
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="fo-uploader.zip"',
             "Cache-Control": "no-store",
         },
     )

@@ -3,11 +3,13 @@ Core ingest task: download artifact from MinIO, detect type, run plugin, index t
 """
 from __future__ import annotations
 
+import io as _io
 import logging
 import os
 import shutil
 import tempfile
 import uuid
+import zipfile as _zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -55,6 +57,117 @@ def update_job_status(r: redis.Redis, job_id: str, **fields) -> None:
     r.expire(key, 604800)  # 7 days TTL
 
 
+# ── ZIP auto-expansion helpers ────────────────────────────────────────────────
+
+_ZIP_SKIP_BASENAMES = {'.ds_store', 'thumbs.db', 'desktop.ini'}
+_ZIP_SKIP_EXTS      = {'.zip'}          # no recursive nesting
+JOB_TTL             = 604800            # 7 days — matches api/services/jobs.py
+
+
+def _is_fo_zip(path: Path) -> bool:
+    """Return True if the file is a ZIP archive that should be expanded into child jobs."""
+    try:
+        return _zipfile.is_zipfile(str(path))
+    except Exception:
+        return False
+
+
+def _expand_zip_into_child_jobs(
+    parent_job_id: str,
+    case_id: str,
+    zip_path: Path,
+    r: redis.Redis,
+) -> int:
+    """
+    Extract every entry from a ZIP and create individual child jobs, mirroring
+    what _handle_zip_async() does in api/routers/ingest.py for direct uploads.
+
+    Uses the FULL relative path from the ZIP as the job filename so that
+    path-part based MIME detection in utils/file_type.py gives downstream
+    plugins (e.g. scheduled_task, wer) the directory context they need.
+
+    Returns the count of child jobs successfully dispatched.
+    """
+    minio_client = get_minio()
+    count = 0
+
+    with _zipfile.ZipFile(zip_path, 'r') as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            # Normalize: always forward slashes, no trailing slash
+            entry_rel = info.filename.replace('\\', '/').rstrip('/')
+            base_name = entry_rel.split('/')[-1]
+
+            if not base_name or base_name.startswith('.'):
+                continue
+            if base_name.lower() in _ZIP_SKIP_BASENAMES:
+                continue
+            if Path(base_name).suffix.lower() in _ZIP_SKIP_EXTS:
+                continue
+
+            child_id  = uuid.uuid4().hex
+            minio_key = f"cases/{case_id}/{child_id}/{entry_rel}"
+
+            # ── Create child job record (schema matches api/services/jobs.py) ──
+            now = datetime.now(timezone.utc).isoformat()
+            r.hset(f"job:{child_id}", mapping={
+                "job_id":            child_id,
+                "case_id":           case_id,
+                "status":            "UPLOADING",
+                "original_filename": entry_rel,
+                "minio_object_key":  minio_key,
+                "events_indexed":    "0",
+                "error":             "",
+                "plugin_used":       "",
+                "plugin_stats":      "{}",
+                "created_at":        now,
+                "started_at":        "",
+                "completed_at":      "",
+                "task_id":           "",
+                "source_zip":        zip_path.name,
+                "size_bytes":        str(info.file_size or info.compress_size or 1),
+            })
+            r.expire(f"job:{child_id}", JOB_TTL)
+            r.sadd(f"case:{case_id}:jobs", child_id)
+            r.expire(f"case:{case_id}:jobs", JOB_TTL)
+
+            # ── Extract entry and upload to MinIO ─────────────────────────────
+            try:
+                with zf.open(info) as src:
+                    data = src.read()
+                actual_size = len(data)
+                minio_client.put_object(
+                    MINIO_BUCKET, minio_key,
+                    _io.BytesIO(data), actual_size,
+                )
+                r.hset(f"job:{child_id}", mapping={
+                    "minio_object_key": minio_key,
+                    "size_bytes":       str(actual_size),
+                    "status":           "PENDING",
+                })
+            except Exception as exc:
+                logger.error(
+                    "[%s] Failed to extract/upload '%s': %s", parent_job_id, entry_rel, exc,
+                )
+                r.hset(f"job:{child_id}", mapping={
+                    "status":       "FAILED",
+                    "error":        f"Extraction failed: {exc}",
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                })
+                continue
+
+            # ── Dispatch child process_artifact task ──────────────────────────
+            app.send_task(
+                "ingest.process_artifact",
+                args=[child_id, case_id, minio_key, entry_rel],
+                queue="ingest",
+            )
+            count += 1
+
+    return count
+
+
 @app.task(bind=True, name="ingest.process_artifact", queue="ingest")
 def process_artifact(
     self,
@@ -88,7 +201,10 @@ def process_artifact(
         # ── 1. Download artifact from MinIO ──────────────────────────────────
         logger.info("[%s] Downloading %s from MinIO", job_id, minio_object_key)
         minio = get_minio()
+        # original_filename may be a full relative path (e.g. "persistence/tasks/System32/SilentCleanup")
+        # when the artifact came from a ZIP — create parent dirs before downloading.
         local_file = work_dir / original_filename
+        local_file.parent.mkdir(parents=True, exist_ok=True)
         minio.fget_object(MINIO_BUCKET, minio_object_key, str(local_file))
         logger.info("[%s] Downloaded to %s (%d bytes)", job_id, local_file, local_file.stat().st_size)
 
@@ -96,6 +212,22 @@ def process_artifact(
         mime_type = detect_mime(local_file)
         logger.info("[%s] Detected MIME: %s", job_id, mime_type)
         update_job_status(r, job_id, mime_type=mime_type)
+
+        # ── 2b. ZIP auto-expansion ────────────────────────────────────────────
+        # When a ZIP arrives via S3 triage pull the API never sees it, so
+        # _handle_zip_async() never runs. Intercept here and create one child
+        # job per entry — identical behaviour to the direct-upload path.
+        # This makes every individual artifact file visible to modules.
+        if _is_fo_zip(local_file):
+            logger.info("[%s] ZIP detected — expanding into child jobs", job_id)
+            child_count = _expand_zip_into_child_jobs(job_id, case_id, local_file, r)
+            update_job_status(r, job_id,
+                              status="COMPLETED",
+                              plugin_used="archive (expanded)",
+                              events_indexed="0",
+                              completed_at=datetime.now(timezone.utc).isoformat())
+            logger.info("[%s] ZIP expanded into %d child jobs", job_id, child_count)
+            return {"status": "COMPLETED", "events_indexed": 0, "child_jobs": child_count}
 
         # ── 3. Find matching plugin ───────────────────────────────────────────
         plugin_class = _plugin_loader.get_plugin(local_file, mime_type)

@@ -9,9 +9,13 @@ import { useState, useEffect } from 'react'
 import {
   Monitor, Terminal, FileCode, Download, Check,
   ChevronRight, ChevronLeft,
-  PackageOpen, AlertTriangle,
+  PackageOpen, AlertTriangle, Upload,
 } from 'lucide-react'
 import { api } from '../api/client'
+
+function _currentUser() {
+  try { return JSON.parse(localStorage.getItem('fo_user')) } catch { return null }
+}
 
 // ── Artifact definitions (script mode) ───────────────────────────────────────
 
@@ -227,6 +231,19 @@ export default function Collector() {
   const [downloading, setDownloading] = useState(false)
   const [downloaded, setDownloaded]   = useState(false)
 
+  // S3 uploader card — only shown when S3 triage is configured AND user is admin
+  const [s3TriageConfigured,      setS3TriageConfigured]      = useState(false)
+  const [downloadingUploader,     setDownloadingUploader]     = useState(false)
+  const [downloadedUploader,      setDownloadedUploader]      = useState(false)
+  const isAdmin = _currentUser()?.role === 'admin'
+
+  useEffect(() => {
+    if (!isAdmin) return
+    api.s3Triage.getConfig()
+      .then(cfg => setS3TriageConfigured(!!(cfg?.endpoint)))
+      .catch(() => {})
+  }, [isAdmin])
+
   const platformDef = platIdx !== null ? PLATFORMS[platIdx] : null
   const artifacts   = platformDef?.artifacts || []
 
@@ -269,6 +286,17 @@ export default function Collector() {
     a.click()
     document.body.removeChild(a)
     setTimeout(() => { setDownloading(false); setDownloaded(true) }, 1200)
+  }
+
+  function handleDownloadUploader() {
+    setDownloadingUploader(true)
+    setDownloadedUploader(false)
+    const a = document.createElement('a')
+    a.href = api.collector.uploaderUrl()
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => { setDownloadingUploader(false); setDownloadedUploader(true) }, 1200)
   }
 
   const stepLabels = ['Platform', 'Artifacts', 'Download']
@@ -515,6 +543,44 @@ export default function Collector() {
                 </div>
               )}
             </div>
+            {/* S3 uploader card — admin only, shown when S3 triage is configured */}
+            {isAdmin && s3TriageConfigured && (
+              <div className="card p-4">
+                <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
+                  S3 Evidence Uploader
+                </h3>
+                <p className="text-xs text-gray-500 mb-4 leading-relaxed">
+                  Downloads <code className="text-[10px] bg-gray-100 px-1 py-0.5 rounded">fo-uploader.zip</code> — a companion
+                  script pre-configured with your S3 triage credentials. Run it on the target
+                  after collection to push artifacts directly to the evidence bucket.{' '}
+                  <span className="text-amber-600 font-medium">Contains your S3 secret key — do not share.</span>
+                </p>
+
+                <button
+                  className={`btn-outline w-full justify-center h-10 gap-2 ${downloadedUploader ? '!border-green-500 !text-green-700' : ''}`}
+                  onClick={handleDownloadUploader}
+                  disabled={downloadingUploader}
+                >
+                  {downloadingUploader
+                    ? 'Preparing…'
+                    : downloadedUploader
+                    ? <><Check size={14} /> fo-uploader.zip downloaded</>
+                    : <><Upload size={14} /> Download fo-uploader.zip</>
+                  }
+                </button>
+
+                {downloadedUploader && (
+                  <div className="mt-3 flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
+                    <AlertTriangle size={13} className="flex-shrink-0 mt-0.5 text-amber-500" />
+                    <div>
+                      Run <code className="bg-amber-100 px-1 rounded">pip install boto3</code> then{' '}
+                      <code className="bg-amber-100 px-1 rounded">python fo-uploader.py</code> on the target.
+                      After upload, pull the file via Admin → S3 Triage browser.
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 

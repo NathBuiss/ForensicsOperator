@@ -16,6 +16,7 @@ COPY api/ .
 # endpoint always works — regardless of whether the volume mount is present.
 RUN mkdir -p /app/collector
 COPY collector/collect.py /app/collector/collect.py
+COPY collector/fo_uploader.py /app/collector/fo_uploader.py
 
 
 RUN mkdir -p /app/static
