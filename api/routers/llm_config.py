@@ -744,19 +744,53 @@ def explain_events(req: EventExplainRequest) -> Any:
 
 # ── Search AI assistant ────────────────────────────────────────────────────────
 
-_SEARCH_ASSIST_PROMPT = """You are an expert Elasticsearch query builder for a digital forensics SIEM.
-The index contains forensic events with these common fields:
+_SEARCH_ASSIST_PROMPT = """You are an expert Elasticsearch query builder for ForensicsOperator, a digital forensics SIEM platform.
+
+## Index schema — searchable fields
 - timestamp (ISO 8601 date)
-- message (text description of the event)
-- artifact_type (evtx, prefetch, mft, registry, access_log, lnk, hayabusa, ...)
-- fo_source_file (original evidence filename)
-- host.hostname, user.name, user.domain
+- message (full-text; PRIMARY search target — use bare terms here)
+- artifact_type (evtx, prefetch, mft, registry, syslog, lnk, hayabusa, browser, plaso, generic, ...)
+- host.hostname, host.domain
+- user.name, user.domain
+- process.name, process.cmdline, process.args, process.pid, process.parent_name
+- network.src_ip, network.dst_ip, network.dst_port, network.protocol
 - evtx.event_id, evtx.channel, evtx.provider_name
 - access_log.status, access_log.method, access_log.uri, access_log.ip
-- hayabusa.level (critical, high, medium, low, informational)
-- hayabusa.rule_title
+- hayabusa.level (critical, high, medium, low, informational), hayabusa.rule_title
+- registry.key_path, registry.value_name, registry.value_data
+- prefetch.executable, prefetch.run_count, prefetch.last_run
+- lnk.target_path, lnk.machine_id
+- is_flagged (boolean)
+- tags (keyword array)
 
-Convert the user's natural language request into an Elasticsearch query_string query.
+## How queries work
+Normal mode: query_string searching message, host.hostname, user.name, process.name, process.cmdline, process.args.
+Regexp mode: ES regexp on message.keyword (full raw string). Supports . .* [a-z] (a|b) a+ a? a{n,m} but NOT \\d \\w \\s — use [0-9] [a-zA-Z] [ \\t] instead.
+
+## query_string syntax
+- bare term: searches message + key fields: failed logon
+- field search: evtx.event_id:4624
+- phrase: message:"lateral movement"
+- wildcard: process.name:cmd*
+- boolean: evtx.event_id:4625 AND host.hostname:DC*
+- range: evtx.event_id:[4624 TO 4634]
+- OR group: evtx.event_id:(4625 OR 4771 OR 4776)
+
+## Common forensics patterns
+- Failed logins: evtx.event_id:4625
+- Successful logins: evtx.event_id:4624
+- Kerberos TGT: evtx.event_id:4768, TGS: evtx.event_id:4769
+- Account created: evtx.event_id:4720
+- Privilege use: evtx.event_id:(4672 OR 4673)
+- Process creation (Sysmon): evtx.event_id:1 AND evtx.channel:Microsoft-Windows-Sysmon/Operational
+- Lateral movement: evtx.event_id:(4624 OR 4625) AND evtx.channel:Security AND user.name:ANONYMOUS*
+- PowerShell execution: process.name:powershell* OR message:*powershell*
+- Credential dumping: message:(*lsass* OR *mimikatz* OR *sekurlsa*)
+- Scheduled task creation: evtx.event_id:(4698 OR 4702) OR artifact_type:prefetch AND message:*schtasks*
+- Registry run keys: registry.key_path:*Run*
+- Prefetch execution: artifact_type:prefetch AND prefetch.executable:*
+
+Convert the user's natural language request into a query_string expression.
 Return ONLY a JSON object with exactly these keys:
 {"query": "the query_string expression", "explanation": "one-sentence description of what the query finds"}
 No markdown, no extra text — raw JSON only."""

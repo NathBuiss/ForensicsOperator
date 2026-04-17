@@ -125,6 +125,7 @@ const SECTIONS = [
   { id: 'modules',      label: 'Custom Modules',      icon: <Cpu size={13} /> },
   { id: 'alert-rules',  label: 'Alert Rules',         icon: <Bell size={13} /> },
   { id: 'query-syntax', label: 'Query Syntax',        icon: <Terminal size={13} /> },
+  { id: 'search',       label: 'Investigation UI',    icon: <GitBranch size={13} /> },
   { id: 'api',          label: 'API Reference',       icon: <Code2 size={13} /> },
 ]
 
@@ -472,22 +473,50 @@ evtx.event_id:4688 AND (message:*winword* OR message:*excel*)`} />
           {/* ── Query Syntax ──────────────────────────────────────────────── */}
           <Section id="query-syntax" title="Query Syntax" icon={<Terminal size={14} className="text-brand-accent" />}>
             <P>
-              The Search page and Alert Rules both use Elasticsearch
-              <strong> Lucene query_string</strong> syntax.
+              The Timeline and Alert Rules use Elasticsearch <strong>Lucene query_string</strong> syntax.
+              The search bar targets <code>message</code>, <code>host.hostname</code>, <code>user.name</code>,
+              <code>process.name</code>, <code>process.cmdline</code>, and <code>process.args</code> by default.
+              Prefix a term with a field name to search elsewhere.
             </P>
 
             <H3>Common patterns</H3>
             <div className="space-y-2">
               {[
                 { q: 'evtx.event_id:4625',             desc: 'Field equals value' },
-                { q: 'evtx.event_id:4625 OR evtx.event_id:4648', desc: 'Boolean OR' },
-                { q: 'evtx.event_id:4688 AND message:*powershell*', desc: 'Boolean AND with wildcard' },
+                { q: 'evtx.event_id:(4625 OR 4771)',   desc: 'OR group — failed auth' },
+                { q: 'evtx.event_id:4688 AND message:*powershell*', desc: 'AND with wildcard' },
                 { q: 'message:*encoded*',              desc: 'Wildcard (*) — any characters' },
                 { q: 'NOT evtx.event_id:4672',         desc: 'NOT operator' },
                 { q: 'evtx.event_id:[4600 TO 4700]',   desc: 'Range query' },
-                { q: 'artifact_type:suricata',         desc: 'Filter by ingester type' },
+                { q: 'artifact_type:prefetch',         desc: 'Filter by ingester type' },
                 { q: 'host.hostname:DESKTOP-*',        desc: 'Prefix match with wildcard' },
-                { q: 'fo_id:abc123',                   desc: 'Exact event lookup by ID' },
+                { q: 'is_flagged:true',                desc: 'Only analyst-flagged events' },
+                { q: 'tags:lateral-movement',          desc: 'Events with a specific tag' },
+              ].map(r => (
+                <div key={r.q} className="flex gap-3 items-start text-xs py-1.5 border-b border-gray-100 last:border-0">
+                  <code className="font-mono text-brand-accent bg-brand-accentlight px-2 py-0.5 rounded text-[11px] flex-shrink-0">
+                    {r.q}
+                  </code>
+                  <span className="text-gray-500 pt-0.5">{r.desc}</span>
+                </div>
+              ))}
+            </div>
+
+            <H3>Regexp mode</H3>
+            <P>
+              Enable the <strong>.*</strong> toggle in the search bar to match full event messages using
+              Elasticsearch regexp syntax. This runs against the raw unanalyzed <code>message</code> field.
+            </P>
+            <InfoBox type="warning">
+              ES regexp supports <code>. .* [a-z] (a|b) a+ a? a&#123;n,m&#125;</code> but <strong>NOT</strong>{' '}
+              <code>\d \w \s</code>. Use <code>[0-9]</code>, <code>[a-zA-Z_]</code>, <code>[ \t]</code> instead.
+            </InfoBox>
+            <div className="space-y-2">
+              {[
+                { q: 'lateral.*movement',    desc: 'Any chars between words' },
+                { q: 'cmd\\.exe',            desc: 'Escape literal dot' },
+                { q: '4[6-9][0-9]{2}',       desc: 'Event ID range 4600-4999' },
+                { q: '(mimikatz|sekurlsa)',   desc: 'Either word' },
               ].map(r => (
                 <div key={r.q} className="flex gap-3 items-start text-xs py-1.5 border-b border-gray-100 last:border-0">
                   <code className="font-mono text-brand-accent bg-brand-accentlight px-2 py-0.5 rounded text-[11px] flex-shrink-0">
@@ -501,20 +530,81 @@ evtx.event_id:4688 AND (message:*winword* OR message:*excel*)`} />
             <H3>Indexed fields</H3>
             <Ul>
               <Li><code className="text-gray-600">timestamp</code> — ISO-8601 event time</Li>
-              <Li><code className="text-gray-600">message</code> — human-readable description (full-text)</Li>
-              <Li><code className="text-gray-600">artifact_type</code> — ingester that produced the event</Li>
+              <Li><code className="text-gray-600">message</code> — human-readable description (full-text + keyword)</Li>
+              <Li><code className="text-gray-600">artifact_type</code> — ingester that produced the event (evtx, prefetch, mft, registry, lnk, syslog, hayabusa, …)</Li>
               <Li><code className="text-gray-600">fo_id</code> — unique event ID</Li>
               <Li><code className="text-gray-600">host.*</code> — hostname, ip, os</Li>
               <Li><code className="text-gray-600">user.*</code> — name, domain, sid</Li>
-              <Li><code className="text-gray-600">process.*</code> — name, pid, cmdline, path</Li>
-              <Li><code className="text-gray-600">network.*</code> — src_ip, dest_ip, src_port, dest_port, proto</Li>
-              <Li><code className="text-gray-600">evtx.*</code> — event_id, channel, event_data.* (EVTX events)</Li>
-              <Li><code className="text-gray-600">suricata.*</code> — event_type, alert.signature, alert.severity (Suricata events)</Li>
+              <Li><code className="text-gray-600">process.*</code> — name, pid, cmdline, args, path</Li>
+              <Li><code className="text-gray-600">network.*</code> — src_ip, dst_ip, dst_port, protocol</Li>
+              <Li><code className="text-gray-600">evtx.*</code> — event_id, channel, provider_name</Li>
+              <Li><code className="text-gray-600">registry.*</code> — key_path, value_name, value_data</Li>
+              <Li><code className="text-gray-600">prefetch.*</code> — executable, run_count, last_run</Li>
+              <Li><code className="text-gray-600">lnk.*</code> — target_path, machine_id</Li>
+              <Li><code className="text-gray-600">hayabusa.*</code> — level, rule_title</Li>
+              <Li><code className="text-gray-600">is_flagged</code>, <code className="text-gray-600">tags</code>, <code className="text-gray-600">analyst_note</code> — analyst annotations</Li>
             </Ul>
 
             <InfoBox type="tip">
-              Fields from the <code>extra</code> dict in custom ingesters are stored at the top
-              level — search them directly by their key name.
+              Fields from the <code>extra</code> dict in custom ingesters are stored at the top level —
+              search them directly by their key name. Use AI Search Assist (✦ button) to generate queries
+              from plain English.
+            </InfoBox>
+          </Section>
+
+          {/* ── Investigation UI ──────────────────────────────────────────── */}
+          <Section id="search" title="Investigation UI" icon={<GitBranch size={14} className="text-brand-accent" />}>
+            <P>
+              The <strong>Timeline</strong> tab is the unified investigation workspace. It combines
+              chronological event browsing, full-text search, facet filtering, saved searches, and
+              AI-assisted query generation in a single view.
+            </P>
+
+            <H3>Search bar</H3>
+            <Ul>
+              <Li>Press <kbd className="px-1 bg-gray-100 rounded text-[10px] font-mono">/</kbd> to focus the search bar from anywhere</Li>
+              <Li>Press <strong>Enter</strong> or click <strong>Search</strong> to apply the query</Li>
+              <Li>Toggle <strong>.*</strong> for ES regexp mode (matches full message text)</Li>
+              <Li>Click <strong>✦</strong> (Sparkles) to open AI Search Assist — describe what you want in plain English</Li>
+            </Ul>
+
+            <H3>Facet filter chips</H3>
+            <P>
+              The left sidebar shows Host, User, Event ID, and Channel facet chips auto-computed from
+              the current result set. Click a chip to add it as an active filter — click again to remove.
+              Active filters appear as dismissible badges below the search bar.
+            </P>
+
+            <H3>Saved searches</H3>
+            <P>
+              When a query or facet filter is active, click <strong>+ Save</strong> in the sidebar to
+              name and persist the search for the current case. Saved searches restore both the query
+              text and any active facet filters. Delete them by hovering and clicking the trash icon.
+            </P>
+
+            <H3>Sorting</H3>
+            <P>
+              Click any sortable column header (Timestamp ↑↓, Type, Host, User) to sort by that field.
+              Click again to reverse the order. Default: timestamp ascending.
+            </P>
+
+            <H3>Event deduplication</H3>
+            <P>
+              Events with identical timestamp, message, artifact type, host, and user are automatically
+              deduplicated client-side. This prevents the same log event from appearing twice when an
+              artifact was ingested from multiple sources (e.g. raw EVTX + Plaso processing).
+            </P>
+
+            <H3>AI Search Assist</H3>
+            <P>
+              The AI assistant uses the configured LLM (Settings → AI Analysis) to translate a plain
+              English description into an Elasticsearch query_string. The model is aware of the full
+              field schema including EVTX event IDs, registry paths, prefetch fields, and common
+              forensic investigation patterns (lateral movement, credential dumping, persistence, …).
+            </P>
+            <InfoBox type="info">
+              AI Assist requires an LLM to be configured in Settings. The generated query is editable
+              before you apply it — always review before running against large datasets.
             </InfoBox>
           </Section>
 

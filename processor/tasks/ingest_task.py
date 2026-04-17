@@ -35,9 +35,18 @@ BULK_SIZE = int(os.getenv("BULK_SIZE", "500"))
 # Shared plugin loader instance (reused across tasks in the same worker)
 _plugin_loader = PluginLoader(Path("/app/plugins"))
 
+# Shared pool — prevents each task from creating its own pool (which exhausts Redis connections)
+_redis_pool = redis.ConnectionPool.from_url(
+    REDIS_URL,
+    max_connections=20,
+    decode_responses=True,
+    socket_timeout=10,
+    socket_connect_timeout=5,
+)
+
 
 def get_redis() -> redis.Redis:
-    return redis.Redis.from_url(REDIS_URL, decode_responses=True)
+    return redis.Redis(connection_pool=_redis_pool)
 
 
 def get_minio():
@@ -258,16 +267,13 @@ def process_artifact(
         source_url = f"minio://{MINIO_BUCKET}/{minio_object_key}"
 
         try:
-            events_indexed = _run_plugin_and_index(
+            events_indexed, events_failed = _run_plugin_and_index(
                 plugin, indexer, r, job_id, case_id, source_url, ingested_at
             )
             stats = plugin.get_stats()
         except Exception as plugin_exc:
             plugin.teardown()
             # ── Plaso fallback ───────────────────────────────────────────────
-            # Primary plugin failed — let log2timeline have a go.
-            # log2timeline auto-detects hundreds of file formats and will
-            # extract whatever events it can find in the file.
             logger.warning(
                 "[%s] Plugin '%s' failed (%s) — trying log2timeline fallback",
                 job_id, plugin_class.PLUGIN_NAME, plugin_exc,
@@ -277,7 +283,7 @@ def process_artifact(
                 from plugins.plaso.plaso_plugin import PlasoPlugin
                 fallback = PlasoPlugin.create_from_source(local_file, work_dir, ctx)
                 fallback.setup()
-                events_indexed = _run_plugin_and_index(
+                events_indexed, events_failed = _run_plugin_and_index(
                     fallback, indexer, r, job_id, case_id, source_url, ingested_at
                 )
                 fallback.teardown()
@@ -286,11 +292,6 @@ def process_artifact(
             except Exception as plaso_exc:
                 logger.error("[%s] Plaso fallback also failed: %s", job_id, plaso_exc)
                 # ── Strings last resort ──────────────────────────────────────
-                # Both the primary plugin and plaso failed.  Run strings
-                # extraction as the final safety net so the job always
-                # completes rather than failing.  Even for stub/empty files
-                # this produces 0 events but marks the job COMPLETED, keeping
-                # the file available for module analysis.
                 logger.warning(
                     "[%s] Trying strings fallback as last resort", job_id
                 )
@@ -299,7 +300,7 @@ def process_artifact(
                     from plugins.strings_fallback.strings_fallback_plugin import StringsFallbackPlugin
                     strings_fb = StringsFallbackPlugin(ctx)
                     strings_fb.setup()
-                    events_indexed = _run_plugin_and_index(
+                    events_indexed, events_failed = _run_plugin_and_index(
                         strings_fb, indexer, r, job_id, case_id, source_url, ingested_at
                     )
                     strings_fb.teardown()
@@ -317,6 +318,7 @@ def process_artifact(
         result = {
             "status": "COMPLETED",
             "events_indexed": events_indexed,
+            "events_failed": events_failed,
             "plugin_stats": stats,
             "completed_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -445,6 +447,16 @@ def s3_transfer(
         raise RuntimeError(str(exc)) from None
 
 
+def _is_valid_timestamp(ts: str) -> bool:
+    """Return True if ts is a parseable ISO 8601 timestamp."""
+    try:
+        from datetime import datetime
+        datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return True
+    except (ValueError, AttributeError):
+        return False
+
+
 def _run_plugin_and_index(
     plugin,
     indexer: ESBulkIndexer,
@@ -453,13 +465,19 @@ def _run_plugin_and_index(
     case_id: str,
     source_url: str,
     ingested_at: str,
-) -> int:
-    """Drive a plugin's parse() generator and bulk-index all events. Returns event count."""
+) -> tuple[int, int]:
+    """Drive a plugin's parse() generator and bulk-index all events. Returns (indexed, failed)."""
     batch: list[dict] = []
     events_indexed = 0
+    events_failed  = 0
     for raw_event in plugin.parse():
-        event = _merge_base_fields(raw_event, case_id, job_id, source_url, ingested_at)
-        batch.append(event)
+        try:
+            event = _merge_base_fields(raw_event, case_id, job_id, source_url, ingested_at)
+            batch.append(event)
+        except Exception as exc:
+            events_failed += 1
+            logger.warning("[%s] Skipped malformed event from plugin %s: %s",
+                           job_id, plugin.PLUGIN_NAME, exc)
         if len(batch) >= BULK_SIZE:
             indexer.bulk_index(case_id, batch)
             events_indexed += len(batch)
@@ -468,7 +486,7 @@ def _run_plugin_and_index(
     if batch:
         indexer.bulk_index(case_id, batch)
         events_indexed += len(batch)
-    return events_indexed
+    return events_indexed, events_failed
 
 
 def _merge_base_fields(
@@ -508,4 +526,8 @@ def _merge_base_fields(
         base["timestamp"] = ingested_at
         if not base.get("timestamp_desc") or base["timestamp_desc"] == "Unknown":
             base["timestamp_desc"] = "Ingestion Time"
+    elif not _is_valid_timestamp(str(base["timestamp"])):
+        logger.debug("Invalid timestamp %r, falling back to ingested_at", base["timestamp"])
+        base["timestamp"] = ingested_at
+        base["timestamp_desc"] = "Ingestion Time (coerced)"
     return base

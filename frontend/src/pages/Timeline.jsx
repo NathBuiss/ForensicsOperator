@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import {
   Search, Filter, X, Flag, Loader2, Download, RefreshCw,
   BarChart2, Plus, Minus, Keyboard, SlidersHorizontal, Brain,
+  Sparkles, Trash2, BookmarkCheck, Bookmark,
 } from 'lucide-react'
 import { api } from '../api/client'
 import EventDetail from '../components/shared/EventDetail'
@@ -72,6 +73,29 @@ function getArtifact(ev) {
   return ev[ev.artifact_type] || {}
 }
 
+// Deduplication: fingerprint on content, not fo_id (which changes on re-ingest)
+function eventFingerprint(ev) {
+  return `${ev.timestamp}|${ev.message}|${ev.artifact_type}|${ev.host?.hostname ?? ''}|${ev.user?.name ?? ''}`
+}
+
+function deduplicateEvents(events) {
+  const seen = new Set()
+  return events.filter(ev => {
+    const fp = eventFingerprint(ev)
+    if (seen.has(fp)) return false
+    seen.add(fp)
+    return true
+  })
+}
+
+// Map column IDs → ES sort field names
+const SORT_ES_FIELDS = {
+  timestamp: 'timestamp',
+  type:      'artifact_type',
+  host:      'host.hostname.keyword',
+  user:      'user.name.keyword',
+}
+
 export default function Timeline({ caseId, artifactTypes }) {
   const [events, setEvents]               = useState([])
   const [total, setTotal]                 = useState(0)
@@ -102,37 +126,68 @@ export default function Timeline({ caseId, artifactTypes }) {
   const [naturalDateErr, setNaturalDateErr] = useState('')
   const [activePreset, setActivePreset]     = useState(null)
 
+  const [facets, setFacets]                 = useState({})
+  const [facetFilters, setFacetFilters]     = useState({})
+  const [savedSearches, setSavedSearches]   = useState([])
+  const [showSaveForm, setShowSaveForm]     = useState(false)
+  const [saveSearchName, setSaveSearchName] = useState('')
+  const [showAiAssist, setShowAiAssist]     = useState(false)
+
+  const [sortField, setSortField]           = useState('timestamp')
+  const [sortOrder, setSortOrder]           = useState('asc')
+
   const loaderRef = useRef(null)
   const searchRef = useRef(null)
   const rowRefs   = useRef({})
 
-  // Load histogram once on mount
+  // Load saved searches on mount
   useEffect(() => {
-    api.search.facets(caseId, {})
-      .then(r => setHistogram(r.facets?.events_over_time?.buckets || []))
-      .catch(() => {})
+    api.savedSearches.list(caseId).then(r => setSavedSearches(r.searches || [])).catch(() => {})
   }, [caseId])
+
+  // Refresh facets whenever query, facetFilters, or selectedType changes
+  useEffect(() => {
+    const params = {}
+    if (query) params.q = query
+    if (selectedType) params.artifact_type = selectedType
+    Object.assign(params, facetFilters)
+    api.search.facets(caseId, params)
+      .then(r => {
+        const f = r.facets || {}
+        setFacets(f)
+        setHistogram(f.events_over_time?.buckets || [])
+      })
+      .catch(() => {})
+  }, [caseId, query, selectedType, facetFilters])
 
   const load = useCallback(async (pg = 0, reset = false) => {
     setLoading(true)
     try {
-      const params = { page: pg, size: PAGE_SIZE }
-      if (selectedType) params.artifact_type = selectedType
-      if (fromTs) params.from = fromTs
-      if (toTs)   params.to   = toTs
+      const esSortField = SORT_ES_FIELDS[sortField] || sortField
+      const params = { page: pg, size: PAGE_SIZE, sort_field: esSortField, sort_order: sortOrder }
+      if (selectedType)          params.artifact_type = selectedType
+      if (fromTs)                params.from = fromTs
+      if (toTs)                  params.to   = toTs
+      Object.assign(params, facetFilters)
       let effectiveQ = query
       if (flaggedOnly) {
         effectiveQ = effectiveQ ? `(${effectiveQ}) AND is_flagged:true` : 'is_flagged:true'
       }
-      const r = effectiveQ
-        ? await api.search.search(caseId, { ...params, q: effectiveQ })
+      const hasSearch = effectiveQ || Object.keys(facetFilters).length > 0
+      const r = hasSearch
+        ? await api.search.search(caseId, { ...params, q: effectiveQ, regexp: regexpMode })
         : await api.search.timeline(caseId, params)
       setTotal(r.total || 0)
-      setEvents(prev => reset ? (r.events || []) : [...prev, ...(r.events || [])])
+      const incoming = deduplicateEvents(r.events || [])
+      setEvents(prev => {
+        if (reset) return incoming
+        const seenFps = new Set(prev.map(eventFingerprint))
+        return [...prev, ...incoming.filter(ev => !seenFps.has(eventFingerprint(ev)))]
+      })
       setPage(pg)
     } catch (e) { console.error(e) }
     finally { setLoading(false) }
-  }, [caseId, selectedType, fromTs, toTs, query, flaggedOnly])
+  }, [caseId, selectedType, fromTs, toTs, query, flaggedOnly, facetFilters, regexpMode, sortField, sortOrder])
 
   useEffect(() => { load(0, true) }, [load])
 
@@ -198,9 +253,17 @@ export default function Timeline({ caseId, artifactTypes }) {
 
   function submitSearch(e) {
     e.preventDefault()
-    let q = inputVal.trim()
-    if (regexpMode && q && !q.includes(':') && !q.startsWith('/')) q = `/${q}/`
-    setQuery(q)
+    setQuery(inputVal.trim())
+  }
+
+  function toggleSort(colId) {
+    if (!SORT_ES_FIELDS[colId]) return
+    if (sortField === colId) {
+      setSortOrder(o => o === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortField(colId)
+      setSortOrder('asc')
+    }
   }
 
   function clearSearch() { setInputVal(''); setQuery('') }
@@ -223,9 +286,13 @@ export default function Timeline({ caseId, artifactTypes }) {
   async function refresh() {
     setRefreshing(true)
     try {
+      const facetParams = {}
+      if (query) facetParams.q = query
+      if (selectedType) facetParams.artifact_type = selectedType
+      Object.assign(facetParams, facetFilters)
       await Promise.all([
-        api.search.facets(caseId, {})
-          .then(r => setHistogram(r.facets?.events_over_time?.buckets || []))
+        api.search.facets(caseId, facetParams)
+          .then(r => { const f = r.facets || {}; setFacets(f); setHistogram(f.events_over_time?.buckets || []) })
           .catch(() => {}),
         load(0, true),
       ])
@@ -352,7 +419,7 @@ export default function Timeline({ caseId, artifactTypes }) {
   }
 
   const maxCount  = histogram.reduce((m, b) => Math.max(m, b.doc_count), 1)
-  const hasFilters = selectedType || fromTs || toTs || flaggedOnly
+  const hasFilters = selectedType || fromTs || toTs || flaggedOnly || Object.keys(facetFilters).length > 0
   const vis        = col => visibleCols.includes(col)
 
   return (
@@ -500,12 +567,89 @@ export default function Timeline({ caseId, artifactTypes }) {
 
           {hasFilters && (
             <button
-              onClick={() => { setSelectedType(''); setFromTs(''); setToTs(''); setFlaggedOnly(false) }}
+              onClick={() => { setSelectedType(''); setFromTs(''); setToTs(''); setFlaggedOnly(false); setFacetFilters({}) }}
               className="btn-ghost w-full text-xs justify-center"
             >
               <X size={11} /> Clear all
             </button>
           )}
+
+          {/* ── Saved searches ───────────────────────── */}
+          <div className="border-t border-gray-100 pt-3">
+            <div className="flex items-center justify-between mb-1.5">
+              <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-1">
+                <Bookmark size={9} /> Saved
+              </p>
+              {(query || Object.keys(facetFilters).length > 0) && (
+                <button onClick={() => setShowSaveForm(v => !v)}
+                  className="text-[10px] text-brand-accent hover:text-brand-accenthover">+ Save</button>
+              )}
+            </div>
+            {showSaveForm && (
+              <div className="mb-1.5 flex gap-1">
+                <input value={saveSearchName} onChange={e => setSaveSearchName(e.target.value)}
+                  placeholder="Name…" className="input flex-1 text-[11px] py-0.5 px-1.5" />
+                <button
+                  onClick={async () => {
+                    if (!saveSearchName.trim()) return
+                    const s = await api.savedSearches.create(caseId, { name: saveSearchName.trim(), query, filters: facetFilters })
+                    setSavedSearches(p => [...p, s])
+                    setSaveSearchName(''); setShowSaveForm(false)
+                  }}
+                  className="btn-primary text-xs px-1.5 py-0.5">
+                  <BookmarkCheck size={10} />
+                </button>
+              </div>
+            )}
+            {savedSearches.length === 0 && (
+              <p className="text-[10px] text-gray-400 italic">None yet</p>
+            )}
+            {savedSearches.map(s => (
+              <div key={s.id} className="flex items-center gap-0.5 mb-0.5 group">
+                <button
+                  onClick={() => { setInputVal(s.query || ''); setQuery(s.query || ''); setFacetFilters(s.filters || {}) }}
+                  className="flex-1 text-left text-[11px] text-gray-600 hover:text-brand-text truncate px-1 py-0.5 rounded hover:bg-gray-50 transition-colors">
+                  {s.name}
+                </button>
+                <button
+                  onClick={async () => { await api.savedSearches.delete(caseId, s.id); setSavedSearches(p => p.filter(x => x.id !== s.id)) }}
+                  className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-gray-100 text-gray-400 hover:text-red-500 transition-all">
+                  <Trash2 size={9} />
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* ── Facet chips ──────────────────────────── */}
+          {['by_hostname','by_username','by_event_id','by_channel'].map(facetKey => {
+            const filterKey = { by_hostname:'hostname', by_username:'username', by_event_id:'event_id', by_channel:'channel' }[facetKey]
+            const label     = { by_hostname:'Host',    by_username:'User',     by_event_id:'Event ID', by_channel:'Channel' }[facetKey]
+            const buckets   = facets[facetKey]?.buckets || []
+            if (!buckets.length) return null
+            return (
+              <div key={facetKey} className="border-t border-gray-100 pt-3">
+                <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">{label}</p>
+                <div className="flex flex-wrap gap-0.5">
+                  {buckets.slice(0, 8).map(b => (
+                    <button key={b.key}
+                      onClick={() => setFacetFilters(prev =>
+                        prev[filterKey] === String(b.key)
+                          ? Object.fromEntries(Object.entries(prev).filter(([k]) => k !== filterKey))
+                          : { ...prev, [filterKey]: String(b.key) }
+                      )}
+                      className={`text-[10px] px-1.5 py-0.5 rounded border transition-colors mb-0.5 ${
+                        facetFilters[filterKey] === String(b.key)
+                          ? 'bg-brand-accent text-white border-brand-accent'
+                          : 'border-gray-200 text-gray-600 hover:border-brand-accent'
+                      }`}>
+                      <span className="truncate max-w-[80px] block">{b.key}</span>
+                      <span className="text-[9px] opacity-60">{b.doc_count}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )
+          })}
         </div>
 
         {/* Event count footer */}
@@ -531,8 +675,8 @@ export default function Timeline({ caseId, artifactTypes }) {
                 value={inputVal}
                 onChange={e => setInputVal(e.target.value)}
                 placeholder={regexpMode
-                  ? 'Regexp… /lateral.*movement/ or field:/pattern/'
-                  : 'Search… EventID:4624, host.hostname:DC01, message:"logon"'}
+                  ? 'Regexp on message… lateral.*movement  4[6-9][0-9]{2}  cmd\.exe'
+                  : 'Search… evtx.event_id:4624  host.hostname:DC01  message:"logon"'}
                 className="input-lg pl-9 pr-4 text-xs"
               />
             </div>
@@ -540,12 +684,21 @@ export default function Timeline({ caseId, artifactTypes }) {
             <button
               type="button"
               onClick={() => setRegexpMode(v => !v)}
-              title={regexpMode ? 'Regexp mode ON' : 'Switch to regexp mode'}
+              title={regexpMode ? 'Regexp mode ON — ES regexp on message field. Supports .* [a-z] (a|b) but NOT \\d \\w' : 'Switch to regexp mode'}
               className={`btn-outline text-xs px-2.5 py-1.5 font-mono tracking-tight ${
                 regexpMode ? 'border-brand-accent text-brand-accent bg-brand-accentlight' : 'text-gray-500'
               }`}
             >
               .*
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowAiAssist(v => !v)}
+              title="AI Search Assist — describe what you want to find"
+              className={`btn-ghost text-xs ${showAiAssist ? 'text-indigo-500' : 'text-gray-500'}`}
+            >
+              <Sparkles size={13} />
             </button>
 
             <button type="submit" className="btn-primary text-xs px-4">Search</button>
@@ -630,19 +783,39 @@ export default function Timeline({ caseId, artifactTypes }) {
             </button>
           </form>
 
-          {query && (
+          {(query || Object.keys(facetFilters).length > 0) && (
             <div className="flex items-center gap-2 mt-2 flex-wrap">
-              <span className="text-[10px] text-gray-500">Query:</span>
-              <code className="badge bg-brand-accentlight text-brand-accent border border-brand-accent/20 text-[10px] max-w-xs truncate font-mono">
-                {query}
-              </code>
-              {regexpMode && (
-                <span className="badge bg-purple-100 text-purple-700 text-[10px]">regexp</span>
+              {query && (
+                <>
+                  <span className="text-[10px] text-gray-500">Query:</span>
+                  <code className="badge bg-brand-accentlight text-brand-accent border border-brand-accent/20 text-[10px] max-w-xs truncate font-mono">
+                    {query}
+                  </code>
+                  {regexpMode && (
+                    <span className="badge bg-purple-100 text-purple-700 text-[10px]">regexp</span>
+                  )}
+                </>
               )}
+              {Object.entries(facetFilters).map(([k, v]) => (
+                <span key={k}
+                  className="badge bg-indigo-50 text-indigo-700 border border-indigo-200 cursor-pointer hover:bg-indigo-100 text-[10px]"
+                  onClick={() => setFacetFilters(prev => Object.fromEntries(Object.entries(prev).filter(([key]) => key !== k)))}>
+                  {k}: {v} ×
+                </span>
+              ))}
               <span className="text-[10px] text-gray-400">
                 — {total.toLocaleString()} result{total !== 1 ? 's' : ''}
               </span>
             </div>
+          )}
+
+          {/* AI Search Assist inline panel */}
+          {showAiAssist && (
+            <AiSearchAssistPanel
+              caseId={caseId}
+              onApply={q => { setInputVal(q); setQuery(q); setShowAiAssist(false) }}
+              onClose={() => setShowAiAssist(false)}
+            />
           )}
         </div>
 
@@ -746,59 +919,37 @@ export default function Timeline({ caseId, artifactTypes }) {
                 <th className="px-2 py-2.5 w-6" />
 
                 {vis('timestamp') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-40">
-                    Timestamp
-                  </th>
+                  <SortableTh colId="timestamp" label="Timestamp" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-40" />
                 )}
                 {vis('type') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-24">
-                    Type
-                  </th>
+                  <SortableTh colId="type" label="Type" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-24" />
                 )}
                 {vis('level') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-20">
-                    Level
-                  </th>
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-20">Level</th>
                 )}
                 {vis('event_id') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-20">
-                    Event ID
-                  </th>
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-20">Event ID</th>
                 )}
                 {vis('host') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-28">
-                    Host
-                  </th>
+                  <SortableTh colId="host" label="Host" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-28" />
                 )}
                 {vis('user') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-24">
-                    User
-                  </th>
+                  <SortableTh colId="user" label="User" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-24" />
                 )}
                 {vis('process') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-28">
-                    Process
-                  </th>
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-28">Process</th>
                 )}
                 {vis('channel') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-28">
-                    Channel
-                  </th>
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-28">Channel</th>
                 )}
                 {vis('rule') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-36">
-                    Rule
-                  </th>
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-36">Rule</th>
                 )}
                 {vis('message') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider">
-                    Message
-                  </th>
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Message</th>
                 )}
                 {vis('tags') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-32">
-                    Tags
-                  </th>
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-32">Tags</th>
                 )}
               </tr>
             </thead>
@@ -938,6 +1089,77 @@ export default function Timeline({ caseId, artifactTypes }) {
               </p>
             </div>
           </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ── Sortable table header ── */
+function SortableTh({ colId, label, sortField, sortOrder, onSort, className = '' }) {
+  const active = sortField === colId
+  return (
+    <th
+      className={`text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider cursor-pointer select-none hover:text-brand-accent transition-colors ${className}`}
+      onClick={() => onSort(colId)}
+    >
+      <span className="flex items-center gap-0.5">
+        {label}
+        {active
+          ? <span className="text-brand-accent">{sortOrder === 'asc' ? ' ↑' : ' ↓'}</span>
+          : <span className="text-gray-300 opacity-0 group-hover:opacity-100"> ↕</span>}
+      </span>
+    </th>
+  )
+}
+
+/* ── AI Search Assist panel ── */
+function AiSearchAssistPanel({ caseId, onApply, onClose }) {
+  const [text, setText]       = useState('')
+  const [loading, setLoading] = useState(false)
+  const [result, setResult]   = useState(null)
+  const [error, setError]     = useState('')
+
+  async function submit(e) {
+    e.preventDefault()
+    if (!text.trim()) return
+    setLoading(true); setError(''); setResult(null)
+    try {
+      const res = await api.llm.searchAssist({ query: text, case_id: caseId })
+      setResult(res)
+    } catch (err) { setError(err.message) }
+    finally { setLoading(false) }
+  }
+
+  return (
+    <div className="mt-2 p-3 bg-indigo-50 border border-indigo-200 rounded-lg">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-1.5">
+          <Sparkles size={12} className="text-indigo-500" />
+          <span className="text-[11px] font-semibold text-indigo-700">AI Search Assist</span>
+        </div>
+        <button onClick={onClose} className="text-indigo-400 hover:text-indigo-600"><X size={12} /></button>
+      </div>
+      <form onSubmit={submit} className="flex gap-2">
+        <input
+          autoFocus
+          value={text}
+          onChange={e => setText(e.target.value)}
+          placeholder="Describe what you want to find…"
+          className="input flex-1 text-xs py-1"
+        />
+        <button type="submit" disabled={!text.trim() || loading} className="btn-primary text-xs px-3 py-1">
+          {loading ? <Loader2 size={11} className="animate-spin" /> : <Sparkles size={11} />}
+        </button>
+      </form>
+      {error && <p className="text-[11px] text-red-600 mt-1.5">{error}</p>}
+      {result && (
+        <div className="mt-2 space-y-1.5">
+          <code className="block text-[11px] font-mono text-brand-accent bg-white border border-gray-200 rounded px-2 py-1 break-all">{result.query}</code>
+          {result.explanation && <p className="text-[11px] text-indigo-600 italic">{result.explanation}</p>}
+          <button onClick={() => onApply(result.query)} className="btn-primary text-xs px-3 py-1 w-full justify-center">
+            Apply Query
+          </button>
         </div>
       )}
     </div>

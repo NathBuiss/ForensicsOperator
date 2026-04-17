@@ -4,7 +4,6 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-route
 import Layout         from './components/layout/Layout'
 import Dashboard      from './pages/Dashboard'
 import CaseTimeline   from './pages/CaseTimeline'
-import Search         from './pages/Search'
 import AlertLibrary   from './pages/AlertLibrary'
 import YaraLibrary    from './pages/YaraLibrary'
 import Ingesters      from './pages/Ingesters'
@@ -70,7 +69,7 @@ export default function App() {
             <Route index                            element={<Dashboard />} />
             <Route path="cases"                     element={<Cases />} />
             <Route path="cases/:caseId"             element={<CaseTimeline />} />
-            <Route path="cases/:caseId/search"      element={<Search />} />
+            <Route path="cases/:caseId/search"      element={<Navigate to="../" replace />} />
             <Route path="alert-rules"               element={<AlertLibrary />} />
             <Route path="yara-rules"                element={<YaraLibrary />} />
             <Route path="ingesters"                 element={<Ingesters />} />

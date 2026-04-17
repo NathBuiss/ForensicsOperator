@@ -27,6 +27,7 @@ def create_job(
         "original_filename": filename,
         "minio_object_key": minio_key,
         "events_indexed": "0",
+        "events_failed": "0",
         "error": "",
         "plugin_used": "",
         "plugin_stats": "{}",
@@ -57,7 +58,7 @@ def get_job(job_id: str) -> dict | None:
                 data[field] = json.loads(data[field])
             except (json.JSONDecodeError, TypeError):
                 data[field] = {}
-    for field in ("events_indexed",):
+    for field in ("events_indexed", "events_failed"):
         if field in data:
             try:
                 data[field] = int(data[field])

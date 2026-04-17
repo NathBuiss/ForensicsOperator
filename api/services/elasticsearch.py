@@ -107,6 +107,12 @@ def count_case_events(case_id: str) -> int:
         return 0
 
 
+_SEARCH_FIELDS = [
+    "message", "host.hostname", "user.name",
+    "process.name", "process.cmdline", "process.args",
+]
+
+
 def search_events(
     case_id: str,
     query: str = "",
@@ -118,6 +124,7 @@ def search_events(
     size: int = 100,
     sort_field: str = "timestamp",
     sort_order: str = "asc",
+    regexp: bool = False,
 ) -> dict[str, Any]:
     """
     Search events in a case with full-text query and field filters.
@@ -129,7 +136,11 @@ def search_events(
     filter_clauses: list[dict] = []
 
     if query:
-        must_clauses.append({"query_string": {"query": query, "default_operator": "AND"}})
+        if regexp:
+            # ES regexp on the unanalyzed full-text field — supports ., .*, [a-z], (a|b) but NOT \d \w \s
+            must_clauses.append({"regexp": {"message.keyword": {"value": query, "case_insensitive": True, "flags": "ALL"}}})
+        else:
+            must_clauses.append({"query_string": {"query": query, "default_operator": "AND", "fields": _SEARCH_FIELDS}})
 
     if from_ts or to_ts:
         range_filter: dict = {"range": {"timestamp": {}}}
@@ -176,7 +187,7 @@ def get_search_facets(
     """Return aggregation buckets for the facet panel."""
     index = f"fo-case-{case_id}-{artifact_type}" if artifact_type else f"fo-case-{case_id}-*"
 
-    must = [{"query_string": {"query": query}}] if query else [{"match_all": {}}]
+    must = [{"query_string": {"query": query, "fields": _SEARCH_FIELDS}}] if query else [{"match_all": {}}]
 
     body = {
         "query": {"bool": {"must": must}},

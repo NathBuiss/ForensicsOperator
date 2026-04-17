@@ -18,7 +18,9 @@ EXTENSION_MIME_MAP = {
     ".hive": "application/octet-stream",
     ".reg": "text/plain",
     # fo-harvester specific
-    ".wer": "application/x-windows-wer",
+    ".wer":   "application/x-windows-wer",
+    ".trace": "text/plain",             # AnyDesk/TeamViewer trace logs → syslog
+    ".etl":   "application/octet-stream",  # ETW binary traces — strings fallback
 }
 
 FILENAME_MIME_MAP = {
@@ -30,9 +32,15 @@ FILENAME_MIME_MAP = {
     "SAM": "application/x-registry",
     "SECURITY": "application/x-registry",
     # fo-harvester: well-known text files that would otherwise hit strings fallback
-    "CONSOLEHOST_HISTORY.TXT": "text/plain",  # PowerShell command history → syslog
-    "SETUPAPI.DEV.LOG":        "text/plain",  # USB device install log → syslog
-    "SETUPAPI.SETUP.LOG":      "text/plain",  # USB setup log → syslog
+    "CONSOLEHOST_HISTORY.TXT": "text/plain",     # PowerShell command history → syslog
+    "SETUPAPI.DEV.LOG":        "text/plain",     # USB device install log → syslog
+    "SETUPAPI.SETUP.LOG":      "text/plain",     # USB setup log → syslog
+    # fo-harvester: execution evidence + system logs
+    "AMCACHE.HVE":        "application/x-registry",  # Execution evidence → registry plugin
+    "SRUDB.DAT":          "application/x-sqlite3",   # SRUM database → browser/SQLite plugin
+    "SRTTRAIL.TXT":       "text/plain",              # SFC scan log → syslog
+    "CBS.LOG":            "text/plain",              # Component store log → syslog
+    "WINDOWSUPDATE.LOG":  "text/plain",              # Windows Update log → syslog
 }
 
 # Artifact path-part → synthetic MIME type.
@@ -44,6 +52,9 @@ FILENAME_MIME_MAP = {
 _PATH_PART_MIME_MAP: dict[str, str] = {
     "tasks":         "application/x-windows-task",   # persistence/tasks/... (Scheduled Task XML)
     "wifi_profiles": "application/x-wlan-profile",   # network_cfg/wifi_profiles/...
+    "win_logs":      "text/plain",   # CBS.log, DISM.log, Panther logs → syslog
+    "remote_access": "text/plain",   # AnyDesk traces, TeamViewer logs → syslog
+    "antivirus":     "text/plain",   # Defender logs (non-evtx) → syslog
 }
 
 
