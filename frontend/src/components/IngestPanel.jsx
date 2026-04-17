@@ -693,6 +693,7 @@ export default function IngestPanel({ caseId, onClose, onComplete }) {
   const [jobDataMap,   setJobDataMap]   = useState({})
   const [filterStatus, setFilterStatus] = useState(null)   // null = All
   const [searchQuery,  setSearchQuery]  = useState('')
+  const [loadError,    setLoadError]    = useState(null)
 
   const jobsRef     = useRef([])
   const statusesRef = useRef({})
@@ -709,7 +710,7 @@ export default function IngestPanel({ caseId, onClose, onComplete }) {
       setJobStatuses(sm)
       setJobDataMap(dm)
       setJobs([...all].sort((a, b) => (JOB_SORT_ORDER[a.status] ?? 9) - (JOB_SORT_ORDER[b.status] ?? 9)).map(j => j.job_id))
-    }).catch(() => {})
+    }).catch(err => setLoadError(err?.message || 'Failed to load jobs'))
   }, [caseId])
 
   // Central batch poller — one request per 3 s for all non-terminal jobs
@@ -902,7 +903,10 @@ export default function IngestPanel({ caseId, onClose, onComplete }) {
             {jobs.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-32 gap-2 text-gray-300">
                 <Database size={28} />
-                <p className="text-xs">No jobs yet — upload or import from S3</p>
+                {loadError
+                  ? <p className="text-xs text-red-400">{loadError}</p>
+                  : <p className="text-xs">No jobs yet — upload or import from S3</p>
+                }
               </div>
             ) : filteredJobs.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-24 gap-1.5 text-gray-300">

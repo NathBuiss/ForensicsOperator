@@ -437,18 +437,26 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
   }
 
   useEffect(() => {
-    Promise.allSettled([api.modules.list(), api.modules.listSources(caseId)])
-      .then(([modResult, srcResult]) => {
-        if (modResult.status === 'fulfilled') {
-          setModules((modResult.value.modules || []).filter(m => m.available))
-        } else {
-          setError('Could not load modules: ' + (modResult.reason?.message || 'server error'))
-        }
-        if (srcResult.status === 'fulfilled') {
-          setSources(srcResult.value.sources || [])
-        }
+    const settled = Promise.allSettled([api.modules.list(), api.modules.listSources(caseId)])
+    const timer   = new Promise(resolve => setTimeout(() => resolve('__timeout__'), 8000))
+
+    Promise.race([settled, timer]).then(result => {
+      if (result === '__timeout__') {
+        setError('Request timed out — the API may be starting up. Close and try again.')
         setLoading(false)
-      })
+        return
+      }
+      const [modResult, srcResult] = result
+      if (modResult.status === 'fulfilled') {
+        setModules((modResult.value.modules || []).filter(m => m.available))
+      } else {
+        setError('Could not load modules: ' + (modResult.reason?.message || 'server error'))
+      }
+      if (srcResult.status === 'fulfilled') {
+        setSources(srcResult.value.sources || [])
+      }
+      setLoading(false)
+    })
   }, [caseId])
 
   // Load YARA library rules when YARA module is selected
