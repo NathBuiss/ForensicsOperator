@@ -813,7 +813,7 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
           {showAiAssist && (
             <AiSearchAssistPanel
               caseId={caseId}
-              onApply={q => { setInputVal(q); setQuery(q); setShowAiAssist(false) }}
+              onApply={(q, regexp) => { setInputVal(q); setQuery(q); if (regexp) setRegexpMode(true); setShowAiAssist(false) }}
               onClose={() => setShowAiAssist(false)}
             />
           )}
@@ -1157,8 +1157,8 @@ function AiSearchAssistPanel({ caseId, onApply, onClose }) {
         <div className="mt-2 space-y-1.5">
           <code className="block text-[11px] font-mono text-brand-accent bg-white border border-gray-200 rounded px-2 py-1 break-all">{result.query}</code>
           {result.explanation && <p className="text-[11px] text-indigo-600 italic">{result.explanation}</p>}
-          <button onClick={() => onApply(result.query)} className="btn-primary text-xs px-3 py-1 w-full justify-center">
-            Apply Query
+          <button onClick={() => onApply(result.query, result.regexp)} className="btn-primary text-xs px-3 py-1 w-full justify-center">
+            Apply Query{result.regexp ? ' (regexp)' : ''}
           </button>
         </div>
       )}

@@ -89,6 +89,19 @@ async def _unhandled_exception(request: Request, exc: Exception) -> JSONResponse
         content={"detail": f"Internal server error: {type(exc).__name__}: {exc}"},
     )
 
+
+async def _redis_unavailable(request: Request, exc: Exception) -> JSONResponse:
+    logger.warning("Redis unavailable on %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Service temporarily unavailable — Redis is unreachable"},
+    )
+
+
+import redis as _redis_lib  # noqa: E402
+app.add_exception_handler(_redis_lib.exceptions.ConnectionError, _redis_unavailable)
+app.add_exception_handler(_redis_lib.exceptions.TimeoutError, _redis_unavailable)
+
 # ── Middleware ─────────────────────────────────────────────────────────────────
 
 @app.middleware("http")

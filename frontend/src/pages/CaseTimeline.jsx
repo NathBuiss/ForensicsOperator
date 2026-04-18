@@ -1426,6 +1426,7 @@ function ModuleRunsPanel({ caseId, onClose }) {
   const navigate              = useNavigate()
   const [runs, setRuns]       = useState([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState(null)
 
   const [showFilters, setShowFilters]   = useState(false)
 
@@ -1446,8 +1447,8 @@ function ModuleRunsPanel({ caseId, onClose }) {
 
   const fetchRuns = useCallback(() => {
     api.modules.listRuns(caseId)
-      .then(r => { setRuns(r.runs || []); setLoading(false) })
-      .catch(() => setLoading(false))
+      .then(r => { setRuns(r.runs || []); setLoadError(null); setLoading(false) })
+      .catch(e => { setLoadError(e.message); setLoading(false) })
   }, [caseId])
 
   useEffect(() => { fetchRuns() }, [fetchRuns])
@@ -1817,10 +1818,15 @@ function ModuleRunsPanel({ caseId, onClose }) {
           ) : runs.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <Cpu size={40} className="text-gray-300 mb-3" />
-              <p className="font-medium text-gray-500">No module runs yet</p>
-              <p className="text-sm text-gray-400 mt-1">
-                Launch a module to analyse ingested files
-              </p>
+              {loadError
+                ? <p className="text-xs text-red-400">{loadError}</p>
+                : <>
+                    <p className="font-medium text-gray-500">No module runs yet</p>
+                    <p className="text-sm text-gray-400 mt-1">
+                      Launch a module to analyse ingested files
+                    </p>
+                  </>
+              }
             </div>
           ) : filteredRuns.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-center">

@@ -174,7 +174,7 @@ def search_events(
         result = _request("POST", f"/{index}/_search", body)
         return result
     except urllib.error.HTTPError as exc:
-        if exc.code == 404:
+        if exc.code in (400, 404):
             return {"hits": {"total": {"value": 0}, "hits": []}}
         raise
 

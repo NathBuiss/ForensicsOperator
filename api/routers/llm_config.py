@@ -869,9 +869,17 @@ Regexp mode (.*toggle): ES regexp on message.keyword (full raw string). Supports
 - High severity: artifact_type:hayabusa AND hayabusa.level:high
 - All alerts: artifact_type:hayabusa AND hayabusa.level:(critical OR high OR medium)
 
-Convert the user's natural language request into a query_string expression.
+## UI features the analyst has access to
+- **Normal mode** (default): query_string against message + host/user/process fields. Best for field-level queries.
+- **Regexp mode** (.*): ES regexp on full message.keyword. Suggest this when the user wants to match a pattern like cmd\.exe, 4[6-9][0-9]{2}, or (mimikatz|sekurlsa).
+- **Facet filters**: Host, User, Event ID, Channel can be filtered via sidebar chips (separate from the query). Do NOT include these in the query string unless the user explicitly targets a field.
+- **Date range**: Applied separately via date pickers — do NOT add timestamp range to the query.
+
+## Output instructions
+Convert the user's natural language request into a query_string expression (or regexp if appropriate).
 Return ONLY a JSON object with exactly these keys:
-{"query": "the query_string expression", "explanation": "one-sentence description of what the query finds"}
+{"query": "the expression", "explanation": "one-sentence description of what the query finds", "regexp": false}
+Set "regexp" to true only when the pattern requires ES regexp semantics (special chars, character classes, quantifiers).
 No markdown, no extra text — raw JSON only."""
 
 

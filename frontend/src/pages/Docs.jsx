@@ -556,55 +556,111 @@ evtx.event_id:4688 AND (message:*winword* OR message:*excel*)`} />
           <Section id="search" title="Investigation UI" icon={<GitBranch size={14} className="text-brand-accent" />}>
             <P>
               The <strong>Timeline</strong> tab is the unified investigation workspace. It combines
-              chronological event browsing, full-text search, facet filtering, saved searches, and
-              AI-assisted query generation in a single view.
+              chronological event browsing, full-text search, facet filtering, saved searches, date
+              range navigation, and AI-assisted query generation in a single view.
             </P>
 
             <H3>Search bar</H3>
             <Ul>
-              <Li>Press <kbd className="px-1 bg-gray-100 rounded text-[10px] font-mono">/</kbd> to focus the search bar from anywhere</Li>
+              <Li>Press <kbd className="px-1 bg-gray-100 rounded text-[10px] font-mono">/</kbd> to focus the search bar from anywhere on the page</Li>
               <Li>Press <strong>Enter</strong> or click <strong>Search</strong> to apply the query</Li>
-              <Li>Toggle <strong>.*</strong> for ES regexp mode (matches full message text)</Li>
-              <Li>Click <strong>✦</strong> (Sparkles) to open AI Search Assist — describe what you want in plain English</Li>
+              <Li>Toggle <strong>.*</strong> to switch to ES regexp mode — matches against the full raw message string. Use this for patterns like <code>cmd\.exe</code> or <code>4[6-9][0-9]&#123;2&#125;</code></Li>
+              <Li>Click <strong>✦</strong> (Sparkles) to open AI Search Assist — describe what you want to find in plain English and the AI generates the query</Li>
+            </Ul>
+
+            <InfoBox type="tip">
+              Use normal query_string mode for field-level queries (<code>evtx.event_id:4625</code>) and bare-term searches.
+              Switch to regexp mode only when you need to match a pattern across the full message text — it is slower on large datasets.
+            </InfoBox>
+
+            <H3>Date range & histogram</H3>
+            <Ul>
+              <Li>Use the <strong>From / To</strong> date pickers in the left sidebar to restrict events to a time window</Li>
+              <Li>Click a <strong>date preset</strong> (Last 24h, 7d, 30d, 90d) for quick ranges</Li>
+              <Li>The <strong>event histogram</strong> shows event count per day for the current filter — click a bar to jump to that date</Li>
             </Ul>
 
             <H3>Facet filter chips</H3>
             <P>
-              The left sidebar shows Host, User, Event ID, and Channel facet chips auto-computed from
-              the current result set. Click a chip to add it as an active filter — click again to remove.
-              Active filters appear as dismissible badges below the search bar.
+              The left sidebar shows <strong>Host</strong>, <strong>User</strong>, <strong>Event ID</strong>, and <strong>Channel</strong>
+              facet chips auto-computed from the current result set. Click a chip to add it as an exclusive filter —
+              click again to remove. Multiple facets can be active simultaneously.
+              Active filters appear as dismissible badges below the search bar alongside a <strong>Clear all</strong> button.
             </P>
 
             <H3>Saved searches</H3>
             <P>
               When a query or facet filter is active, click <strong>+ Save</strong> in the sidebar to
               name and persist the search for the current case. Saved searches restore both the query
-              text and any active facet filters. Delete them by hovering and clicking the trash icon.
+              text and any active facet filters. Hover a saved search and click the trash icon to delete it.
+            </P>
+
+            <H3>Column picker</H3>
+            <P>
+              Click the <strong>Columns</strong> button (top-right of the results table) to toggle which
+              fields are shown: Timestamp, Type, Host, User, Process, Message, Source, Tags, Note.
+              Column visibility is saved to localStorage per browser session.
             </P>
 
             <H3>Sorting</H3>
             <P>
-              Click any sortable column header (Timestamp ↑↓, Type, Host, User) to sort by that field.
-              Click again to reverse the order. Default: newest first (timestamp descending).
+              Click any sortable column header (Timestamp, Type, Host, User) to sort by that field.
+              An arrow indicator shows the active sort direction. Click again to reverse. Default is
+              timestamp ascending (oldest first) so the attack chain reads chronologically.
             </P>
+
+            <H3>Event detail panel</H3>
+            <P>
+              Click any row to open the full event detail panel on the right. From there you can:
+            </P>
+            <Ul>
+              <Li><strong>Flag</strong> the event for follow-up (bookmark icon) — flagged events are searchable with <code>is_flagged:true</code></Li>
+              <Li><strong>Tag</strong> the event with investigator labels (e.g. <code>lateral-movement</code>, <code>c2</code>)</Li>
+              <Li><strong>Add a note</strong> — free-text analyst annotation stored alongside the event</Li>
+              <Li><strong>AI Explain</strong> — sends the event to the configured LLM for a forensic significance summary</Li>
+              <Li>Click any field value to add it as an inline query filter (<code>AND field:"value"</code>)</Li>
+            </Ul>
+
+            <H3>Keyboard shortcuts</H3>
+            <div className="space-y-1 mt-2">
+              {[
+                { key: '/',          desc: 'Focus search bar' },
+                { key: '?',          desc: 'Toggle keyboard shortcut help overlay' },
+                { key: '↑ / ↓',      desc: 'Navigate rows (when search bar is not focused)' },
+                { key: 'Enter',      desc: 'Open detail panel for the selected row' },
+                { key: 'Escape',     desc: 'Close detail panel / blur search bar' },
+              ].map(r => (
+                <div key={r.key} className="flex gap-3 items-center text-xs py-1 border-b border-gray-100 last:border-0">
+                  <kbd className="font-mono bg-gray-100 text-gray-700 px-2 py-0.5 rounded text-[11px] flex-shrink-0 min-w-[60px] text-center">{r.key}</kbd>
+                  <span className="text-gray-500">{r.desc}</span>
+                </div>
+              ))}
+            </div>
 
             <H3>Event deduplication</H3>
             <P>
               Events with identical timestamp, message, artifact type, host, and user are automatically
-              deduplicated client-side. This prevents the same log event from appearing twice when an
-              artifact was ingested from multiple sources (e.g. raw EVTX + Plaso processing).
+              deduplicated client-side. This prevents the same log entry from appearing twice when an
+              artifact was ingested from multiple sources (e.g. raw EVTX + a Plaso super-timeline of
+              the same disk image).
             </P>
 
             <H3>AI Search Assist</H3>
             <P>
-              The AI assistant uses the configured LLM (Settings → AI Analysis) to translate a plain
-              English description into an Elasticsearch query_string. The model is aware of the full
-              field schema including EVTX event IDs, registry paths, prefetch fields, and common
-              forensic investigation patterns (lateral movement, credential dumping, persistence, …).
+              The <strong>✦</strong> button next to the search bar opens an input where you describe what
+              you want to find in plain English. The configured LLM (Settings → AI Analysis) translates it
+              into an Elasticsearch query_string aware of the full field schema — EVTX event IDs, registry
+              paths, prefetch fields, Hayabusa rule levels, MFT attributes, and common attack patterns
+              (lateral movement, credential dumping, persistence, log tampering, …).
+            </P>
+            <P>
+              The AI also knows when to suggest regexp mode — for example, if you ask for
+              "events matching the pattern 4[6-9]xx" it will set regexp mode automatically.
             </P>
             <InfoBox type="info">
-              AI Assist requires an LLM to be configured in Settings. The generated query is editable
-              before you apply it — always review before running against large datasets.
+              AI Assist requires an LLM configured in Settings → AI Analysis. The generated query is
+              pre-filled in the search bar and editable before you execute — always review before
+              running against large datasets.
             </InfoBox>
           </Section>
 
