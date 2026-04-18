@@ -127,6 +127,29 @@ export default function Settings() {
 
   const setS3Triage = (k, v) => setS3TriageForm(f => ({ ...f, [k]: v }))
 
+  // ── Artifact Storage Backend state ─────────────────────────────────────────
+  const [s3StorageConfig, setS3StorageConfig]         = useState(null)
+  const [s3StorageLoading, setS3StorageLoading]       = useState(true)
+  const [s3StorageSaving, setS3StorageSaving]         = useState(false)
+  const [s3StorageSaved, setS3StorageSaved]           = useState(false)
+  const [s3StorageError, setS3StorageError]           = useState('')
+  const [s3StorageShowKey, setS3StorageShowKey]       = useState(false)
+  const [s3StorageTesting, setS3StorageTesting]       = useState(false)
+  const [s3StorageTestResult, setS3StorageTestResult] = useState(null)
+
+  const [s3StorageForm, setS3StorageForm] = useState({
+    enabled:    false,
+    vendor:     'aws',
+    endpoint:   '',
+    access_key: '',
+    secret_key: '',
+    bucket:     '',
+    region:     '',
+    use_ssl:    true,
+  })
+
+  const setS3Storage = (k, v) => setS3StorageForm(f => ({ ...f, [k]: v }))
+
   // ── Cuckoo Sandbox config state ────────────────────────────────────────────
   const [cuckooConfig, setCuckooConfig]         = useState(null)
   const [cuckooLoading, setCuckooLoading]       = useState(true)
@@ -190,6 +213,26 @@ export default function Settings() {
       })
       .catch(() => {})
       .finally(() => setS3TriageLoading(false))
+
+    // Load artifact storage backend config
+    api.s3Storage.getConfig()
+      .then(cfg => {
+        setS3StorageConfig(cfg)
+        if (cfg.endpoint) {
+          setS3StorageForm({
+            enabled:    cfg.enabled || false,
+            vendor:     cfg.vendor || 'aws',
+            endpoint:   cfg.endpoint || '',
+            access_key: cfg.access_key || '',
+            secret_key: '',
+            bucket:     cfg.bucket || '',
+            region:     cfg.region || '',
+            use_ssl:    cfg.use_ssl !== false,
+          })
+        }
+      })
+      .catch(() => {})
+      .finally(() => setS3StorageLoading(false))
 
     api.llm.getConfig()
       .then(cfg => {
@@ -355,6 +398,49 @@ export default function Settings() {
       setS3TriageTestResult({ ok: false, error: err.message })
     } finally {
       setS3TriageTesting(false)
+    }
+  }
+
+  // ── Artifact Storage Backend handlers ─────────────────────────────────────
+  async function saveS3Storage(e) {
+    e.preventDefault()
+    setS3StorageSaving(true)
+    setS3StorageError('')
+    setS3StorageSaved(false)
+    try {
+      const updated = await api.s3Storage.setConfig(s3StorageForm)
+      setS3StorageConfig(updated)
+      setS3StorageSaved(true)
+      setTimeout(() => setS3StorageSaved(false), 3000)
+    } catch (err) {
+      setS3StorageError(err.message)
+    } finally {
+      setS3StorageSaving(false)
+    }
+  }
+
+  async function clearS3Storage() {
+    if (!confirm('Remove artifact storage backend configuration? Storage will revert to internal MinIO.')) return
+    try {
+      await api.s3Storage.clearConfig()
+      setS3StorageConfig({ enabled: false, endpoint: '', access_key: '', secret_key_set: false, bucket: '', region: '', vendor: 'aws', use_ssl: true })
+      setS3StorageForm({ enabled: false, vendor: 'aws', endpoint: '', access_key: '', secret_key: '', bucket: '', region: '', use_ssl: true })
+      setS3StorageTestResult(null)
+    } catch (err) {
+      setS3StorageError(err.message)
+    }
+  }
+
+  async function testS3Storage() {
+    setS3StorageTesting(true)
+    setS3StorageTestResult(null)
+    try {
+      const res = await api.s3Storage.testConfig()
+      setS3StorageTestResult({ ok: true, message: res.message })
+    } catch (err) {
+      setS3StorageTestResult({ ok: false, error: err.message })
+    } finally {
+      setS3StorageTesting(false)
     }
   }
 
@@ -1048,6 +1134,237 @@ export default function Settings() {
                 <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-start gap-1.5">
                   <X size={12} className="mt-0.5 flex-shrink-0" />
                   <span><strong>Failed:</strong> {s3TestResult.error}</span>
+                </div>
+              )
+            )}
+          </form>
+        )}
+      </section>
+
+      {/* ── Artifact Storage Backend ─────────────────────────────────────── */}
+      <section className="card p-5 space-y-4 mt-6">
+        <div className="flex items-center gap-2">
+          <HardDrive size={15} className="text-purple-500" />
+          <h2 className="font-semibold text-brand-text">Artifact Storage Backend</h2>
+          {!s3StorageLoading && s3StorageConfig?.enabled && s3StorageConfig?.endpoint && (
+            <span className="text-xs text-purple-600 bg-purple-50 border border-purple-200 rounded-full px-2 py-0.5 flex items-center gap-1">
+              <Check size={10} /> External S3 active
+            </span>
+          )}
+          {!s3StorageLoading && (!s3StorageConfig?.enabled || !s3StorageConfig?.endpoint) && (
+            <span className="text-xs text-gray-500 bg-gray-100 border border-gray-200 rounded-full px-2 py-0.5">
+              Using: Internal MinIO
+            </span>
+          )}
+        </div>
+
+        <p className="text-xs text-gray-500">
+          By default ForensicsOperator stores all artifact files in the <strong className="text-brand-text">internal MinIO</strong> instance
+          running inside the cluster. Enable this to route artifact storage to an external S3-compatible bucket
+          instead — useful when your cluster disk is limited and you have cheap object storage elsewhere
+          (AWS S3, Scaleway, Wasabi, GCS, any S3-compatible endpoint). The import/triage S3 configs above
+          are <em>unaffected</em> — this is a separate bucket exclusively for artifact storage.
+        </p>
+
+        {s3StorageLoading ? (
+          <div className="flex items-center gap-2 text-gray-400 py-4">
+            <Loader2 size={14} className="animate-spin" /> Loading...
+          </div>
+        ) : (
+          <form onSubmit={saveS3Storage} className="space-y-4">
+            {/* Enable toggle */}
+            <div className="flex items-center gap-3 p-3 rounded-lg border border-gray-200 bg-gray-50">
+              <button
+                type="button"
+                onClick={() => setS3Storage('enabled', !s3StorageForm.enabled)}
+                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                  s3StorageForm.enabled ? 'bg-purple-500' : 'bg-gray-300'
+                }`}
+              >
+                <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                  s3StorageForm.enabled ? 'translate-x-4' : 'translate-x-0.5'
+                }`} />
+              </button>
+              <div>
+                <p className="text-xs font-medium text-brand-text">
+                  {s3StorageForm.enabled ? 'External S3 enabled' : 'Using internal MinIO'}
+                </p>
+                <p className="text-[10px] text-gray-400">
+                  {s3StorageForm.enabled
+                    ? `All new artifacts will be stored in: ${s3StorageForm.bucket || '(bucket not set)'}`
+                    : 'Toggle on to route artifact storage to external S3'}
+                </p>
+              </div>
+            </div>
+
+            {/* Vendor */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Vendor</label>
+              <div className="flex flex-wrap gap-2">
+                {S3_VENDORS.map(v => (
+                  <button
+                    key={v.id}
+                    type="button"
+                    onClick={() => setS3StorageForm(f => ({
+                      ...f,
+                      vendor:   v.id,
+                      endpoint: v.id === 'scaleway' ? SCALEWAY_REGIONS[0].endpoint : '',
+                      region:   v.id === 'scaleway' ? SCALEWAY_REGIONS[0].region   : '',
+                    }))}
+                    className={`text-xs py-2 px-3 rounded-lg border transition-colors font-medium ${
+                      s3StorageForm.vendor === v.id
+                        ? 'bg-brand-accent text-white border-brand-accent'
+                        : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
+                    }`}
+                  >
+                    {v.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Scaleway region selector */}
+            {s3StorageForm.vendor === 'scaleway' && (
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Region</label>
+                <div className="flex flex-wrap gap-2">
+                  {SCALEWAY_REGIONS.map(r => (
+                    <button
+                      key={r.region}
+                      type="button"
+                      onClick={() => {
+                        setS3Storage('region', r.region)
+                        setS3Storage('endpoint', r.endpoint)
+                      }}
+                      className={`text-xs py-1.5 px-3 rounded-lg border transition-colors ${
+                        s3StorageForm.region === r.region
+                          ? 'bg-brand-accent text-white border-brand-accent'
+                          : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400'
+                      }`}
+                    >
+                      {r.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Endpoint */}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Endpoint</label>
+              <input
+                type="text"
+                className="input-field text-xs"
+                placeholder={scwEndpointPlaceholder(s3StorageForm.vendor)}
+                value={s3StorageForm.endpoint}
+                onChange={e => setS3Storage('endpoint', e.target.value)}
+              />
+            </div>
+
+            {/* Access Key + Secret Key */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Access Key</label>
+                <input
+                  type="text"
+                  className="input-field text-xs"
+                  placeholder="Access key ID"
+                  value={s3StorageForm.access_key}
+                  onChange={e => setS3Storage('access_key', e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Secret Key {s3StorageConfig?.secret_key_set && <span className="text-green-600 font-normal">(saved)</span>}
+                </label>
+                <div className="relative">
+                  <input
+                    type={s3StorageShowKey ? 'text' : 'password'}
+                    className="input-field text-xs pr-8"
+                    placeholder={s3StorageConfig?.secret_key_set ? '(unchanged)' : 'Secret key'}
+                    value={s3StorageForm.secret_key}
+                    onChange={e => setS3Storage('secret_key', e.target.value)}
+                  />
+                  <button type="button" onClick={() => setS3StorageShowKey(v => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                    {s3StorageShowKey ? <EyeOff size={13} /> : <Eye size={13} />}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Bucket + Region */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Bucket</label>
+                <input
+                  type="text"
+                  className="input-field text-xs"
+                  placeholder="my-artifact-bucket"
+                  value={s3StorageForm.bucket}
+                  onChange={e => setS3Storage('bucket', e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Region</label>
+                <input
+                  type="text"
+                  className="input-field text-xs"
+                  placeholder="us-east-1"
+                  value={s3StorageForm.region}
+                  onChange={e => setS3Storage('region', e.target.value)}
+                />
+              </div>
+            </div>
+
+            {/* SSL */}
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={s3StorageForm.use_ssl}
+                onChange={e => setS3Storage('use_ssl', e.target.checked)}
+                className="rounded border-gray-300 text-brand-accent"
+              />
+              <span className="text-xs text-gray-600">Use TLS / HTTPS</span>
+            </label>
+
+            {s3StorageError && (
+              <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-start gap-1.5">
+                <AlertCircle size={12} className="mt-0.5 flex-shrink-0" />
+                <span>{s3StorageError}</span>
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 flex-wrap">
+              <button type="submit" disabled={s3StorageSaving}
+                className="btn-primary text-xs px-4 py-1.5 flex items-center gap-1.5 disabled:opacity-50">
+                {s3StorageSaving ? <Loader2 size={12} className="animate-spin" /> : null}
+                {s3StorageSaved ? <Check size={12} /> : null}
+                {s3StorageSaved ? 'Saved' : 'Save'}
+              </button>
+              <button type="button" onClick={testS3Storage} disabled={s3StorageTesting}
+                className="btn-outline text-xs px-4 py-1.5 flex items-center gap-1.5 disabled:opacity-50">
+                {s3StorageTesting ? <Loader2 size={12} className="animate-spin" /> : <Wifi size={12} />}
+                Test Connection
+              </button>
+              {s3StorageConfig?.endpoint && (
+                <button type="button" onClick={clearS3Storage}
+                  className="btn-outline text-xs px-4 py-1.5 flex items-center gap-1.5 text-red-500 border-red-200 hover:border-red-400">
+                  <Trash2 size={12} /> Clear
+                </button>
+              )}
+            </div>
+
+            {s3StorageTestResult && (
+              s3StorageTestResult.ok ? (
+                <div className="text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2 flex items-start gap-1.5">
+                  <Check size={12} className="mt-0.5 flex-shrink-0" />
+                  <span><strong>Connected.</strong> {s3StorageTestResult.message}</span>
+                </div>
+              ) : (
+                <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-start gap-1.5">
+                  <X size={12} className="mt-0.5 flex-shrink-0" />
+                  <span><strong>Failed:</strong> {s3StorageTestResult.error}</span>
                 </div>
               )
             )}

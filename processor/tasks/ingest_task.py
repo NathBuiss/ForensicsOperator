@@ -59,6 +59,37 @@ def get_minio():
     )
 
 
+def _get_backend():
+    """Return (client, bucket) — external S3 when configured and enabled, else MinIO."""
+    from minio import Minio
+    try:
+        import json as _json
+        raw = get_redis().get("fo:s3_storage_config")
+        if raw:
+            cfg = _json.loads(raw)
+            if cfg.get("enabled") and cfg.get("endpoint"):
+                ep = cfg["endpoint"]
+                for p in ("https://", "http://"):
+                    if ep.lower().startswith(p):
+                        ep = ep[len(p):]
+                        break
+                return Minio(
+                    ep,
+                    access_key=cfg.get("access_key", ""),
+                    secret_key=cfg.get("secret_key", ""),
+                    secure=cfg.get("use_ssl", True),
+                    region=cfg.get("region") or None,
+                ), cfg["bucket"]
+    except Exception:
+        pass
+    return Minio(
+        MINIO_ENDPOINT,
+        access_key=MINIO_ACCESS_KEY,
+        secret_key=MINIO_SECRET_KEY,
+        secure=False,
+    ), MINIO_BUCKET
+
+
 def update_job_status(r: redis.Redis, job_id: str, **fields) -> None:
     key = f"job:{job_id}"
     r.hset(key, mapping={k: json.dumps(v) if not isinstance(v, str) else v
@@ -97,7 +128,7 @@ def _expand_zip_into_child_jobs(
 
     Returns the count of child jobs successfully dispatched.
     """
-    minio_client = get_minio()
+    minio_client, _bucket = _get_backend()
     count = 0
 
     with _zipfile.ZipFile(zip_path, 'r') as zf:
@@ -147,7 +178,7 @@ def _expand_zip_into_child_jobs(
                     data = src.read()
                 actual_size = len(data)
                 minio_client.put_object(
-                    MINIO_BUCKET, minio_key,
+                    _bucket, minio_key,
                     _io.BytesIO(data), actual_size,
                 )
                 r.hset(f"job:{child_id}", mapping={
@@ -207,14 +238,12 @@ def process_artifact(
                           started_at=datetime.now(timezone.utc).isoformat(),
                           task_id=self.request.id)
 
-        # ── 1. Download artifact from MinIO ──────────────────────────────────
-        logger.info("[%s] Downloading %s from MinIO", job_id, minio_object_key)
-        minio = get_minio()
-        # original_filename may be a full relative path (e.g. "persistence/tasks/System32/SilentCleanup")
-        # when the artifact came from a ZIP — create parent dirs before downloading.
+        # ── 1. Download artifact from storage backend ─────────────────────────
+        logger.info("[%s] Downloading %s from storage", job_id, minio_object_key)
+        minio, _bucket = _get_backend()
         local_file = work_dir / original_filename
         local_file.parent.mkdir(parents=True, exist_ok=True)
-        minio.fget_object(MINIO_BUCKET, minio_object_key, str(local_file))
+        minio.fget_object(_bucket, minio_object_key, str(local_file))
         logger.info("[%s] Downloaded to %s (%d bytes)", job_id, local_file, local_file.stat().st_size)
 
         # ── 2. Detect MIME type ───────────────────────────────────────────────
@@ -256,7 +285,7 @@ def process_artifact(
             case_id=case_id,
             job_id=job_id,
             source_file_path=local_file,
-            source_minio_url=f"minio://{MINIO_BUCKET}/{minio_object_key}",
+            source_minio_url=f"s3://{_bucket}/{minio_object_key}",
             logger=logger,
         )
         plugin = plugin_class(ctx)
@@ -264,7 +293,7 @@ def process_artifact(
 
         indexer = ESBulkIndexer(ELASTICSEARCH_URL)
         ingested_at = datetime.now(timezone.utc).isoformat()
-        source_url = f"minio://{MINIO_BUCKET}/{minio_object_key}"
+        source_url = f"s3://{_bucket}/{minio_object_key}"
 
         try:
             events_indexed, events_failed = _run_plugin_and_index(
@@ -410,11 +439,11 @@ def s3_transfer(
         response = None
         try:
             response   = ext_client.get_object(cfg["bucket"], s3_key)
-            int_client = get_minio()
-            if not int_client.bucket_exists(MINIO_BUCKET):
-                int_client.make_bucket(MINIO_BUCKET)
+            int_client, _bucket = _get_backend()
+            if not int_client.bucket_exists(_bucket):
+                int_client.make_bucket(_bucket)
             int_client.put_object(
-                MINIO_BUCKET,
+                _bucket,
                 minio_key,
                 response,
                 length=file_size,
