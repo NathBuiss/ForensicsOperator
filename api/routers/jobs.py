@@ -1,7 +1,7 @@
 """Job status endpoints."""
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from services import jobs as job_svc
 from services import storage
@@ -21,10 +21,15 @@ def get_job(job_id: str):
 
 
 @router.get("/cases/{case_id}/jobs")
-def list_case_jobs(case_id: str):
-    """List all jobs for a case."""
-    jobs = job_svc.list_case_jobs(case_id)
-    return {"case_id": case_id, "jobs": jobs, "total": len(jobs)}
+def list_case_jobs(
+    case_id: str,
+    limit: int = Query(500, ge=1, le=2000),
+    page: int = Query(0, ge=0),
+):
+    """List jobs for a case — paginated to avoid loading all records at once."""
+    total = job_svc.count_case_jobs(case_id)
+    jobs = job_svc.list_case_jobs(case_id, limit=limit, page=page)
+    return {"case_id": case_id, "jobs": jobs, "total": total, "page": page, "limit": limit}
 
 
 @router.post("/jobs/batch")
@@ -121,13 +126,23 @@ def delete_job(job_id: str):
 
     case_id = job["case_id"]
 
-    # Collect this job + any child jobs created from a ZIP expansion
+    # Collect this job + any child jobs created from a ZIP expansion.
+    # Use a pipeline HGET on just source_zip (one round-trip) to avoid
+    # loading the full job hash for every job in a potentially huge case.
     jobs_to_delete = [job]
     if job.get("plugin_used", "").startswith("archive"):
         original_zip = job.get("original_filename", "")
-        all_case_jobs = job_svc.list_case_jobs(case_id)
-        for child in all_case_jobs:
-            if child.get("source_zip") == original_zip and child["job_id"] != job_id:
+        from config import get_redis as _get_redis
+        r = _get_redis()
+        child_ids = [cid for cid in job_svc.list_case_job_ids(case_id) if cid != job_id]
+        pipe = r.pipeline(transaction=False)
+        for cid in child_ids:
+            pipe.hget(f"job:{cid}", "source_zip")
+        source_zips = pipe.execute()
+        matching_ids = [cid for cid, sz in zip(child_ids, source_zips) if sz == original_zip]
+        for cid in matching_ids:
+            child = job_svc.get_job(cid)
+            if child:
                 jobs_to_delete.append(child)
 
     deleted_ids = []

@@ -99,12 +99,24 @@ def delete_job(job_id: str, case_id: str) -> None:
     r.srem(f"case:{case_id}:jobs", job_id)
 
 
-def list_case_jobs(case_id: str) -> list[dict]:
+def count_case_jobs(case_id: str) -> int:
+    """Return total job count for a case without loading job data."""
+    return get_redis().scard(f"case:{case_id}:jobs")
+
+
+def list_case_job_ids(case_id: str) -> list[str]:
+    """Return all job IDs for a case — lightweight, no hgetall."""
+    return list(get_redis().smembers(f"case:{case_id}:jobs"))
+
+
+def list_case_jobs(case_id: str, limit: int = 500, page: int = 0) -> list[dict]:
+    """Return paginated job records. Avoids loading all N jobs into memory at once."""
     r = get_redis()
-    job_ids = r.smembers(f"case:{case_id}:jobs")
+    all_ids = list(r.smembers(f"case:{case_id}:jobs"))
+    page_ids = all_ids[page * limit:(page + 1) * limit]
     jobs = []
-    for jid in sorted(job_ids):
+    for jid in page_ids:
         job = get_job(jid)
         if job:
             jobs.append(job)
-    return sorted(jobs, key=lambda j: j.get("started_at", ""), reverse=True)
+    return sorted(jobs, key=lambda j: j.get("created_at", ""), reverse=True)

@@ -73,7 +73,7 @@ def delete_case(case_id: str) -> bool:
         return False
 
     from services import storage
-    from services.jobs import list_case_jobs
+    from services.jobs import list_case_job_ids
     from services.module_runs import list_case_module_runs
 
     # ── MinIO: prefix-based delete catches all case objects regardless of Redis TTL ──
@@ -96,12 +96,12 @@ def delete_case(case_id: str) -> bool:
             r.delete(f"fo:module_run:{run_id}")
     r.delete(f"fo:case:{case_id}:module_runs")
 
-    # ── Redis job records ─────────────────────────────────────────────────────────
-    jobs = list_case_jobs(case_id)
-    for job in jobs:
-        job_id = job.get("job_id", "")
-        if job_id:
-            r.delete(f"job:{job_id}")
+    # ── Redis job records (pipeline-delete in batches to avoid OOM) ──────────────
+    job_ids = list_case_job_ids(case_id)
+    BATCH = 1000
+    for i in range(0, len(job_ids), BATCH):
+        batch_keys = [f"job:{jid}" for jid in job_ids[i:i + BATCH]]
+        r.delete(*batch_keys)
     r.delete(f"case:{case_id}:jobs")
 
     # ── Per-case Redis keys (notes, saved searches, alert rules) ──────────────────
