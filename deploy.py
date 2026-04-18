@@ -43,6 +43,7 @@ APPLY_ORDER = [
     K8S / "processor",
     K8S / "frontend",
     K8S / "ingress",
+    K8S / "image-pruner-cronjob.yaml",
 ]
 
 SERVICES = ["api", "processor", "frontend"]

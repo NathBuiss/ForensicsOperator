@@ -102,12 +102,12 @@ def retry_job(job_id: str):
 @router.delete("/jobs/{job_id}")
 def delete_job(job_id: str):
     """
-    Permanently delete an ingestion job and all its associated data:
-      - Job metadata from Redis
+    Permanently delete an ingestion job and all its data:
+      - Job metadata from Redis (and child job records if this was a ZIP)
       - Source file from MinIO
-      - All indexed events from Elasticsearch (delete_by_query on ingest_job_id)
+      - All indexed events from Elasticsearch
 
-    Active jobs (RUNNING, UPLOADING) are rejected — wait for them to finish first.
+    Active jobs (RUNNING, UPLOADING) are rejected — wait for them to finish.
     """
     job = job_svc.get_job(job_id)
     if not job:
@@ -119,28 +119,41 @@ def delete_job(job_id: str):
             detail=f"Cannot delete an active job (status: {job.get('status')}). Wait for it to finish.",
         )
 
-    case_id   = job["case_id"]
-    minio_key = job.get("minio_object_key", "")
+    case_id = job["case_id"]
 
-    # 1. Remove source file from MinIO (best-effort — may already be gone)
-    if minio_key:
+    # Collect this job + any child jobs created from a ZIP expansion
+    jobs_to_delete = [job]
+    if job.get("plugin_used", "").startswith("archive"):
+        original_zip = job.get("original_filename", "")
+        all_case_jobs = job_svc.list_case_jobs(case_id)
+        for child in all_case_jobs:
+            if child.get("source_zip") == original_zip and child["job_id"] != job_id:
+                jobs_to_delete.append(child)
+
+    deleted_ids = []
+    for j in jobs_to_delete:
+        jid = j["job_id"]
+        minio_key = j.get("minio_object_key", "")
+
+        # Remove source file from MinIO
+        if minio_key:
+            try:
+                storage.delete_object(minio_key)
+            except Exception as exc:
+                logger.warning("MinIO delete skipped for %s: %s", minio_key, exc)
+
+        # Remove indexed events from Elasticsearch
         try:
-            storage.delete_object(minio_key)
+            es._request(
+                "POST",
+                f"/fo-case-{case_id}-*/_delete_by_query?conflicts=proceed",
+                {"query": {"term": {"ingest_job_id": jid}}},
+            )
         except Exception as exc:
-            logger.warning("MinIO delete skipped for %s: %s", minio_key, exc)
+            logger.warning("ES delete_by_query skipped for job %s: %s", jid, exc)
 
-    # 2. Remove all indexed events produced by this job from Elasticsearch
-    try:
-        es._request(
-            "POST",
-            f"/fo-case-{case_id}-*/_delete_by_query?conflicts=proceed",
-            {"query": {"term": {"ingest_job_id": job_id}}},
-        )
-    except Exception as exc:
-        logger.warning("ES delete_by_query skipped for job %s: %s", job_id, exc)
+        job_svc.delete_job(jid, case_id)
+        deleted_ids.append(jid)
 
-    # 3. Remove job record from Redis
-    job_svc.delete_job(job_id, case_id)
-
-    logger.info("Deleted job %s (case %s)", job_id, case_id)
-    return {"job_id": job_id, "deleted": True}
+    logger.info("Deleted job %s and %d child(ren) for case %s", job_id, len(deleted_ids) - 1, case_id)
+    return {"job_id": job_id, "deleted": True, "children_deleted": len(deleted_ids) - 1}

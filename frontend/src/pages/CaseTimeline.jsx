@@ -328,19 +328,6 @@ function LevelGroup({ level, hits, totalInLevel, defaultOpen, caseId, runId, nav
                   </div>
                   {/* Action buttons — appear on row hover */}
                   <div className="flex-shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all">
-                    {/* Search pivot */}
-                    <button
-                      onClick={() =>
-                        navigate(`/cases/${caseId}/search`, {
-                          state: { pivotQuery: buildQuery(hit) },
-                        })
-                      }
-                      className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-brand-accent hover:bg-brand-accentlight rounded px-1.5 py-1 transition-all"
-                      title="Find matching events in Search"
-                    >
-                      <ExternalLink size={9} />
-                      Search
-                    </button>
                     {/* Download + Re-ingest buttons for module output artifacts (e.g. de4dot) */}
                     {(() => {
                       try {
@@ -2027,14 +2014,6 @@ export default function CaseTimeline() {
                 ⚠ {jobSummary.failed}
               </span>
             )}
-          </button>
-
-          <button
-            onClick={() => navigate(`/cases/${caseId}/search`)}
-            className="btn-outline"
-          >
-            <Search size={14} />
-            Search
           </button>
 
           <button

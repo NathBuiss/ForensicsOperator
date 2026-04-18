@@ -145,6 +145,31 @@ def delete_object(object_key: str) -> None:
     logger.info("Deleted MinIO object: %s", object_key)
 
 
+def delete_case_objects(case_id: str) -> int:
+    """
+    Delete ALL MinIO objects under cases/{case_id}/ by prefix.
+
+    More reliable than per-job deletion because it works even after job Redis
+    records have expired (7-day TTL). Returns count of objects deleted.
+    """
+    client = get_minio()
+    prefix = f"cases/{case_id}/"
+    objects = client.list_objects(settings.MINIO_BUCKET, prefix=prefix, recursive=True)
+    keys = [o.object_name for o in objects]
+    if not keys:
+        return 0
+    from minio.deleteobjects import DeleteObject
+    errors = list(client.remove_objects(
+        settings.MINIO_BUCKET,
+        [DeleteObject(k) for k in keys],
+    ))
+    deleted = len(keys) - len(errors)
+    if errors:
+        logger.warning("MinIO prefix delete %s: %d errors", prefix, len(errors))
+    logger.info("Deleted %d MinIO objects under %s", deleted, prefix)
+    return deleted
+
+
 def get_presigned_url(object_key: str, expires_seconds: int = 3600) -> str:
     """Generate a presigned download URL."""
     from datetime import timedelta

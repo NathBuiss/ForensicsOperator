@@ -21,6 +21,7 @@ INDEX_TEMPLATE = {
             "number_of_replicas": 0,
             "refresh_interval": "5s",
             "index.mapping.total_fields.limit": 2000,
+            "codec": "best_compression",
         },
         "mappings": {
             "dynamic": "true",

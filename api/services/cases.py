@@ -72,27 +72,50 @@ def delete_case(case_id: str) -> bool:
     if not r.exists(f"case:{case_id}"):
         return False
 
-    # Delete all per-job MinIO files and Redis job records
-    from services.jobs import list_case_jobs
     from services import storage
+    from services.jobs import list_case_jobs
+    from services.module_runs import list_case_module_runs
+
+    # ── MinIO: prefix-based delete catches all case objects regardless of Redis TTL ──
+    try:
+        storage.delete_case_objects(case_id)
+    except Exception as exc:
+        logger.warning("MinIO prefix cleanup failed for case %s: %s", case_id, exc)
+
+    # ── Module runs: delete output MinIO objects + Redis records ──────────────────
+    module_runs = list_case_module_runs(case_id)
+    for run in module_runs:
+        output_key = run.get("output_minio_key", "")
+        if output_key:
+            try:
+                storage.delete_object(output_key)
+            except Exception:
+                pass
+        run_id = run.get("run_id", "")
+        if run_id:
+            r.delete(f"fo:module_run:{run_id}")
+    r.delete(f"fo:case:{case_id}:module_runs")
+
+    # ── Redis job records ─────────────────────────────────────────────────────────
     jobs = list_case_jobs(case_id)
     for job in jobs:
-        minio_key = job.get("minio_object_key", "")
-        if minio_key:
-            try:
-                storage.delete_object(minio_key)
-            except Exception as exc:
-                logger.warning("Failed to delete MinIO object %s for case %s: %s", minio_key, case_id, exc)
         job_id = job.get("job_id", "")
         if job_id:
             r.delete(f"job:{job_id}")
     r.delete(f"case:{case_id}:jobs")
 
-    # Delete case record and set membership
-    r.delete(f"case:{case_id}")
+    # ── Per-case Redis keys (notes, saved searches, alert rules) ──────────────────
+    r.delete(
+        f"case:{case_id}",
+        f"fo:notes:{case_id}",
+        f"fo:saved_searches:{case_id}",
+        f"fo:alert_rules:{case_id}",
+        f"fo:alert_run:{case_id}",
+    )
     r.srem("cases:all", case_id)
 
-    # Delete all ES indices for this case
+    # ── Elasticsearch: drop all case indices ──────────────────────────────────────
     from services.elasticsearch import delete_case_indices
     delete_case_indices(case_id)
+    logger.info("Fully deleted case %s", case_id)
     return True
