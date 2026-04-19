@@ -52,7 +52,57 @@ _KNOWN_NAMES = frozenset({
     "syslog", "auth.log", "kern.log", "daemon.log", "messages", "secure",
     "dmesg", "cron.log", "mail.log", "debug", "user.log", "auth", "system.log",
     "secure.log", "boot.log",
+    # Windows text logs
+    "cbs.log", "windowsupdate.log", "dism.log", "srttrail.txt",
+    "setupapi.dev.log", "setupapi.setup.log",
+    # Windows Firewall log
+    "pfirewall.log",
 })
+
+# Extension → artifact_type (used when filename isn't in _FILENAME_ARTIFACT_TYPE)
+_EXT_ARTIFACT_TYPE: dict[str, str] = {
+    ".log": "syslog",
+    ".txt": "text_file",
+}
+
+# IIS W3C log pattern — "YYYY-MM-DD HH:MM:SS ..."
+_IIS_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} ")
+
+# filename (lowercase) → artifact_type
+_FILENAME_ARTIFACT_TYPE: dict[str, str] = {
+    # Auth / login
+    "auth.log":          "auth_log",
+    "auth":              "auth_log",
+    "secure":            "auth_log",
+    "secure.log":        "auth_log",
+    # Kernel
+    "kern.log":          "kern_log",
+    "dmesg":             "kern_log",
+    # Scheduling
+    "cron.log":          "cron_log",
+    # Mail
+    "mail.log":          "mail_log",
+    # System / generic
+    "syslog":            "syslog",
+    "messages":          "syslog",
+    "daemon.log":        "daemon_log",
+    "user.log":          "user_log",
+    "debug":             "debug_log",
+    "system.log":        "syslog",
+    "boot.log":          "boot_log",
+    # Windows text logs
+    "cbs.log":           "win_log",
+    "windowsupdate.log": "win_log",
+    "dism.log":          "win_log",
+    "setupapi.dev.log":  "usb_log",
+    "setupapi.setup.log":"usb_log",
+    "srttrail.txt":      "win_log",
+    # AnyDesk / TeamViewer
+    "anydesk.trace":     "remote_access_log",
+    "ad_svc.trace":      "remote_access_log",
+    "connections_incoming.txt": "remote_access_log",
+    "connections.txt":   "remote_access_log",
+}
 
 
 def _parse_rfc3164_ts(ts_str: str) -> str:
@@ -105,6 +155,10 @@ class SyslogPlugin(BasePlugin):
 
     def parse(self) -> Generator[dict[str, Any], None, None]:
         path = self.ctx.source_file_path
+        name_lower = path.name.lower()
+        atype = _FILENAME_ARTIFACT_TYPE.get(name_lower) or _EXT_ARTIFACT_TYPE.get(
+            path.suffix.lower(), "syslog"
+        )
         try:
             fh = open(path, "r", errors="replace")
         except OSError as exc:
@@ -115,22 +169,33 @@ class SyslogPlugin(BasePlugin):
                 raw_line = raw_line.rstrip("\n")
                 if not raw_line.strip():
                     continue
+                # Skip comment/header lines (IIS W3C, Windows Firewall, etc.)
+                if raw_line.startswith("#"):
+                    continue
 
-                event = self._parse_line(raw_line)
+                event = self._parse_line(raw_line, atype)
                 if event:
                     self._parsed += 1
                     yield event
                 else:
-                    self._skipped += 1
+                    # Plain-text fallback: emit as generic line so nothing is silently dropped
+                    self._parsed += 1
+                    yield {
+                        "timestamp":      None,
+                        "timestamp_desc": "Log Line",
+                        "message":        raw_line.strip(),
+                        "artifact_type":  atype,
+                        "raw": {"line": raw_line},
+                    }
 
-    def _parse_line(self, line: str) -> dict | None:
+    def _parse_line(self, line: str, atype: str = "syslog") -> dict | None:
         # Try RFC 5424 first (more structured)
         m = _RFC5424_RE.match(line)
         if m:
             pri, ver, ts, hostname, app, pid, msgid, sd, msg = m.groups()
             return {
                 "fo_id": str(uuid.uuid4()),
-                "artifact_type": "syslog",
+                "artifact_type": atype,
                 "timestamp": ts if ts != "-" else None,
                 "timestamp_desc": "Log Time",
                 "message": f"[{app}] {msg}",
@@ -157,7 +222,7 @@ class SyslogPlugin(BasePlugin):
             ts = _parse_rfc3164_ts(ts_str)
             return {
                 "fo_id": str(uuid.uuid4()),
-                "artifact_type": "syslog",
+                "artifact_type": atype,
                 "timestamp": ts,
                 "timestamp_desc": "Log Time",
                 "message": f"[{process}] {msg}",

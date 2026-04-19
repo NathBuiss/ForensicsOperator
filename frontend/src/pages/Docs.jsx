@@ -241,31 +241,35 @@ export default function Docs() {
             </InfoBox>
 
             <H3>Minimal example</H3>
-            <CodeBlock code={`from base_plugin import BasePlugin, PluginContext, ParsedEvent
+            <CodeBlock code={`from plugins.base_plugin import BasePlugin, PluginContext, PluginFatalError
 
 class ApacheAccessIngester(BasePlugin):
     PLUGIN_NAME          = "apache-access"
     SUPPORTED_EXTENSIONS = [".log"]
     HANDLED_FILENAMES    = ["access.log", "access_log"]
 
-    def parse(self, file_path: str, context: PluginContext):
+    def setup(self) -> None:
+        if not self.ctx.source_file_path.exists():
+            raise PluginFatalError("File not found")
+
+    def parse(self):
         import re
         COMBINED = re.compile(
             r'(?P<host>\\S+) \\S+ \\S+ \\[(?P<time>[^\\]]+)\\] '
             r'"(?P<request>[^"]*)" (?P<status>\\d+) \\S+'
         )
-        with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
+        with open(self.ctx.source_file_path, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 m = COMBINED.match(line.strip())
                 if not m:
                     continue
-                yield ParsedEvent(
-                    timestamp = self._parse_apache_time(m["time"]),
-                    message   = m["request"],
-                    artifact_type = self.PLUGIN_NAME,
-                    host      = {"hostname": m["host"]},
-                    extra     = {"status": int(m["status"])},
-                )
+                yield {
+                    "timestamp":     self._parse_apache_time(m["time"]),
+                    "message":       m["request"],
+                    "artifact_type": self.PLUGIN_NAME,
+                    "host":          {"hostname": m["host"]},
+                    "extra":         {"status": int(m["status"])},
+                }
 
     def _parse_apache_time(self, s: str) -> str:
         from datetime import datetime
@@ -293,17 +297,31 @@ class ApacheAccessIngester(BasePlugin):
               </div>
             </div>
 
-            <H3>ParsedEvent fields</H3>
+            <H3>Event dict fields</H3>
+            <P>
+              Each <code>yield</code> produces a plain Python dict. Required keys:
+            </P>
             <div className="border border-gray-200 rounded-xl overflow-hidden">
               <div className="px-4">
-                <Field name="timestamp" type="str" required>ISO-8601 datetime string, e.g. <code>2024-01-15T09:30:00Z</code>.</Field>
+                <Field name="timestamp" type="str" required>ISO-8601 UTC datetime, e.g. <code>2024-01-15T09:30:00Z</code>.</Field>
                 <Field name="message" type="str" required>Human-readable description of the event.</Field>
-                <Field name="artifact_type" type="str">Defaults to <code>PLUGIN_NAME</code>. Override to sub-categorise events.</Field>
+                <Field name="artifact_type" type="str">Defaults to <code>PLUGIN_NAME</code>. Override to sub-categorise.</Field>
+                <Field name="timestamp_desc" type="str">Label for what the timestamp represents, e.g. <code>"Last Modified"</code>.</Field>
                 <Field name="host" type="dict">Host fields — <code>{"{"}"hostname": "...", "ip": "..."{"}"}. </code>Indexed under <code>host.*</code>.</Field>
                 <Field name="user" type="dict">User fields — <code>{"{"}"name": "...", "domain": "..."{"}"}. </code>Indexed under <code>user.*</code>.</Field>
                 <Field name="process" type="dict">Process fields — <code>{"{"}"name": "...", "pid": 123, "cmdline": "..."{"}"}.</code></Field>
-                <Field name="network" type="dict">Network fields — <code>{"{"}"src_ip": "...", "dest_ip": "...", "dest_port": 443{"}"}.</code></Field>
+                <Field name="network" type="dict">Network fields — <code>{"{"}"src_ip": "...", "dst_ip": "...", "dst_port": 443{"}"}.</code></Field>
                 <Field name="extra" type="dict">Any additional fields. Stored under their own keys in Elasticsearch.</Field>
+              </div>
+            </div>
+
+            <H3>Plugin lifecycle methods</H3>
+            <div className="border border-gray-200 rounded-xl overflow-hidden">
+              <div className="px-4">
+                <Field name="setup()" type="method">Called once before parsing. Open file handles or validate format here. Raise <code>PluginFatalError</code> to skip the file entirely.</Field>
+                <Field name="parse()" type="method">Generator — yield one dict per event. Access the file via <code>self.ctx.source_file_path</code>.</Field>
+                <Field name="teardown()" type="method">Called after parsing (always, even on error). Close file handles here.</Field>
+                <Field name="get_stats()" type="method">Return a dict of plugin-specific stats shown in the job summary.</Field>
               </div>
             </div>
 

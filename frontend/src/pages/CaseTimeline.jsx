@@ -30,7 +30,6 @@ const MOD_CATEGORY_ORDER = [
 ]
 import { api } from '../api/client'
 import Timeline from './Timeline'
-import CollectorModal from '../components/CollectorModal'
 import AlertRules from './AlertRules'
 import CaseNotes from './CaseNotes'
 import IngestPanel from '../components/IngestPanel'
@@ -1872,7 +1871,6 @@ export default function CaseTimeline() {
   const [runningAlerts, setRunningAlerts]   = useState(false)
   const [showModules, setShowModules]       = useState(false)
   const [showModuleRuns, setShowModuleRuns] = useState(false)
-  const [showCollector, setShowCollector]   = useState(false)
   const [showAlertRules, setShowAlertRules] = useState(false)
   const [showNotes, setShowNotes]           = useState(false)
   const [jobSummary, setJobSummary]         = useState({ active: 0, failed: 0, eventsPerSec: null, totalEvents: 0 })
@@ -2040,15 +2038,6 @@ export default function CaseTimeline() {
             Modules
           </button>
 
-          <button
-            onClick={() => setShowCollector(true)}
-            className="btn-outline"
-            title="Download artifact collector pre-configured for this case"
-          >
-            <Download size={14} />
-            Collector
-          </button>
-
           {/* View runs shortcut — only when runs panel is closed */}
           {!showModuleRuns && (
             <button
@@ -2149,13 +2138,6 @@ export default function CaseTimeline() {
         />
       )}
 
-      {showCollector && (
-        <CollectorModal
-          caseId={caseId}
-          apiUrl={`${window.location.origin}/api/v1`}
-          onClose={() => setShowCollector(false)}
-        />
-      )}
     </div>
   )
 }

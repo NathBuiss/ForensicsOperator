@@ -751,7 +751,7 @@ _SEARCH_ASSIST_PROMPT = """You are an expert Elasticsearch query builder for For
 ### Core fields (present on every event)
 - timestamp          ISO 8601 event time
 - message            Full-text event description — PRIMARY search target for bare terms
-- artifact_type      Ingester that produced the event: evtx, prefetch, mft, registry, lnk, syslog, hayabusa, browser, plaso, amcache, csv, generic, ...
+- artifact_type      Ingester: evtx, prefetch, mft, registry, lnk, syslog, hayabusa, browser, plaso, amcache, wlan-profile, windows-task, wer, etw, suricata, zeek, plist, csv, strings, generic
 - fo_id              Unique event ID
 - ingest_job_id      Job that produced the event
 - ingested_at        When the file was ingested (not the event time)
@@ -796,6 +796,17 @@ _SEARCH_ASSIST_PROMPT = """You are an expert Elasticsearch query builder for For
 
 ### Plaso (log2timeline super-timeline)
 - plaso.source, plaso.source_long, plaso.pe_type
+
+### Additional artifact types (newer ingesters)
+- artifact_type:syslog — Windows text logs (CBS.log, DISM.log, WindowsUpdate.log, AnyDesk/TeamViewer traces, setup logs)
+- artifact_type:wlan-profile — Wi-Fi profile XML (SSID, authentication, key management)
+- artifact_type:windows-task — Scheduled Task XML from System32/SysWOW64 (persistence evidence)
+- artifact_type:wer — Windows Error Reporting crash records
+- artifact_type:amcache — Amcache.hve execution evidence (SHA1, PE metadata, install/link times)
+- artifact_type:suricata — Suricata IDS EVE JSON alerts (network.src_ip, network.dst_ip, message contains alert signature)
+- artifact_type:zeek — Zeek network log events (conn.log, dns.log, http.log, ssl.log)
+- artifact_type:plist — macOS preference/property list values
+- artifact_type:browser — Browser history from Chrome, Edge, Firefox, Brave, Opera; also OneDrive/cloud sync SQLite metadata (browser.url, browser.title, browser.visit_count, browser.profile)
 
 ## How queries work
 Normal mode (default): query_string searching message, host.hostname, user.name, process.name, process.cmdline, process.args.
@@ -869,6 +880,16 @@ Regexp mode (.*toggle): ES regexp on message.keyword (full raw string). Supports
 - High severity: artifact_type:hayabusa AND hayabusa.level:high
 - All alerts: artifact_type:hayabusa AND hayabusa.level:(critical OR high OR medium)
 
+### Newer artifact types
+- Scheduled task persistence: artifact_type:windows-task
+- Wi-Fi connection history: artifact_type:wlan-profile
+- Windows text/setup logs: artifact_type:syslog
+- Suricata IDS alerts: artifact_type:suricata
+- Zeek network logs: artifact_type:zeek
+- macOS plists: artifact_type:plist
+- Browser / cloud sync history: artifact_type:browser AND browser.url:*
+- Amcache execution: artifact_type:amcache
+
 ## UI features the analyst has access to
 - **Normal mode** (default): query_string against message + host/user/process fields. Best for field-level queries.
 - **Regexp mode** (.*): ES regexp on full message.keyword. Suggest this when the user wants to match a pattern like cmd\.exe, 4[6-9][0-9]{2}, or (mimikatz|sekurlsa).
@@ -902,6 +923,14 @@ def ai_search_assist(req: SearchAssistRequest) -> Any:
     user_msg = f"Search request: {req.query}"
     if req.case_id:
         user_msg += f"\nCase ID: {req.case_id}"
+        # Enrich with case artifact types so the AI can tailor suggestions
+        try:
+            from services.elasticsearch import list_artifact_types
+            types = list_artifact_types(req.case_id)
+            if types:
+                user_msg += f"\nArtifact types in this case: {', '.join(types)}"
+        except Exception:
+            pass
 
     try:
         raw = _call_llm_with_system(cfg, _SEARCH_ASSIST_PROMPT, user_msg)

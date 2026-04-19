@@ -110,13 +110,18 @@ async def change_own_password(
     current_user: dict = Depends(get_current_user),
 ):
     """Any authenticated user can change their own password."""
-    user = get_user(current_user["username"])
+    from config import settings as _settings
+    username = current_user["username"]
+    # When AUTH_ENABLED=False the synthetic "local" user maps to the configured admin
+    if username == "local":
+        username = _settings.ADMIN_USERNAME
+    user = get_user(username)
     if not user or not verify_password(body.old_password, user.get("hashed_password", "")):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Current password is incorrect",
         )
-    update_user(current_user["username"], password=body.new_password)
+    update_user(username, password=body.new_password)
     return {"detail": "Password updated successfully"}
 
 

@@ -363,9 +363,13 @@
 .dark .bg-gray-200     { background-color: #323554; }
 
 /* Accent light in dark mode */
-.dark .bg-brand-accentlight { background-color: rgba(59, 158, 221, 0.12); }
-.dark .text-brand-accent    { color: #3B9EDD; }
-.dark .border-brand-accent  { border-color: #3B9EDD; }
+.dark .bg-brand-accentlight   { background-color: rgba(59, 158, 221, 0.12); }
+.dark .text-brand-accent      { color: #3B9EDD; }
+.dark .border-brand-accent    { border-color: #3B9EDD; }
+/* Opacity variants — not covered by the exact-class overrides above */
+.dark .text-brand-accent\/70  { color: rgba(59, 158, 221, 0.75); }
+.dark .text-brand-accent\/80  { color: rgba(59, 158, 221, 0.85); }
+.dark .bg-brand-accent\/10    { background-color: rgba(59, 158, 221, 0.12); }
 
 /* Form elements: select options */
 .dark select option { background-color: #2A2D42; color: #E5E7EB; }
@@ -546,9 +550,13 @@
 .midnight .bg-gray-200     { background-color: #21262D; }
 
 /* Accent */
-.midnight .bg-brand-accentlight { background-color: rgba(88, 166, 255, 0.1); }
-.midnight .text-brand-accent    { color: #58A6FF; }
-.midnight .border-brand-accent  { border-color: #58A6FF; }
+.midnight .bg-brand-accentlight   { background-color: rgba(88, 166, 255, 0.1); }
+.midnight .text-brand-accent      { color: #58A6FF; }
+.midnight .border-brand-accent    { border-color: #58A6FF; }
+/* Opacity variants */
+.midnight .text-brand-accent\/70  { color: rgba(88, 166, 255, 0.75); }
+.midnight .text-brand-accent\/80  { color: rgba(88, 166, 255, 0.85); }
+.midnight .bg-brand-accent\/10    { background-color: rgba(88, 166, 255, 0.1); }
 
 /* Form select */
 .midnight select option { background-color: #161B22; color: #C9D1D9; }

@@ -38,7 +38,12 @@ async function request(method, path, body, options = {}) {
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(err.detail || `HTTP ${res.status}`)
+    const detail = err.detail
+    // Pydantic v2 validation errors return detail as an array of {msg, loc, ...}
+    const msg = Array.isArray(detail)
+      ? detail.map(d => d.msg || JSON.stringify(d)).join('; ')
+      : (typeof detail === 'string' ? detail : `HTTP ${res.status}`)
+    throw new Error(msg || `HTTP ${res.status}`)
   }
   if (res.status === 204) return null
   return res.json()

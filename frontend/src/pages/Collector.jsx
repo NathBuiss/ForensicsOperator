@@ -231,11 +231,21 @@ export default function Collector() {
   const [downloading, setDownloading] = useState(false)
   const [downloaded, setDownloaded]   = useState(false)
 
-  // S3 uploader card — only shown when S3 triage is configured AND user is admin
+  // Case list for context selector
+  const [cases, setCases]                   = useState([])
+  const [selectedCaseId, setSelectedCaseId] = useState('')
+
+  // S3 uploader — shown in quick-tools bar when S3 triage is configured AND user is admin
   const [s3TriageConfigured,      setS3TriageConfigured]      = useState(false)
   const [downloadingUploader,     setDownloadingUploader]     = useState(false)
   const [downloadedUploader,      setDownloadedUploader]      = useState(false)
   const isAdmin = _currentUser()?.role === 'admin'
+
+  useEffect(() => {
+    api.cases.list()
+      .then(r => setCases(r.cases || []))
+      .catch(() => {})
+  }, [])
 
   useEffect(() => {
     if (!isAdmin) return
@@ -243,6 +253,13 @@ export default function Collector() {
       .then(cfg => setS3TriageConfigured(!!(cfg?.endpoint)))
       .catch(() => {})
   }, [isAdmin])
+
+  // Auto-fill case name when a case is selected from the dropdown
+  useEffect(() => {
+    if (!selectedCaseId) return
+    const c = cases.find(c => c.case_id === selectedCaseId)
+    if (c) setCaseName(c.name)
+  }, [selectedCaseId, cases])
 
   const platformDef = platIdx !== null ? PLATFORMS[platIdx] : null
   const artifacts   = platformDef?.artifacts || []
@@ -307,18 +324,64 @@ export default function Collector() {
       <div className="max-w-3xl mx-auto px-6 py-8">
 
         {/* Page header */}
-        <div className="flex items-center gap-3 mb-6">
+        <div className="flex items-start gap-3 mb-4">
           <div className="w-10 h-10 rounded-xl bg-brand-accentlight border border-brand-accent/20
-                          flex items-center justify-center">
+                          flex items-center justify-center flex-shrink-0">
             <PackageOpen size={18} className="text-brand-accent" />
           </div>
-          <div>
+          <div className="flex-1 min-w-0">
             <h1 className="text-lg font-bold text-brand-text">Artifact Collector</h1>
             <p className="text-xs text-gray-500">
               Generate a pre-configured collection script for live systems, mounted directories, or external drives
             </p>
           </div>
+          {/* Case context selector */}
+          {cases.length > 0 && (
+            <div className="flex-shrink-0">
+              <label className="block text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1">
+                Case context
+              </label>
+              <select
+                value={selectedCaseId}
+                onChange={e => setSelectedCaseId(e.target.value)}
+                className="text-sm border border-gray-200 rounded-lg px-2 py-1.5 bg-white text-brand-text
+                           focus:outline-none focus:ring-2 focus:ring-brand-accent/30 focus:border-brand-accent
+                           max-w-[220px] truncate"
+              >
+                <option value="">— no case —</option>
+                {cases.map(c => (
+                  <option key={c.case_id} value={c.case_id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
+
+        {/* Quick tools — S3 uploader (admin + S3 configured), always visible */}
+        {isAdmin && s3TriageConfigured && (
+          <div className="mb-5 flex items-center gap-3 p-3 bg-white border border-gray-200 rounded-xl shadow-sm">
+            <Upload size={15} className="text-brand-accent flex-shrink-0" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-brand-text leading-tight">fo-uploader.zip</p>
+              <p className="text-xs text-gray-500 truncate">
+                S3 evidence uploader — pre-configured with your triage credentials.{' '}
+                <span className="text-amber-600">Contains S3 secret key — do not share.</span>
+              </p>
+            </div>
+            <button
+              onClick={handleDownloadUploader}
+              disabled={downloadingUploader}
+              className={`btn-outline flex-shrink-0 text-xs py-1.5 ${downloadedUploader ? '!border-green-500 !text-green-700' : ''}`}
+            >
+              {downloadingUploader
+                ? 'Preparing…'
+                : downloadedUploader
+                ? <><Check size={12} /> Downloaded</>
+                : <><Download size={12} /> Download</>
+              }
+            </button>
+          </div>
+        )}
 
         {/* Step indicator */}
         <div className="flex items-center gap-0 mb-6 bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
@@ -543,44 +606,6 @@ export default function Collector() {
                 </div>
               )}
             </div>
-            {/* S3 uploader card — admin only, shown when S3 triage is configured */}
-            {isAdmin && s3TriageConfigured && (
-              <div className="card p-4">
-                <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
-                  S3 Evidence Uploader
-                </h3>
-                <p className="text-xs text-gray-500 mb-4 leading-relaxed">
-                  Downloads <code className="text-[10px] bg-gray-100 px-1 py-0.5 rounded">fo-uploader.zip</code> — a companion
-                  script pre-configured with your S3 triage credentials. Run it on the target
-                  after collection to push artifacts directly to the evidence bucket.{' '}
-                  <span className="text-amber-600 font-medium">Contains your S3 secret key — do not share.</span>
-                </p>
-
-                <button
-                  className={`btn-outline w-full justify-center h-10 gap-2 ${downloadedUploader ? '!border-green-500 !text-green-700' : ''}`}
-                  onClick={handleDownloadUploader}
-                  disabled={downloadingUploader}
-                >
-                  {downloadingUploader
-                    ? 'Preparing…'
-                    : downloadedUploader
-                    ? <><Check size={14} /> fo-uploader.zip downloaded</>
-                    : <><Upload size={14} /> Download fo-uploader.zip</>
-                  }
-                </button>
-
-                {downloadedUploader && (
-                  <div className="mt-3 flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
-                    <AlertTriangle size={13} className="flex-shrink-0 mt-0.5 text-amber-500" />
-                    <div>
-                      Run <code className="bg-amber-100 px-1 rounded">pip install boto3</code> then{' '}
-                      <code className="bg-amber-100 px-1 rounded">python fo-uploader.py</code> on the target.
-                      After upload, pull the file via Admin → S3 Triage browser.
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
           </div>
         )}
 

@@ -31,16 +31,42 @@ FILENAME_MIME_MAP = {
     "SOFTWARE": "application/x-registry",
     "SAM": "application/x-registry",
     "SECURITY": "application/x-registry",
-    # fo-harvester: well-known text files that would otherwise hit strings fallback
-    "CONSOLEHOST_HISTORY.TXT": "text/plain",     # PowerShell command history → syslog
-    "SETUPAPI.DEV.LOG":        "text/plain",     # USB device install log → syslog
-    "SETUPAPI.SETUP.LOG":      "text/plain",     # USB setup log → syslog
-    # fo-harvester: execution evidence + system logs
-    "AMCACHE.HVE":        "application/x-registry",  # Execution evidence → registry plugin
-    "SRUDB.DAT":          "application/x-sqlite3",   # SRUM database → browser/SQLite plugin
-    "SRTTRAIL.TXT":       "text/plain",              # SFC scan log → syslog
-    "CBS.LOG":            "text/plain",              # Component store log → syslog
-    "WINDOWSUPDATE.LOG":  "text/plain",              # Windows Update log → syslog
+    # Shell command history — claimed by shell_history_plugin (priority 110)
+    ".BASH_HISTORY":           "text/x-shell-history",
+    ".ZSH_HISTORY":            "text/x-shell-history",
+    ".HISTORY":                "text/x-shell-history",
+    "FISH_HISTORY":            "text/x-shell-history",
+    "CONSOLEHOST_HISTORY.TXT": "text/x-shell-history",  # PowerShell history
+    # USB device install logs → syslog
+    "SETUPAPI.DEV.LOG":        "text/plain",
+    "SETUPAPI.SETUP.LOG":      "text/plain",
+    # Execution evidence + system logs
+    "AMCACHE.HVE":        "application/x-registry",  # registry plugin
+    "SRUDB.DAT":          "application/x-sqlite3",   # browser/SQLite plugin
+    "SRTTRAIL.TXT":       "text/plain",              # syslog
+    "CBS.LOG":            "text/plain",              # syslog
+    "WINDOWSUPDATE.LOG":  "text/plain",              # syslog
+    # Windows triage output files → windows_triage plugin (priority 115)
+    "SYSTEMINFO.TXT":         "text/x-windows-triage",
+    "NETSTAT.TXT":            "text/x-windows-triage",
+    "TASKLIST.TXT":           "text/x-windows-triage",
+    "SERVICES.TXT":           "text/x-windows-triage",
+    "INSTALLED_SOFTWARE.TXT": "text/x-windows-triage",
+    "STARTUP_ITEMS.TXT":      "text/x-windows-triage",
+    "PFIREWALL.LOG":          "text/x-windows-triage",
+    # Linux/macOS system config files → linux_config plugin (priority 120)
+    "PASSWD":           "text/x-unix-config",
+    "SHADOW":           "text/x-unix-config",
+    "GROUP":            "text/x-unix-config",
+    "GSHADOW":          "text/x-unix-config",
+    "HOSTS":            "text/x-unix-config",
+    "SUDOERS":          "text/x-unix-config",
+    "AUTHORIZED_KEYS":  "text/x-unix-config",
+    "AUTHORIZED_KEYS2": "text/x-unix-config",
+    "KNOWN_HOSTS":      "text/x-unix-config",
+    "SSHD_CONFIG":      "text/x-unix-config",
+    "SSH_CONFIG":       "text/x-unix-config",
+    "CRONTAB":          "text/x-crontab",
 }
 
 # Artifact path-part → synthetic MIME type.
@@ -50,13 +76,22 @@ FILENAME_MIME_MAP = {
 # Keys are lowercase directory names; values are the MIME assigned to any
 # file whose path includes that directory component.
 _PATH_PART_MIME_MAP: dict[str, str] = {
-    "tasks":         "application/x-windows-task",   # persistence/tasks/... (Scheduled Task XML)
-    "wifi_profiles": "application/x-wlan-profile",   # network_cfg/wifi_profiles/...
+    "tasks":         "application/x-windows-task",   # persistence/tasks/... → scheduled_task plugin
+    "wifi_profiles": "application/x-wlan-profile",   # network_cfg/wifi_profiles/ → wlan_profile plugin
     "win_logs":      "text/plain",   # CBS.log, DISM.log, Panther logs → syslog
     "remote_access": "text/plain",   # AnyDesk traces, TeamViewer logs → syslog
     "antivirus":     "text/plain",   # Defender logs (non-evtx) → syslog
-    # OneDrive sync-engine SQLite databases — bypass log2timeline (which exits 2 on these)
+    # Shell history directories — force shell_history MIME so syslog_plugin doesn't claim them
+    "shell_history": "text/x-shell-history",
+    # OneDrive SQLite — bypass log2timeline (which exits 2 on these)
     "cloud_onedrive": "application/x-sqlite3",
+    # Windows triage output directory → windows_triage plugin (priority 115)
+    "triage":     "text/x-windows-triage",  # fo-harvester triage/ output folder
+    # Linux/macOS config directories → linux_config plugin (priority 120)
+    "cron.d":     "text/x-crontab",   # /etc/cron.d/* system cron jobs
+    "crontabs":   "text/x-crontab",   # /var/spool/cron/crontabs/* user crontabs
+    # SSH artifacts directory — force unix-config MIME so syslog doesn't eat them
+    "ssh":        "text/x-unix-config",  # .ssh/authorized_keys, known_hosts, config
 }
 
 

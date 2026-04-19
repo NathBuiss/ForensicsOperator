@@ -20,60 +20,83 @@ import { api } from '../api/client'
 
 // ── Templates ─────────────────────────────────────────────────────────────────
 
-const INGESTER_TEMPLATE = (name = 'my_format') => `"""
+const INGESTER_TEMPLATE = (name = 'my_format') => {
+  const cls = name.replace(/(^|_)([a-z])/g, (_, _p, c) => c.toUpperCase())
+  return `"""
 ${name}_ingester.py — custom ingester for ${name.replace(/_/g, ' ')} artifacts.
 
-Naming rules
+Naming rules:
   • File must end with _ingester.py
-  • PLUGIN_NAME must be unique (used as artifact_type and ES index suffix)
+  • PLUGIN_NAME must be unique across all plugins
 
-Docs: /docs  →  "Creating a Custom Ingester"
+Plugin lifecycle:
+  1. can_handle(path, mime) → True / False
+  2. setup()    — validate / open the file
+  3. parse()    — yield one dict per event
+  4. teardown() — release resources (always called)
 """
-from base_plugin import BasePlugin, PluginContext, ParsedEvent
+from plugins.base_plugin import BasePlugin, PluginContext, PluginFatalError
 
 
-class ${name.replace(/(^|_)([a-z])/g, (_, _p, c) => c.toUpperCase())}Ingester(BasePlugin):
-    # Unique artifact type — used as the ES index name suffix
+class ${cls}Ingester(BasePlugin):
     PLUGIN_NAME = "${name.replace(/_/g, '-')}"
 
-    # File extensions this ingester handles (lower-case, with leading dot)
+    # Lower-case extensions with leading dot
     SUPPORTED_EXTENSIONS = [".log", ".txt"]
 
-    # Exact filenames to match (useful for system files without extensions)
+    # Exact filenames matched case-insensitively (no extension needed)
     HANDLED_FILENAMES = []  # e.g. ["$MFT", "NTUSER.DAT"]
 
-    def parse(self, file_path: str, context: PluginContext):
-        """
-        Generator — yield one ParsedEvent per record found in the file.
+    def setup(self) -> None:
+        """Validate the file. Raise PluginFatalError to skip this file."""
+        if not self.ctx.source_file_path.exists():
+            raise PluginFatalError(f"File not found: {self.ctx.source_file_path}")
 
-        ParsedEvent fields
-          timestamp     str   ISO-8601 (required)
-          message       str   human-readable description (required)
-          artifact_type str   defaults to PLUGIN_NAME
-          host          dict  e.g. {"hostname": "DESKTOP-1"}
-          user          dict  e.g. {"name": "alice", "domain": "CORP"}
-          extra         dict  any additional fields stored under their own key
+    def parse(self):
         """
-        with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
-            for line_no, line in enumerate(fh, 1):
-                line = line.rstrip("\\n")
-                if not line:
-                    continue
-                yield ParsedEvent(
-                    timestamp=self._extract_timestamp(line),
-                    message=line,
-                    artifact_type=self.PLUGIN_NAME,
-                    # host={"hostname": ""},
-                    # user={"name": ""},
-                    # extra={"line_no": line_no},
-                )
+        Generator — yield one dict per event.
+
+        Required keys:
+            timestamp  str   ISO-8601 UTC, e.g. "2024-01-15T10:23:45Z"
+            message    str   human-readable summary
+
+        Optional keys:
+            artifact_type  str   overrides PLUGIN_NAME
+            timestamp_desc str   label for what the timestamp represents
+            host           dict  {"hostname": "DESKTOP-01"}
+            user           dict  {"name": "alice", "domain": "CORP"}
+            process        dict  {"name": "cmd.exe", "pid": 1234}
+            extra          dict  any additional fields
+        """
+        src = self.ctx.source_file_path
+        try:
+            with open(src, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.rstrip("\\n")
+                    if not line:
+                        continue
+                    yield {
+                        "timestamp":     self._extract_timestamp(line),
+                        "message":       line,
+                        "artifact_type": self.PLUGIN_NAME,
+                        # "host":    {"hostname": ""},
+                        # "user":    {"name": ""},
+                        # "extra":   {"key": "value"},
+                    }
+        except OSError as exc:
+            raise PluginFatalError(f"Cannot read {src}: {exc}") from exc
 
     def _extract_timestamp(self, line: str) -> str:
-        """Return ISO-8601 timestamp from line, or a fallback."""
-        # TODO: implement real timestamp extraction
-        from datetime import datetime
-        return datetime.utcnow().isoformat() + "Z"
+        """Return ISO-8601 UTC timestamp parsed from line, or now() as fallback."""
+        import re
+        from datetime import datetime, timezone
+        # TODO: adapt this regex to your actual log timestamp format
+        m = re.match(r"(\\d{4}-\\d{2}-\\d{2}[T ]\\d{2}:\\d{2}:\\d{2})", line)
+        if m:
+            return m.group(1).replace(" ", "T") + "Z"
+        return datetime.now(timezone.utc).isoformat()
 `
+}
 
 const MODULE_TEMPLATE = (name = 'my_analysis') => `"""
 ${name}_module.py — custom analysis module: ${name.replace(/_/g, ' ')}.
