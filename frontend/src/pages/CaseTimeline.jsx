@@ -2053,7 +2053,7 @@ export default function CaseTimeline() {
 
       {/* ── Timeline ─────────────────────────────────────────────────────── */}
       <div className="flex-1 overflow-hidden">
-        <Timeline caseId={caseId} artifactTypes={artifactTypes} initialQuery={initialQuery} />
+        <Timeline key={initialQuery || '_'} caseId={caseId} artifactTypes={artifactTypes} initialQuery={initialQuery} />
       </div>
 
       {/* ── Modals / Panels ───────────────────────────────────────────────── */}

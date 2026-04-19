@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from config import get_redis, settings
 from services import storage
@@ -94,5 +95,69 @@ def purge_orphaned_data():
             logger.info("Purged %d orphaned Redis job keys", deleted_keys)
     except Exception as exc:
         logger.warning("Redis job purge error: %s", exc)
+
+    return result
+
+
+class WipeConfirm(BaseModel):
+    confirm: str
+
+
+@router.post("/admin/wipe-all-data")
+def wipe_all_data(body: WipeConfirm):
+    """
+    DESTRUCTIVE — delete ALL case data: every ES index, every MinIO case object,
+    every Redis case/job key. Requires {"confirm": "WIPE"} in the request body.
+    """
+    if body.confirm != "WIPE":
+        raise HTTPException(status_code=400, detail='Body must be {"confirm": "WIPE"}')
+
+    r = get_redis()
+    result = {"es_indices_deleted": [], "minio_objects_deleted": 0, "redis_keys_deleted": 0}
+
+    # 1. Delete all fo-case-* ES indices
+    try:
+        indices_raw = es._request("GET", "/_cat/indices/fo-case-*?h=index&format=json")
+        for item in indices_raw:
+            idx = item.get("index", "")
+            if idx:
+                try:
+                    es._request("DELETE", f"/{idx}")
+                    result["es_indices_deleted"].append(idx)
+                except Exception as exc:
+                    logger.warning("ES delete failed for %s: %s", idx, exc)
+    except Exception as exc:
+        logger.warning("ES index list error: %s", exc)
+
+    # 2. Delete all MinIO case objects
+    try:
+        client = storage.get_minio()
+        prefixes = client.list_objects(settings.MINIO_BUCKET, prefix="cases/", delimiter="/")
+        for obj in prefixes:
+            if not obj.is_dir:
+                continue
+            case_id = obj.object_name.rstrip("/").split("/")[-1]
+            deleted = storage.delete_case_objects(case_id)
+            result["minio_objects_deleted"] += deleted
+    except Exception as exc:
+        logger.warning("MinIO wipe error: %s", exc)
+
+    # 3. Delete all case + job Redis keys
+    try:
+        deleted = 0
+        for pattern in ("case:*", "fo:case:*", "cases:*"):
+            cursor = 0
+            while True:
+                cursor, keys = r.scan(cursor, match=pattern, count=500)
+                if keys:
+                    r.delete(*keys)
+                    deleted += len(keys)
+                if cursor == 0:
+                    break
+        result["redis_keys_deleted"] = deleted
+        logger.warning("Wipe-all-data executed: %d ES indices, %d MinIO objects, %d Redis keys",
+                       len(result["es_indices_deleted"]), result["minio_objects_deleted"], deleted)
+    except Exception as exc:
+        logger.warning("Redis wipe error: %s", exc)
 
     return result

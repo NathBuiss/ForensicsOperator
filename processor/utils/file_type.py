@@ -76,7 +76,8 @@ FILENAME_MIME_MAP = {
 # Keys are lowercase directory names; values are the MIME assigned to any
 # file whose path includes that directory component.
 _PATH_PART_MIME_MAP: dict[str, str] = {
-    "tasks":         "application/x-windows-task",   # persistence/tasks/... → scheduled_task plugin
+    "tasks":            "application/x-windows-task",   # persistence/tasks/... → scheduled_task plugin
+    "scheduled_tasks":  "application/x-windows-task",   # fo-harvester uses scheduled_tasks/ as dir name
     "wifi_profiles": "application/x-wlan-profile",   # network_cfg/wifi_profiles/ → wlan_profile plugin
     "win_logs":      "text/plain",   # CBS.log, DISM.log, Panther logs → syslog
     "remote_access": "text/plain",   # AnyDesk traces, TeamViewer logs → syslog

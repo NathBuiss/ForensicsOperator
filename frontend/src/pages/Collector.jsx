@@ -89,19 +89,36 @@ const WINDOWS_ARTIFACTS = [
 ]
 
 const LINUX_ARTIFACTS = [
-  { key: 'logs',      label: 'System Logs',                  desc: '/var/log — auth.log, syslog, audit, journalctl export (feeds syslog + access log ingesters)' },
-  { key: 'history',   label: 'Shell Histories',              desc: '.bash_history, .zsh_history for root and all users' },
-  { key: 'config',    label: 'System Configuration',         desc: '/etc/passwd, sudoers, hosts, ssh/sshd_config, plist preferences (macOS)' },
-  { key: 'cron',      label: 'Cron Jobs',                    desc: 'cron.d, cron.daily, crontabs, systemd timers' },
-  { key: 'ssh',       label: 'SSH Artifacts',                desc: 'known_hosts, authorized_keys, config (no private keys)' },
-  { key: 'network',   label: 'Network Captures',             desc: 'PCAP/PCAPNG from /var/log, /tmp — live tcpdump if none found' },
-  { key: 'suricata',  label: 'Suricata IDS Logs',           desc: 'EVE JSON alerts from /var/log/suricata (feeds suricata ingester)' },
-  { key: 'zeek',      label: 'Zeek Network Logs',           desc: 'conn.log, dns.log, http.log, ssl.log and more (feeds zeek ingester)' },
-  { key: 'plist',     label: 'macOS Preference Plists',      desc: '/Library/Preferences, ~/Library/Preferences — feeds plist ingester (macOS only)' },
-  { key: 'pe',        label: 'PE / ELF Binaries',           desc: 'Suspicious binaries from /tmp, /var/tmp, ~/Downloads — feeds PE Analysis, YARA, strings', warn: true },
-  { key: 'documents', label: 'Office Documents & PDFs',      desc: 'DOCX, XLSX, PPTX, PDF from home directories — feeds OLE analysis, ExifTool', warn: true },
-  { key: 'triage',    label: 'Live System Triage',           desc: 'ps, ss, ip, last, lsmod, services, installed packages' },
-  { key: 'memory',    label: 'Memory Dump',                  desc: 'Physical memory via avml or /dev/fmem — 4–64 GB, requires root + avml in PATH', warn: true },
+  { key: 'logs',      label: 'System Logs',          desc: '/var/log — auth.log, syslog, kern.log, audit, journalctl export' },
+  { key: 'history',   label: 'Shell Histories',      desc: '.bash_history, .zsh_history for root and all users' },
+  { key: 'config',    label: 'System Configuration', desc: '/etc/passwd, shadow, sudoers, hosts, ssh/sshd_config' },
+  { key: 'cron',      label: 'Cron Jobs',            desc: 'cron.d, cron.daily, crontabs, systemd timers' },
+  { key: 'ssh',       label: 'SSH Artifacts',        desc: 'known_hosts, authorized_keys, config (no private keys)' },
+  { key: 'services',  label: 'System Services',      desc: 'Systemd units (/lib/systemd/system/, /etc/systemd/system/) and init.d scripts' },
+  { key: 'network',   label: 'Network Captures',     desc: 'PCAP/PCAPNG from /var/log, /tmp — live tcpdump if none found' },
+  { key: 'suricata',  label: 'Suricata IDS Logs',    desc: 'EVE JSON alerts from /var/log/suricata' },
+  { key: 'edr',       label: 'EDR / AV Logs',        desc: 'auditd, Falco, osquery, CrowdStrike Falcon, SentinelOne, Wazuh alerts' },
+  { key: 'triage',    label: 'Live System Triage',   desc: 'ps, ss, ip, last, lsmod, installed packages' },
+  { key: 'pe',        label: 'ELF / Binaries',       desc: 'Suspicious binaries from /tmp, /var/tmp, ~/Downloads — feeds PE Analysis, YARA', warn: true },
+  { key: 'documents', label: 'Office Documents & PDFs', desc: 'DOCX, XLSX, PPTX, PDF from home directories — feeds OLE analysis', warn: true },
+  { key: 'memory',    label: 'Memory Dump',          desc: 'Physical memory via avml or /dev/fmem — 4–64 GB, requires root + avml in PATH', warn: true },
+]
+
+const MACOS_ARTIFACTS = [
+  { key: 'logs',      label: 'System Logs',          desc: '/var/log, ASL, Unified Logging export, system.log' },
+  { key: 'history',   label: 'Shell Histories',      desc: '.bash_history, .zsh_history, fish_history for root and all users' },
+  { key: 'config',    label: 'System Configuration', desc: '/etc/hosts, sudoers, ssh/sshd_config, /etc/passwd' },
+  { key: 'cron',      label: 'Cron / launchd',       desc: 'User crontabs, /etc/cron.d, launchd timer plists' },
+  { key: 'ssh',       label: 'SSH Artifacts',        desc: 'known_hosts, authorized_keys, config (no private keys)' },
+  { key: 'plist',     label: 'Preference Plists',    desc: '/Library/Preferences, ~/Library/Preferences — app prefs and hidden settings' },
+  { key: 'services',  label: 'LaunchAgents/Daemons', desc: '/Library/LaunchAgents, /Library/LaunchDaemons, ~/Library/LaunchAgents — persistence' },
+  { key: 'network',   label: 'Network Captures',     desc: 'PCAP/PCAPNG from /var/log, /tmp — live tcpdump if none found' },
+  { key: 'browser',   label: 'Browsers',             desc: 'Safari History.db, Cookies, Bookmarks.plist; Chrome/Firefox if installed' },
+  { key: 'edr',       label: 'EDR / AV Logs',        desc: 'CrowdStrike Falcon for Mac, Carbon Black, Jamf, Kandji, osquery' },
+  { key: 'triage',    label: 'Live System Triage',   desc: 'ps, netstat, launchctl list, system_profiler, sw_vers' },
+  { key: 'pe',        label: 'Mach-O Binaries',      desc: 'Suspicious binaries from /tmp, ~/Downloads — feeds YARA, strings', warn: true },
+  { key: 'documents', label: 'Office Documents & PDFs', desc: 'DOCX, XLSX, PPTX, PDF from home directories', warn: true },
+  { key: 'memory',    label: 'Memory Dump',          desc: 'Physical memory via osxpmem — requires root + osxpmem in PATH', warn: true },
 ]
 
 const DC_EXTRA_ARTIFACTS = [
@@ -144,7 +161,7 @@ const PLATFORMS = [
   },
   {
     id: 'linux',
-    label: 'Linux / macOS',
+    label: 'Linux',
     group: 'Endpoint',
     Icon: Terminal,
     color: 'text-emerald-600',
@@ -155,6 +172,20 @@ const PLATFORMS = [
     desc: 'Workstation or server — run as root',
     tip: 'Requires Python 3.8+ on target. Build a zero-dependency binary with ./build.sh.',
     artifacts: LINUX_ARTIFACTS,
+  },
+  {
+    id: 'macos',
+    label: 'macOS',
+    group: 'Endpoint',
+    Icon: Terminal,
+    color: 'text-sky-600',
+    bg: 'bg-sky-50',
+    border: 'border-sky-200',
+    selectedBorder: 'border-sky-500',
+    selectedBg: 'bg-sky-50',
+    desc: 'Workstation or laptop — run as root or with sudo',
+    tip: 'Requires Python 3.8+ on target. SIP must allow /var/log access for full coverage.',
+    artifacts: MACOS_ARTIFACTS,
   },
   {
     id: 'win',
@@ -213,7 +244,7 @@ const PLATFORMS = [
     selectedBg: 'bg-violet-50',
     desc: 'Auto-detects OS at runtime — Windows + Linux + macOS',
     tip: 'Best when the target already has Python 3.8+. Manually select artifacts below.',
-    artifacts: [...WINDOWS_ARTIFACTS, ...LINUX_ARTIFACTS].filter(
+    artifacts: [...WINDOWS_ARTIFACTS, ...LINUX_ARTIFACTS, ...MACOS_ARTIFACTS].filter(
       (a, i, arr) => arr.findIndex(b => b.key === a.key) === i
     ),
   },
@@ -264,12 +295,12 @@ export default function Collector() {
   const platformDef = platIdx !== null ? PLATFORMS[platIdx] : null
   const artifacts   = platformDef?.artifacts || []
 
-  // Pre-select artifacts when platform chosen
+  // Pre-select artifacts when platform chosen; warn=true items default OFF
   useEffect(() => {
     if (!platformDef) return
     const defaults = platformDef.defaultCollect
       ? new Set(platformDef.defaultCollect)
-      : new Set(platformDef.artifacts.map(a => a.key))
+      : new Set(platformDef.artifacts.filter(a => !a.warn).map(a => a.key))
     setSelected(defaults)
     setStep(1)
   }, [platIdx])

@@ -362,6 +362,25 @@ export default function Settings() {
     }
   }
 
+  // ── Wipe all data state ────────────────────────────────────────────────────
+  const [wipeInput, setWipeInput]     = useState('')
+  const [wiping, setWiping]           = useState(false)
+  const [wipeResult, setWipeResult]   = useState(null)
+
+  async function runWipeAll() {
+    setWiping(true)
+    setWipeResult(null)
+    try {
+      const res = await api.admin.wipeAll()
+      setWipeResult({ ok: true, data: res })
+      setWipeInput('')
+    } catch (err) {
+      setWipeResult({ ok: false, error: err.message })
+    } finally {
+      setWiping(false)
+    }
+  }
+
   // ── System Maintenance handlers ────────────────────────────────────────────
   async function runPurge() {
     if (!confirm('Purge all orphaned case data? This deletes MinIO objects, ES indices, and Redis job keys for cases no longer in the database. Active cases are untouched.')) return
@@ -1110,6 +1129,51 @@ export default function Settings() {
             <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-start gap-1.5">
               <AlertCircle size={12} className="mt-0.5 flex-shrink-0" />
               <span>{purgeResult.error}</span>
+            </div>
+          )
+        )}
+      </section>
+
+      {/* ── Wipe All Data ───────────────────────────────────────────────── */}
+      <section className="card p-5 space-y-4 mt-6 border-red-300">
+        <div className="flex items-center gap-2">
+          <Trash2 size={15} className="text-red-600" />
+          <h2 className="font-semibold text-red-600">Danger Zone — Wipe All Data</h2>
+        </div>
+        <p className="text-xs text-gray-500">
+          Permanently deletes <strong>all case data</strong>: every Elasticsearch index, every MinIO artifact, and all
+          Redis case/job keys. This affects <em>all active cases</em> and cannot be undone.
+        </p>
+        <div className="flex items-center gap-3 flex-wrap">
+          <input
+            type="text"
+            value={wipeInput}
+            onChange={e => setWipeInput(e.target.value)}
+            placeholder='Type WIPE to confirm'
+            className="input text-xs w-48 font-mono"
+          />
+          <button
+            type="button"
+            onClick={runWipeAll}
+            disabled={wiping || wipeInput !== 'WIPE'}
+            className="btn text-xs px-4 py-1.5 bg-red-600 hover:bg-red-700 text-white border-0 disabled:opacity-40"
+          >
+            {wiping ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+            {wiping ? 'Wiping…' : 'Wipe All Data'}
+          </button>
+        </div>
+        {wipeResult && (
+          wipeResult.ok ? (
+            <div className="text-xs bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 space-y-1">
+              <p className="font-medium text-brand-text flex items-center gap-1"><Check size={12} className="text-green-600" /> Wipe complete</p>
+              <p className="text-gray-500">ES indices deleted: <strong>{wipeResult.data.es_indices_deleted.length}</strong></p>
+              <p className="text-gray-500">MinIO objects deleted: <strong>{wipeResult.data.minio_objects_deleted.toLocaleString()}</strong></p>
+              <p className="text-gray-500">Redis keys deleted: <strong>{wipeResult.data.redis_keys_deleted.toLocaleString()}</strong></p>
+            </div>
+          ) : (
+            <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-start gap-1.5">
+              <AlertCircle size={12} className="mt-0.5 flex-shrink-0" />
+              <span>{wipeResult.error}</span>
             </div>
           )
         )}

@@ -915,6 +915,8 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
                     title="Select all visible events"
                   />
                 </th>
+                {/* Note indicator — always visible */}
+                <th className="px-1 py-2.5 w-4" />
                 {/* Flag — always visible */}
                 <th className="px-2 py-2.5 w-6" />
 
@@ -1245,6 +1247,12 @@ function EventRow({ event, index, onSelect, selected, keyboardSelected, onFilter
           className="rounded border-gray-300 accent-brand-accent cursor-pointer"
         />
       </td>
+      {/* Note indicator — always visible */}
+      {event.analyst_note ? (
+        <td className="px-1 py-2 w-4 text-center">
+          <span title={event.analyst_note} className="text-brand-accent opacity-60 hover:opacity-100 transition-opacity text-[9px]">●</span>
+        </td>
+      ) : <td className="px-1 py-2 w-4" />}
       {/* Flag — always visible */}
       <td className="px-2 py-2 w-6 text-center">
         <button

@@ -220,6 +220,7 @@ export const api = {
 
   admin: {
     purgeOrphaned: () => request('POST', '/admin/purge-orphaned-data'),
+    wipeAll:       () => request('POST', '/admin/wipe-all-data', { confirm: 'WIPE' }),
   },
 
   metrics: {

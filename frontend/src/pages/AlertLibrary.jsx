@@ -384,7 +384,7 @@ function RunOnCaseModal({ rule, cases, onClose }) {
 
   function goToSearch(q) {
     onClose()
-    navigate(`/cases/${selectedCase}/search`, { state: { pivotQuery: q } })
+    navigate(`/cases/${selectedCase}`, { state: { pivotQuery: q } })
   }
 
   return (

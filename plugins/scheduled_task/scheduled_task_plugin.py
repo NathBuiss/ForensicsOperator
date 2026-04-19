@@ -52,7 +52,7 @@ class ScheduledTaskPlugin(BasePlugin):
         # Fallback: 'tasks' in path parts + file looks like XML (handles edge cases
         # where the file arrived without directory context, e.g. direct .xml upload)
         parts = {p.lower() for p in file_path.parts}
-        if "tasks" not in parts:
+        if "tasks" not in parts and "scheduled_tasks" not in parts:
             return False
         try:
             header = file_path.read_bytes()[:32]
