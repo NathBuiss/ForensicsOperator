@@ -66,14 +66,14 @@ spec:
               value: "4"
             # Sandbox limits for custom Python modules written in Studio.
             # SANDBOX_CPU_SECONDS  — max CPU time a custom module can consume
-            # SANDBOX_MEMORY_BYTES — max RSS (bytes) — default 2 GB
+            # SANDBOX_MEMORY_BYTES — max RSS (bytes) — default 4 GB for large file analysis
             # SANDBOX_TIMEOUT_SEC  — wall-clock kill timer — default 30 min
             - name: SANDBOX_CPU_SECONDS
-              value: "3600"
+              value: "7200"
             - name: SANDBOX_MEMORY_BYTES
-              value: "2147483648"
+              value: "4294967296"
             - name: SANDBOX_TIMEOUT_SEC
-              value: "1800"
+              value: "3600"
             - name: MINIO_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
