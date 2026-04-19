@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import time
+import urllib.request
 import redis
 import json
 
@@ -141,6 +143,8 @@ def _expand_zip_into_child_jobs(
             r.expire(f"job:{child_id}", JOB_TTL)
             r.sadd(f"case:{case_id}:jobs", child_id)
             r.expire(f"case:{case_id}:jobs", JOB_TTL)
+            r.zadd(f"case:{case_id}:jobs:zs", {child_id: time.time()})
+            r.expire(f"case:{case_id}:jobs:zs", JOB_TTL)
 
             # ── Extract entry and upload to MinIO ─────────────────────────────
             try:
@@ -229,22 +233,26 @@ def process_artifact(
         if _is_fo_zip(local_file):
             logger.info("[%s] ZIP detected — expanding into child jobs", job_id)
             child_count = _expand_zip_into_child_jobs(job_id, case_id, local_file, r)
+            completed_at = datetime.now(timezone.utc).isoformat()
             update_job_status(r, job_id,
                               status="COMPLETED",
                               plugin_used="archive (expanded)",
                               events_indexed="0",
-                              completed_at=datetime.now(timezone.utc).isoformat())
+                              completed_at=completed_at)
             logger.info("[%s] ZIP expanded into %d child jobs", job_id, child_count)
             return {"status": "COMPLETED", "events_indexed": 0, "child_jobs": child_count}
 
         # ── 3. Find matching plugin ───────────────────────────────────────────
         plugin_class = _plugin_loader.get_plugin(local_file, mime_type)
         if plugin_class is None:
+            skipped_at = datetime.now(timezone.utc).isoformat()
             update_job_status(r, job_id,
                               status="SKIPPED",
                               error=f"No plugin found for '{original_filename}' (mime: {mime_type}). "
                                     "Use a module to analyse this file type.",
-                              completed_at=datetime.now(timezone.utc).isoformat())
+                              completed_at=skipped_at)
+            _index_artifact_doc(job_id, case_id, original_filename, "", mime_type,
+                                0, True, minio_object_key, skipped_at)
             return
 
         update_job_status(r, job_id, plugin_used=plugin_class.PLUGIN_NAME)
@@ -314,17 +322,21 @@ def process_artifact(
             plugin.teardown()
 
         # ── 5. Mark complete ─────────────────────────────────────────────────
+        completed_at = datetime.now(timezone.utc).isoformat()
         result = {
             "status": "COMPLETED",
             "events_indexed": events_indexed,
             "events_failed": events_failed,
             "plugin_stats": stats,
-            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "completed_at": completed_at,
         }
         update_job_status(r, job_id, **{
             k: json.dumps(v) if isinstance(v, (dict, list)) else str(v)
             for k, v in result.items()
         })
+        plugin_name = getattr(plugin, "PLUGIN_NAME", "")
+        _index_artifact_doc(job_id, case_id, original_filename, plugin_name, mime_type,
+                            events_indexed, False, minio_object_key, completed_at)
         logger.info("[%s] Completed: %d events indexed", job_id, events_indexed)
         return result
 
@@ -444,6 +456,43 @@ def s3_transfer(
                           error=f"S3 transfer failed: {exc}",
                           completed_at=datetime.now(timezone.utc).isoformat())
         raise RuntimeError(str(exc)) from None
+
+
+def _index_artifact_doc(
+    job_id: str,
+    case_id: str,
+    filename: str,
+    plugin_used: str,
+    mime_type: str,
+    events_indexed: int,
+    skipped: bool,
+    minio_key: str,
+    completed_at: str,
+) -> None:
+    """Write a slim artifact doc to the fo-artifacts ES index."""
+    doc = {
+        "case_id":        case_id,
+        "job_id":         job_id,
+        "filename":       filename,
+        "plugin_used":    plugin_used,
+        "mime_type":      mime_type,
+        "events_indexed": events_indexed,
+        "skipped":        skipped,
+        "minio_key":      minio_key,
+        "completed_at":   completed_at,
+    }
+    url = f"{ELASTICSEARCH_URL}/fo-artifacts/_doc/{job_id}"
+    data = json.dumps(doc).encode()
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json"},
+        method="PUT",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5):
+            pass
+    except Exception as exc:
+        logger.warning("[%s] Failed to index artifact doc: %s", job_id, exc)
 
 
 def _is_valid_timestamp(ts: str) -> bool:

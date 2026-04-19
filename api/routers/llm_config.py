@@ -895,6 +895,9 @@ Regexp mode (.*toggle): ES regexp on message.keyword (full raw string). Supports
 - **Regexp mode** (.*): ES regexp on full message.keyword. Suggest this when the user wants to match a pattern like cmd\.exe, 4[6-9][0-9]{2}, or (mimikatz|sekurlsa).
 - **Facet filters**: Host, User, Event ID, Channel can be filtered via sidebar chips (separate from the query). Do NOT include these in the query string unless the user explicitly targets a field.
 - **Date range**: Applied separately via date pickers — do NOT add timestamp range to the query.
+- **Studio — Rule Playground**: Alert rules can be tested against a live case using the "Test Query" button in the Studio editor. The generated query is run and the first 10 matching events are shown inline.
+- **Studio — YARA Tester**: YARA rules written in Studio can be tested against a specific source file from a case using the "Test YARA" button — no separate tool needed.
+- **Studio — Module Run**: Custom analysis modules written in Studio can be dispatched directly from the editor with the "Run" button — pick a case and source files, click Run, and a live log panel streams output.
 
 ## Output instructions
 Convert the user's natural language request into a query_string expression (or regexp if appropriate).

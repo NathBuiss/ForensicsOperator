@@ -161,6 +161,12 @@ export const api = {
     analyze:          (runId)                   => request('POST', `/module-runs/${runId}/analyze`),
     retryRun:         (runId)                   => request('POST', `/module-runs/${runId}/retry`),
     reingestArtifact: (caseId, runId, filename) => request('POST', `/cases/${caseId}/modules/${runId}/artifacts/${encodeURIComponent(filename)}/reingest`),
+    logStreamUrl:     (runId)                   => `${BASE}/module-runs/${runId}/log-stream`,
+  },
+
+  studio: {
+    queryTest: (caseId, query) => request('POST', '/studio/query-test', { case_id: caseId, query }),
+    yaraTest:  (caseId, jobId, rules) => request('POST', '/studio/yara-test', { case_id: caseId, job_id: jobId, rules }),
   },
 
   llm: {

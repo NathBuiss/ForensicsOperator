@@ -24,7 +24,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+import asyncio
+import json as _json
+
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 try:
@@ -33,7 +37,7 @@ try:
 except ImportError:
     _YAML_AVAILABLE = False
 
-from services.jobs import list_case_job_ids, get_job
+from services.jobs import list_case_job_ids_recent, get_job
 from services.cases import get_case
 from services import module_runs as run_svc, storage
 from services.module_runs import MALWARE_CASE_ID, get_redis
@@ -177,18 +181,38 @@ def list_modules():
     return {"modules": _get_modules() + _get_custom_modules()}
 
 
-_SOURCES_CHUNK  = 2_000   # pipeline batch size (memory-safe)
-_SOURCES_MAX    = 5_000   # max sources returned — avoids O(N) scan on huge cases
+_SOURCES_CHUNK  = 2_000   # pipeline batch size for Redis fallback
+_SOURCES_MAX    = 5_000   # cap for Redis fallback path
 
 @router.get("/cases/{case_id}/sources")
 def list_case_sources(case_id: str):
     """Return completed ingest jobs for a case (usable as module inputs)."""
     from config import get_redis
+    from services.elasticsearch import list_case_artifacts
+
     case = get_case(case_id)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    job_ids = list(list_case_job_ids(case_id))
+    # ── Fast path: query the fo-artifacts ES index ────────────────────────────
+    artifacts = list_case_artifacts(case_id)
+    if artifacts:
+        sources = [
+            {
+                "job_id":            a["job_id"],
+                "original_filename": a.get("filename", ""),
+                "plugin_used":       a.get("plugin_used", ""),
+                "events_indexed":    a.get("events_indexed", 0),
+                "minio_object_key":  a.get("minio_key", ""),
+                "skipped":           bool(a.get("skipped", False)),
+            }
+            for a in artifacts
+        ]
+        sources.sort(key=lambda s: s["original_filename"])
+        return {"sources": sources}
+
+    # ── Fallback: Redis sorted set + chunked pipeline ─────────────────────────
+    job_ids = list_case_job_ids_recent(case_id)
     if not job_ids:
         return {"sources": []}
 
@@ -196,8 +220,7 @@ def list_case_sources(case_id: str):
     _fields = ("job_id", "status", "original_filename", "plugin_used",
                "events_indexed", "minio_object_key")
 
-    sources: list[dict] = []
-    # Process in chunks so we never send >_SOURCES_CHUNK commands per pipeline
+    sources = []
     for chunk_start in range(0, len(job_ids), _SOURCES_CHUNK):
         chunk = job_ids[chunk_start: chunk_start + _SOURCES_CHUNK]
         pipe = r.pipeline(transaction=False)
@@ -221,7 +244,7 @@ def list_case_sources(case_id: str):
                 "skipped":           status == "SKIPPED",
             })
         if len(sources) >= _SOURCES_MAX:
-            break   # cap reached — enough for any module run
+            break
 
     sources.sort(key=lambda s: s["original_filename"])
     return {"sources": sources, "truncated": len(job_ids) > _SOURCES_MAX}
@@ -505,6 +528,137 @@ def clear_malwoverview_config():
     get_redis().delete(_MALWOVERVIEW_CONFIG_KEY)
     env_key = os.getenv("VT_API_KEY", "")
     return {"cleared": True, "env_fallback": bool(env_key)}
+
+
+# ── Live log streaming (SSE) ──────────────────────────────────────────────────
+
+@router.get("/module-runs/{run_id}/log-stream")
+async def stream_module_log(run_id: str):
+    """
+    Server-Sent Events stream of log lines for a running module.
+
+    Pushes one JSON object per line: {text: str} during the run,
+    then {done: true, status: str} when the run reaches a terminal state.
+
+    Log lines are written to the fo:module_log:{run_id} Redis list by
+    the module task at key milestones. The SSE endpoint drains the list
+    incrementally and closes when status is COMPLETED or FAILED.
+    """
+    run = run_svc.get_module_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Module run not found")
+
+    async def event_generator():
+        r = get_redis()
+        cursor = 0
+        idle_ticks = 0
+        max_idle_ticks = 120  # 120 × 1s = 2 min max wait with no progress
+
+        while idle_ticks < max_idle_ticks:
+            entries = r.lrange(f"fo:module_log:{run_id}", cursor, -1)
+            if entries:
+                idle_ticks = 0
+                for entry in entries:
+                    cursor += 1
+                    yield f"data: {_json.dumps({'text': entry})}\n\n"
+
+            status = r.hget(f"fo:module_run:{run_id}", "status")
+            if status in ("COMPLETED", "FAILED") and not entries:
+                # Also send any remaining tool_log lines from the run hash
+                tool_log = r.hget(f"fo:module_run:{run_id}", "tool_log") or ""
+                if tool_log:
+                    yield f"data: {_json.dumps({'text': tool_log, 'type': 'summary'})}\n\n"
+                yield f"data: {_json.dumps({'done': True, 'status': status})}\n\n"
+                return
+
+            idle_ticks += 1
+            await asyncio.sleep(1)
+
+        yield f"data: {_json.dumps({'done': True, 'status': 'TIMEOUT'})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ── Studio utility endpoints ──────────────────────────────────────────────────
+
+class QueryTestRequest(BaseModel):
+    case_id: str
+    query: str
+
+
+@router.post("/studio/query-test")
+def studio_query_test(req: QueryTestRequest):
+    """
+    Rule playground: run a Lucene query against a case and return the first 10 matching events.
+    Used by the Studio alert-rule editor to preview query results without leaving the editor.
+    """
+    from services.elasticsearch import search_events_for_rule
+    if not req.query.strip():
+        return {"hits": [], "error": "Empty query"}
+    try:
+        hits = search_events_for_rule(req.case_id, req.query, size=10)
+        return {"hits": hits}
+    except Exception as exc:
+        return {"hits": [], "error": str(exc)}
+
+
+class YaraTestRequest(BaseModel):
+    case_id: str
+    job_id: str
+    rules: str
+
+
+@router.post("/studio/yara-test")
+def studio_yara_test(req: YaraTestRequest):
+    """
+    YARA playground: compile rules and scan a source file from a case, returning matches.
+    Downloads up to 10 MB of the file into memory inside the API pod.
+    """
+    import io
+    try:
+        import yara  # type: ignore
+    except ImportError:
+        return {"matches": [], "error": "yara-python is not installed in this container"}
+
+    # Compile rules
+    try:
+        compiled = yara.compile(source=req.rules)
+    except Exception as exc:
+        return {"matches": [], "error": f"Rule compile error: {exc}"}
+
+    # Resolve minio_key for the job
+    job = get_job(req.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    minio_key = job.get("minio_object_key", "")
+    if not minio_key:
+        return {"matches": [], "error": "Job has no associated file"}
+
+    # Download up to 10 MB
+    _MAX_YARA_BYTES = 10 * 1024 * 1024
+    try:
+        data = storage.download_fileobj(minio_key)[:_MAX_YARA_BYTES]
+    except Exception as exc:
+        return {"matches": [], "error": f"File download failed: {exc}"}
+
+    # Scan
+    try:
+        raw_matches = compiled.match(data=data)
+        matches = [
+            {
+                "rule":    m.rule,
+                "tags":    list(m.tags),
+                "strings": [
+                    {"identifier": s.identifier, "offset": s.instances[0].offset if s.instances else 0}
+                    for s in m.strings
+                ][:20],
+            }
+            for m in raw_matches
+        ]
+        return {"matches": matches, "scanned_bytes": len(data)}
+    except Exception as exc:
+        return {"matches": [], "error": f"Scan error: {exc}"}
 
 
 # ── Module artifact download & re-ingest ─────────────────────────────────────

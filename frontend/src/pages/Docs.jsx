@@ -708,10 +708,24 @@ GET /cases/{id}/search/facets           field facets for filters`} />
             <H3>Modules</H3>
             <CodeBlock language="http" code={`GET    /modules                          list all modules (built-in + custom)
 GET    /cases/{id}/sources               source files available for a case
+                                           fast path: queries fo-artifacts ES index
+                                           fallback: Redis sorted-set scan (5 000 cap)
 POST   /cases/{id}/module-runs           launch a module run  {module_id, job_ids[]}
 GET    /cases/{id}/module-runs           list runs for a case
 GET    /module-runs/{run_id}             get run with full results_preview
+GET    /module-runs/{run_id}/log-stream  SSE stream of live log lines (text/event-stream)
+                                           each event: {text: str}  final: {done: true, status}
 POST   /modules/yara/validate            validate YARA rule syntax  {rules}`} />
+
+            <H3>Studio (rule playground &amp; testers)</H3>
+            <CodeBlock language="http" code={`POST /studio/query-test   {case_id, query}
+  → {hits: [...]}  — first 10 events matching the Lucene query
+    use in Studio → alert-rule editor → "Test Query" button
+
+POST /studio/yara-test    {case_id, job_id, rules}
+  → {matches: [{rule, tags, strings[{identifier, offset}]}], scanned_bytes}
+    scans up to 10 MB of the selected source file
+    use in Studio → YARA editor → "Test YARA" button`} />
 
             <H3>Alert Rules</H3>
             <CodeBlock language="http" code={`GET    /alert-rules/library              list global rule library

@@ -146,6 +146,11 @@ async def _on_startup():
     _bootstrap_admin()
     asyncio.create_task(cti.start_cti_scheduler())
     asyncio.create_task(_metrics_background_loop())
+    try:
+        from services.elasticsearch import ensure_artifacts_index
+        ensure_artifacts_index()
+    except Exception as _startup_exc:
+        logger.warning("Could not ensure fo-artifacts index at startup: %s", _startup_exc)
 
 
 # ── Auth dependencies for route protection ────────────────────────────────────

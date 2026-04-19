@@ -241,6 +241,75 @@ def update_event(case_id: str, index: str, doc_id: str, partial: dict) -> bool:
         return False
 
 
+_ARTIFACTS_INDEX = "fo-artifacts"
+
+_ARTIFACTS_MAPPING = {
+    "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+    "mappings": {
+        "properties": {
+            "case_id":        {"type": "keyword"},
+            "job_id":         {"type": "keyword"},
+            "filename":       {"type": "keyword"},
+            "plugin_used":    {"type": "keyword"},
+            "mime_type":      {"type": "keyword"},
+            "events_indexed": {"type": "integer"},
+            "skipped":        {"type": "boolean"},
+            "minio_key":      {"type": "keyword", "index": False},
+            "completed_at":   {"type": "date"},
+        }
+    },
+}
+
+
+def ensure_artifacts_index() -> None:
+    try:
+        _request("GET", f"/{_ARTIFACTS_INDEX}")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            try:
+                _request("PUT", f"/{_ARTIFACTS_INDEX}", _ARTIFACTS_MAPPING)
+                logger.info("Created %s index", _ARTIFACTS_INDEX)
+            except Exception as create_exc:
+                logger.warning("Could not create artifacts index: %s", create_exc)
+
+
+def index_artifact(doc: dict) -> None:
+    job_id = doc.get("job_id", "unknown")
+    try:
+        _request("PUT", f"/{_ARTIFACTS_INDEX}/_doc/{job_id}", doc)
+    except Exception as exc:
+        logger.warning("Failed to index artifact %s: %s", job_id, exc)
+
+
+def list_case_artifacts(case_id: str, size: int = 5000) -> list[dict]:
+    body = {
+        "query": {"term": {"case_id": case_id}},
+        "size": size,
+        "sort": [{"completed_at": {"order": "desc"}}],
+    }
+    try:
+        result = _request("POST", f"/{_ARTIFACTS_INDEX}/_search", body)
+        return [h["_source"] for h in result.get("hits", {}).get("hits", [])]
+    except Exception:
+        return []
+
+
+def search_events_for_rule(case_id: str, query: str, size: int = 10) -> list[dict]:
+    """Run a Lucene query against a case and return the first N hits (for Studio rule playground)."""
+    index = f"fo-case-{case_id}-*"
+    body = {
+        "query": {"query_string": {"query": query, "default_operator": "AND", "fields": _SEARCH_FIELDS}},
+        "size": size,
+        "sort": [{"timestamp": {"order": "asc"}}],
+        "_source": {"excludes": ["raw"]},
+    }
+    try:
+        result = _request("POST", f"/{index}/_search", body)
+        return [h["_source"] for h in result.get("hits", {}).get("hits", [])]
+    except Exception:
+        return []
+
+
 def delete_case_indices(case_id: str) -> None:
     """Delete all indices for a case."""
     try:

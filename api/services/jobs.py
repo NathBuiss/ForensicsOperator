@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -40,9 +41,12 @@ def create_job(
     r.hset(f"job:{job_id}", mapping=job)
     r.expire(f"job:{job_id}", JOB_TTL)
 
-    # Add to case job set
+    # Add to case job set (unordered, kept for backward compat)
     r.sadd(f"case:{case_id}:jobs", job_id)
     r.expire(f"case:{case_id}:jobs", JOB_TTL)
+    # Add to sorted set (score = creation timestamp) for O(log N) recent lookups
+    r.zadd(f"case:{case_id}:jobs:zs", {job_id: time.time()})
+    r.expire(f"case:{case_id}:jobs:zs", JOB_TTL)
     return job
 
 
@@ -97,6 +101,7 @@ def delete_job(job_id: str, case_id: str) -> None:
     r = get_redis()
     r.delete(f"job:{job_id}")
     r.srem(f"case:{case_id}:jobs", job_id)
+    r.zrem(f"case:{case_id}:jobs:zs", job_id)
 
 
 def count_case_jobs(case_id: str) -> int:
@@ -107,6 +112,16 @@ def count_case_jobs(case_id: str) -> int:
 def list_case_job_ids(case_id: str) -> list[str]:
     """Return all job IDs for a case — lightweight, no hgetall."""
     return list(get_redis().smembers(f"case:{case_id}:jobs"))
+
+
+def list_case_job_ids_recent(case_id: str, n: int = 5000) -> list[str]:
+    """Return up to N most-recently-created job IDs, newest first (sorted-set backed)."""
+    r = get_redis()
+    ids = r.zrevrange(f"case:{case_id}:jobs:zs", 0, n - 1)
+    if ids:
+        return list(ids)
+    # Fallback to unordered set for cases created before the sorted set was added
+    return list(r.smembers(f"case:{case_id}:jobs"))
 
 
 def list_case_jobs(case_id: str, limit: int = 500, page: int = 0) -> list[dict]:

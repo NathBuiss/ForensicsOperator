@@ -245,6 +245,17 @@ def _update(r: redis.Redis, run_id: str, **fields) -> None:
     r.expire(key, MODULE_RUN_TTL)
 
 
+_LOG_TTL = 86400  # 24 h — only needed while the UI is watching
+
+
+def _push_log(r: redis.Redis, run_id: str, text: str) -> None:
+    """Append a log line to the SSE list and logger simultaneously."""
+    key = f"fo:module_log:{run_id}"
+    r.rpush(key, text)
+    r.expire(key, _LOG_TTL)
+    logger.info("[%s] %s", run_id, text)
+
+
 # ── Celery task ────────────────────────────────────────────────────────────────
 
 @app.task(bind=True, name="module.run", queue="modules")
@@ -270,6 +281,7 @@ def run_module(
         _update(r, run_id,
                 status="RUNNING",
                 started_at=datetime.now(timezone.utc).isoformat())
+        _push_log(r, run_id, f"Module '{module_id}' started — {len(source_files)} source file(s)")
 
         # ── 1. Download source files ──────────────────────────────────────────
         minio = get_minio()
@@ -278,11 +290,11 @@ def run_module(
 
         for sf in source_files:
             dest = sources_dir / sf["filename"]
-            logger.info("[%s] Downloading %s", run_id, sf["minio_key"])
+            _push_log(r, run_id, f"Downloading {sf['filename']} …")
             _minio_op(lambda d=dest, k=sf["minio_key"]: minio.fget_object(MINIO_BUCKET, k, str(d)))
+            _push_log(r, run_id, f"Downloaded {sf['filename']} ({dest.stat().st_size:,} bytes)")
 
-        logger.info("[%s] Sources: %s", run_id,
-                    [p.name for p in sorted(sources_dir.iterdir()) if p.is_file()])
+        _push_log(r, run_id, f"Running module '{module_id}' …")
 
         # ── 2. Run module ─────────────────────────────────────────────────────
         # tool_meta captures subprocess output for display in the UI
@@ -393,11 +405,13 @@ def run_module(
                 tool_log=tool_meta.get("log",    "")[:8000],
                 completed_at=datetime.now(timezone.utc).isoformat())
 
+        _push_log(r, run_id, f"Completed — {len(results)} hit(s) found")
         logger.info("[%s] Module run complete: %d hits", run_id, len(results))
         return {"status": "COMPLETED", "total_hits": len(results)}
 
     except Exception as exc:
         logger.exception("[%s] Module run failed: %s", run_id, exc)
+        _push_log(r, run_id, f"ERROR: {exc}")
         _update(r, run_id,
                 status="FAILED",
                 error=str(exc),
