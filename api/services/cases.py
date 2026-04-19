@@ -67,7 +67,15 @@ def update_case(case_id: str, **fields) -> dict | None:
     return get_case(case_id)
 
 
-def delete_case(case_id: str) -> bool:
+def delete_case(case_id: str, background: bool = True) -> bool:
+    """
+    Delete a case and all its data.
+    
+    Args:
+        case_id: The case ID to delete
+        background: If True, return immediately and delete MinIO/ES data in background.
+                   If False, wait for all deletions to complete (can take minutes for large cases).
+    """
     r = get_redis()
     if not r.exists(f"case:{case_id}"):
         return False
@@ -75,12 +83,6 @@ def delete_case(case_id: str) -> bool:
     from services import storage
     from services.jobs import list_case_job_ids
     from services.module_runs import list_case_module_runs
-
-    # ── MinIO: prefix-based delete catches all case objects regardless of Redis TTL ──
-    try:
-        storage.delete_case_objects(case_id)
-    except Exception as exc:
-        logger.warning("MinIO prefix cleanup failed for case %s: %s", case_id, exc)
 
     # ── Module runs: delete output MinIO objects + Redis records ──────────────────
     module_runs = list_case_module_runs(case_id)
@@ -114,8 +116,36 @@ def delete_case(case_id: str) -> bool:
     )
     r.srem("cases:all", case_id)
 
-    # ── Elasticsearch: drop all case indices ──────────────────────────────────────
-    from services.elasticsearch import delete_case_indices
-    delete_case_indices(case_id)
-    logger.info("Fully deleted case %s", case_id)
+    # ── Elasticsearch & MinIO: Can be slow for large cases ────────────────────────
+    if background:
+        # Return immediately, delete large data in background task
+        from celery_app import app
+        
+        @app.task(name=f"delete_case_data_{case_id}")
+        def delete_background():
+            from services import storage
+            from services.elasticsearch import delete_case_indices
+            try:
+                storage.delete_case_objects(case_id)
+            except Exception as exc:
+                logger.warning("MinIO cleanup failed for case %s: %s", case_id, exc)
+            try:
+                delete_case_indices(case_id)
+            except Exception as exc:
+                logger.warning("ES cleanup failed for case %s: %s", case_id, exc)
+        
+        delete_background.delay()
+        logger.info("Case %s marked for deletion (data removed in background)", case_id)
+    else:
+        # Wait for everything to complete (old behavior)
+        try:
+            storage.delete_case_objects(case_id)
+        except Exception as exc:
+            logger.warning("MinIO cleanup failed for case %s: %s", case_id, exc)
+        try:
+            delete_case_indices(case_id)
+        except Exception as exc:
+            logger.warning("ES cleanup failed for case %s: %s", case_id, exc)
+        logger.info("Fully deleted case %s", case_id)
+    
     return True

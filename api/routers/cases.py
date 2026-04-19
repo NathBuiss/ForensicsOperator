@@ -66,7 +66,14 @@ def update_case(case_id: str, body: CaseUpdate):
 
 
 @router.delete("/cases/{case_id}", status_code=204)
-def delete_case(case_id: str):
-    """Delete a case and all its data."""
-    if not case_svc.delete_case(case_id):
+def delete_case(case_id: str, background: bool = True):
+    """
+    Delete a case and all its data.
+    
+    By default, returns immediately (204) and deletes large data (MinIO, Elasticsearch)
+    in the background. This prevents timeouts for large cases with GBs of data.
+    
+    Set ?background=false to wait for all deletions to complete (not recommended for large cases).
+    """
+    if not case_svc.delete_case(case_id, background=background):
         raise HTTPException(status_code=404, detail="Case not found")
