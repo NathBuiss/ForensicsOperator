@@ -63,13 +63,13 @@ except ImportError:
     sys.exit("Missing dependency: pip install redis")
 
 try:
-    from passlib.context import CryptContext
+    import bcrypt as _bcrypt_lib
 except ImportError:
-    sys.exit("Missing dependency: pip install passlib[bcrypt]")
+    sys.exit("Missing dependency: pip install bcrypt")
 
-# ── Config ────────────────────────────────────────────────────────────────────
 
-_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+def _hash_password(password: str) -> str:
+    return _bcrypt_lib.hashpw(password.encode("utf-8"), _bcrypt_lib.gensalt()).decode("utf-8")
 
 _USERS_SET = "fo:users"
 _USER_KEY  = "fo:user:{username}"
@@ -227,7 +227,7 @@ def cmd_create(r: redis_lib.Redis, args: argparse.Namespace) -> None:
 
     user = {
         "username":        username,
-        "hashed_password": _pwd_ctx.hash(password),
+        "hashed_password": _hash_password(password),
         "role":            role,
         "created_at":      datetime.now(timezone.utc).isoformat(),
     }
@@ -284,7 +284,7 @@ def cmd_reset_password(r: redis_lib.Redis, args: argparse.Namespace) -> None:
         sys.exit(1)
 
     password = args.password or _read_password(f"New password for '{username}'")
-    r.hset(_USER_KEY.format(username=username), "hashed_password", _pwd_ctx.hash(password))
+    r.hset(_USER_KEY.format(username=username), "hashed_password", _hash_password(password))
     _ok(f"Password updated for '{username}'")
 
 
