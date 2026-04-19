@@ -177,6 +177,9 @@ def list_modules():
     return {"modules": _get_modules() + _get_custom_modules()}
 
 
+_SOURCES_CHUNK  = 2_000   # pipeline batch size (memory-safe)
+_SOURCES_MAX    = 5_000   # max sources returned — avoids O(N) scan on huge cases
+
 @router.get("/cases/{case_id}/sources")
 def list_case_sources(case_id: str):
     """Return completed ingest jobs for a case (usable as module inputs)."""
@@ -185,40 +188,43 @@ def list_case_sources(case_id: str):
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    # Use pipeline HMGET to load only needed fields across ALL jobs
-    # (avoids the 500-job pagination cap that would hide older EVTX jobs)
-    job_ids = list_case_job_ids(case_id)
+    job_ids = list(list_case_job_ids(case_id))
     if not job_ids:
         return {"sources": []}
 
     r = get_redis()
     _fields = ("job_id", "status", "original_filename", "plugin_used",
                "events_indexed", "minio_object_key")
-    pipe = r.pipeline(transaction=False)
-    for jid in job_ids:
-        pipe.hmget(f"job:{jid}", *_fields)
-    rows = pipe.execute()
 
-    sources = []
-    for jid, vals in zip(job_ids, rows):
-        status = vals[1]
-        if status not in ("COMPLETED", "SKIPPED"):
-            continue
-        try:
-            events_indexed = int(vals[4] or 0)
-        except (ValueError, TypeError):
-            events_indexed = 0
-        sources.append({
-            "job_id":            vals[0] or jid,
-            "original_filename": vals[2] or "",
-            "plugin_used":       vals[3] or "",
-            "events_indexed":    events_indexed,
-            "minio_object_key":  vals[5] or "",
-            "skipped":           status == "SKIPPED",
-        })
+    sources: list[dict] = []
+    # Process in chunks so we never send >_SOURCES_CHUNK commands per pipeline
+    for chunk_start in range(0, len(job_ids), _SOURCES_CHUNK):
+        chunk = job_ids[chunk_start: chunk_start + _SOURCES_CHUNK]
+        pipe = r.pipeline(transaction=False)
+        for jid in chunk:
+            pipe.hmget(f"job:{jid}", *_fields)
+        rows = pipe.execute()
+        for jid, vals in zip(chunk, rows):
+            status = vals[1]
+            if status not in ("COMPLETED", "SKIPPED"):
+                continue
+            try:
+                events_indexed = int(vals[4] or 0)
+            except (ValueError, TypeError):
+                events_indexed = 0
+            sources.append({
+                "job_id":            vals[0] or jid,
+                "original_filename": vals[2] or "",
+                "plugin_used":       vals[3] or "",
+                "events_indexed":    events_indexed,
+                "minio_object_key":  vals[5] or "",
+                "skipped":           status == "SKIPPED",
+            })
+        if len(sources) >= _SOURCES_MAX:
+            break   # cap reached — enough for any module run
 
     sources.sort(key=lambda s: s["original_filename"])
-    return {"sources": sources}
+    return {"sources": sources, "truncated": len(job_ids) > _SOURCES_MAX}
 
 
 @router.post("/cases/{case_id}/module-runs", status_code=201)
