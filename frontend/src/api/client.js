@@ -213,11 +213,8 @@ export const api = {
     scwRegions:   ()             => request('GET',    '/s3/scaleway-regions'),
   },
 
-  s3Storage: {
-    getConfig:   ()     => request('GET',    '/admin/s3-storage-config'),
-    setConfig:   (data) => request('PUT',    '/admin/s3-storage-config', data),
-    clearConfig: ()     => request('DELETE', '/admin/s3-storage-config'),
-    testConfig:  ()     => request('POST',   '/admin/s3-storage-config/test'),
+  admin: {
+    purgeOrphaned: () => request('POST', '/admin/purge-orphaned-data'),
   },
 
   metrics: {

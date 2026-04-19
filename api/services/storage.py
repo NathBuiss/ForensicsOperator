@@ -67,56 +67,25 @@ def get_minio():
     )
 
 
-def _get_storage_backend():
-    """Return (client, bucket) for the active artifact storage backend.
-
-    Checks Redis for an enabled external S3 config (fo:s3_storage_config).
-    Falls back to internal MinIO + MINIO_BUCKET when not configured or disabled.
-    """
-    try:
-        import json
-        from config import get_redis
-        raw = get_redis().get("fo:s3_storage_config")
-        if raw:
-            cfg = json.loads(raw)
-            if cfg.get("enabled") and cfg.get("endpoint"):
-                from minio import Minio
-                endpoint = cfg["endpoint"]
-                for prefix in ("https://", "http://"):
-                    if endpoint.lower().startswith(prefix):
-                        endpoint = endpoint[len(prefix):]
-                        break
-                client = Minio(
-                    endpoint,
-                    access_key=cfg.get("access_key", ""),
-                    secret_key=cfg.get("secret_key", ""),
-                    secure=cfg.get("use_ssl", True),
-                    region=cfg.get("region") or None,
-                )
-                return client, cfg["bucket"]
-    except Exception as exc:
-        logger.warning("Could not load S3 storage backend config, using MinIO: %s", exc)
-    return get_minio(), settings.MINIO_BUCKET
-
-
 def ensure_bucket() -> None:
-    client, bucket = _get_storage_backend()
+    client = get_minio()
 
     def _check():
-        if not client.bucket_exists(bucket):
-            client.make_bucket(bucket)
-            logger.info("Created bucket: %s", bucket)
+        if not client.bucket_exists(settings.MINIO_BUCKET):
+            client.make_bucket(settings.MINIO_BUCKET)
+            logger.info("Created MinIO bucket: %s", settings.MINIO_BUCKET)
 
     _retry(_check)
 
 
 def upload_file(object_key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
-    """Upload raw bytes to the active storage backend with retry. Returns the object key."""
-    client, bucket = _get_storage_backend()
+    """Upload raw bytes to MinIO with retry. Returns the object key."""
+    client = get_minio()
+    ensure_bucket()
 
     def _do():
         client.put_object(
-            bucket,
+            settings.MINIO_BUCKET,
             object_key,
             io.BytesIO(data),
             length=len(data),
@@ -130,12 +99,13 @@ def upload_file(object_key: str, data: bytes, content_type: str = "application/o
 
 def upload_fileobj(object_key: str, fileobj: IO, size: int) -> str:
     """
-    Upload a file-like object to the active storage backend with retry.
+    Upload a file-like object to MinIO with retry.
 
     Critical: the file position is reset to 0 before each attempt so that
     retries after a partial write do not send truncated data.
     """
-    client, bucket = _get_storage_backend()
+    client = get_minio()
+    ensure_bucket()
 
     def _do():
         try:
@@ -143,7 +113,7 @@ def upload_fileobj(object_key: str, fileobj: IO, size: int) -> str:
         except (AttributeError, OSError):
             pass
         client.put_object(
-            bucket,
+            settings.MINIO_BUCKET,
             object_key,
             fileobj,
             length=size,
@@ -154,10 +124,10 @@ def upload_fileobj(object_key: str, fileobj: IO, size: int) -> str:
 
 
 def download_fileobj(object_key: str) -> bytes:
-    """Download an object from the active storage backend and return its contents as bytes."""
-    client, bucket = _get_storage_backend()
+    """Download an object from MinIO and return its contents as bytes."""
+    client = get_minio()
     try:
-        resp = client.get_object(bucket, object_key)
+        resp = client.get_object(settings.MINIO_BUCKET, object_key)
         return resp.read()
     finally:
         try:
@@ -168,43 +138,43 @@ def download_fileobj(object_key: str) -> bytes:
 
 
 def delete_object(object_key: str) -> None:
-    """Remove an object from the active storage backend (no-op if it doesn't exist)."""
-    client, bucket = _get_storage_backend()
-    _retry(lambda: client.remove_object(bucket, object_key))
-    logger.info("Deleted storage object: %s", object_key)
+    """Remove an object from MinIO (no-op if it doesn't exist)."""
+    client = get_minio()
+    _retry(lambda: client.remove_object(settings.MINIO_BUCKET, object_key))
+    logger.info("Deleted MinIO object: %s", object_key)
 
 
 def delete_case_objects(case_id: str) -> int:
     """
-    Delete ALL objects under cases/{case_id}/ by prefix from the active storage backend.
+    Delete ALL MinIO objects under cases/{case_id}/ by prefix.
 
     More reliable than per-job deletion because it works even after job Redis
     records have expired (7-day TTL). Returns count of objects deleted.
     """
-    client, bucket = _get_storage_backend()
+    client = get_minio()
     prefix = f"cases/{case_id}/"
-    objects = client.list_objects(bucket, prefix=prefix, recursive=True)
+    objects = client.list_objects(settings.MINIO_BUCKET, prefix=prefix, recursive=True)
     keys = [o.object_name for o in objects]
     if not keys:
         return 0
     from minio.deleteobjects import DeleteObject
     errors = list(client.remove_objects(
-        bucket,
+        settings.MINIO_BUCKET,
         [DeleteObject(k) for k in keys],
     ))
     deleted = len(keys) - len(errors)
     if errors:
-        logger.warning("Storage prefix delete %s: %d errors", prefix, len(errors))
-    logger.info("Deleted %d storage objects under %s", deleted, prefix)
+        logger.warning("MinIO prefix delete %s: %d errors", prefix, len(errors))
+    logger.info("Deleted %d MinIO objects under %s", deleted, prefix)
     return deleted
 
 
 def get_presigned_url(object_key: str, expires_seconds: int = 3600) -> str:
-    """Generate a presigned download URL from the active storage backend."""
+    """Generate a presigned download URL."""
     from datetime import timedelta
-    client, bucket = _get_storage_backend()
+    client = get_minio()
     return client.presigned_get_object(
-        bucket,
+        settings.MINIO_BUCKET,
         object_key,
         expires=timedelta(seconds=expires_seconds),
     )

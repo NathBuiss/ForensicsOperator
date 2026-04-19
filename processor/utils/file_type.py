@@ -55,6 +55,8 @@ _PATH_PART_MIME_MAP: dict[str, str] = {
     "win_logs":      "text/plain",   # CBS.log, DISM.log, Panther logs → syslog
     "remote_access": "text/plain",   # AnyDesk traces, TeamViewer logs → syslog
     "antivirus":     "text/plain",   # Defender logs (non-evtx) → syslog
+    # OneDrive sync-engine SQLite databases — bypass log2timeline (which exits 2 on these)
+    "cloud_onedrive": "application/x-sqlite3",
 }
 
 

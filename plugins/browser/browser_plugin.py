@@ -125,6 +125,17 @@ class BrowserPlugin(BasePlugin):
     def get_handled_filenames(cls) -> list[str]:
         return list(_HANDLED_FILENAMES)
 
+    @classmethod
+    def can_handle(cls, file_path: Path, mime_type: str) -> bool:
+        if super().can_handle(file_path, mime_type):
+            return True
+        # Accept any SQLite file with a standard DB extension — yields 0 events
+        # for unknown schemas (better than log2timeline exit 2 or strings noise).
+        return (
+            mime_type == "application/x-sqlite3"
+            and file_path.suffix.lower() in (".db", ".sqlite", ".sqlite3")
+        )
+
     def __init__(self, context: PluginContext) -> None:
         super().__init__(context)
         self._records_read = 0
@@ -137,21 +148,23 @@ class BrowserPlugin(BasePlugin):
     # ------------------------------------------------------------------
 
     def setup(self) -> None:
-        """Copy database to a temp file to avoid WAL/lock issues."""
+        """Copy artifact to a temp file to avoid WAL/lock issues."""
         src = self.ctx.source_file_path
         if not src.exists():
             raise PluginFatalError(f"Source file does not exist: {src}")
 
-        # Work on a copy so we never fight WAL locks or corrupt the original
-        tmp = tempfile.NamedTemporaryFile(
-            suffix=src.suffix or ".db", delete=False
-        )
+        suffix = src.suffix or (".json" if src.name.upper() == "BOOKMARKS" else ".db")
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
         tmp.close()
         self._tmp_path = Path(tmp.name)
         try:
             shutil.copy2(str(src), str(self._tmp_path))
         except OSError as exc:
-            raise PluginFatalError(f"Cannot copy database to temp: {exc}") from exc
+            raise PluginFatalError(f"Cannot copy file to temp: {exc}") from exc
+
+        # BOOKMARKS (Chrome/Edge/Brave) is JSON — skip the SQLite connection
+        if src.name.upper() == "BOOKMARKS":
+            return
 
         try:
             self._conn = sqlite3.connect(
@@ -160,7 +173,6 @@ class BrowserPlugin(BasePlugin):
                 timeout=5,
             )
             self._conn.row_factory = sqlite3.Row
-            # Try to access the database to catch corruption early
             self._conn.execute("SELECT name FROM sqlite_master LIMIT 1")
         except sqlite3.DatabaseError as exc:
             raise PluginFatalError(
@@ -184,10 +196,11 @@ class BrowserPlugin(BasePlugin):
     # ------------------------------------------------------------------
 
     def parse(self) -> Generator[dict[str, Any], None, None]:
-        if not self._conn:
+        filename_upper = self.ctx.source_file_path.name.upper()
+        # BOOKMARKS is JSON — no SQLite connection is needed
+        if not self._conn and filename_upper != "BOOKMARKS":
             raise PluginFatalError("Database connection not available")
 
-        filename_upper = self.ctx.source_file_path.name.upper()
         family = _detect_browser_family(filename_upper)
         tables = self._list_tables()
 

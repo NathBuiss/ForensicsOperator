@@ -33,7 +33,7 @@ try:
 except ImportError:
     _YAML_AVAILABLE = False
 
-from services.jobs import list_case_jobs
+from services.jobs import list_case_job_ids, get_job
 from services.cases import get_case
 from services import module_runs as run_svc, storage
 from services.module_runs import MALWARE_CASE_ID, get_redis
@@ -180,23 +180,44 @@ def list_modules():
 @router.get("/cases/{case_id}/sources")
 def list_case_sources(case_id: str):
     """Return completed ingest jobs for a case (usable as module inputs)."""
+    from config import get_redis
     case = get_case(case_id)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    jobs = list_case_jobs(case_id)
-    sources = [
-        {
-            "job_id":            j["job_id"],
-            "original_filename": j.get("original_filename", ""),
-            "plugin_used":       j.get("plugin_used", ""),
-            "events_indexed":    j.get("events_indexed", 0),
-            "minio_object_key":  j.get("minio_object_key", ""),
-            "skipped":           j.get("status") == "SKIPPED",
-        }
-        for j in jobs
-        if j.get("status") in ("COMPLETED", "SKIPPED")
-    ]
+    # Use pipeline HMGET to load only needed fields across ALL jobs
+    # (avoids the 500-job pagination cap that would hide older EVTX jobs)
+    job_ids = list_case_job_ids(case_id)
+    if not job_ids:
+        return {"sources": []}
+
+    r = get_redis()
+    _fields = ("job_id", "status", "original_filename", "plugin_used",
+               "events_indexed", "minio_object_key")
+    pipe = r.pipeline(transaction=False)
+    for jid in job_ids:
+        pipe.hmget(f"job:{jid}", *_fields)
+    rows = pipe.execute()
+
+    sources = []
+    for jid, vals in zip(job_ids, rows):
+        status = vals[1]
+        if status not in ("COMPLETED", "SKIPPED"):
+            continue
+        try:
+            events_indexed = int(vals[4] or 0)
+        except (ValueError, TypeError):
+            events_indexed = 0
+        sources.append({
+            "job_id":            vals[0] or jid,
+            "original_filename": vals[2] or "",
+            "plugin_used":       vals[3] or "",
+            "events_indexed":    events_indexed,
+            "minio_object_key":  vals[5] or "",
+            "skipped":           status == "SKIPPED",
+        })
+
+    sources.sort(key=lambda s: s["original_filename"])
     return {"sources": sources}
 
 
@@ -219,10 +240,9 @@ def create_module_run(case_id: str, req: CreateModuleRunRequest):
     if not req.job_ids:
         raise HTTPException(status_code=400, detail="At least one source job is required")
 
-    all_jobs = {j["job_id"]: j for j in list_case_jobs(case_id)}
     source_files: list[dict] = []
     for job_id in req.job_ids:
-        job = all_jobs.get(job_id)
+        job = get_job(job_id)
         if not job:
             raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
         if job.get("status") not in ("COMPLETED", "SKIPPED"):

@@ -33,9 +33,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["s3"])
 
 # ── Redis keys ────────────────────────────────────────────────────────────────
-_S3_IMPORT_KEY   = "fo:s3_config"           # case data import (existing)
-_S3_TRIAGE_KEY   = "fo:s3_triage_config"    # triage upload bucket
-_S3_STORAGE_KEY  = "fo:s3_storage_config"   # artifact storage backend (replaces MinIO)
+_S3_IMPORT_KEY  = "fo:s3_config"          # case data import (existing)
+_S3_TRIAGE_KEY  = "fo:s3_triage_config"   # triage upload bucket
 
 _PUBLIC_FIELDS = ("endpoint", "access_key", "bucket", "region", "vendor", "use_ssl")
 
@@ -375,93 +374,6 @@ def pull_batch_from_triage(case_id: str, body: S3BatchImportIn):
     return _batch_dispatch(case_id, _S3_TRIAGE_KEY, body.keys)
 
 
-# ── Artifact Storage Backend endpoints (/admin/s3-storage-config) ─────────────
-# Replaces internal MinIO when enabled=True. Has an extra `enabled` toggle
-# so analysts can configure it first and switch over without losing the form.
-
-class S3StorageConfigIn(BaseModel):
-    enabled:    bool = False
-    endpoint:   str  = ""
-    access_key: str  = ""
-    secret_key: str  = ""
-    bucket:     str  = ""
-    region:     str  = ""
-    vendor:     str  = "aws"
-    use_ssl:    bool = True
-
-
-class S3StorageConfigOut(BaseModel):
-    enabled:        bool
-    endpoint:       str
-    access_key:     str
-    secret_key_set: bool
-    bucket:         str
-    region:         str
-    vendor:         str
-    use_ssl:        bool
-
-
-@router.get("/admin/s3-storage-config", response_model=S3StorageConfigOut)
-def get_s3_storage_config():
-    """Return current artifact storage backend config (secret_key redacted)."""
-    cfg = _load(_redis(), _S3_STORAGE_KEY)
-    return S3StorageConfigOut(
-        enabled=cfg.get("enabled", False),
-        endpoint=cfg.get("endpoint", ""),
-        access_key=cfg.get("access_key", ""),
-        secret_key_set=bool(cfg.get("secret_key")),
-        bucket=cfg.get("bucket", ""),
-        region=cfg.get("region", ""),
-        vendor=cfg.get("vendor", "aws"),
-        use_ssl=cfg.get("use_ssl", True),
-    )
-
-
-@router.put("/admin/s3-storage-config", response_model=S3StorageConfigOut)
-def put_s3_storage_config(body: S3StorageConfigIn):
-    """Save artifact storage backend config. Blank secret_key keeps the existing one."""
-    r = _redis()
-    existing = _load(r, _S3_STORAGE_KEY)
-    cfg = {
-        "enabled":    body.enabled,
-        "endpoint":   body.endpoint,
-        "access_key": body.access_key,
-        "bucket":     body.bucket,
-        "region":     body.region,
-        "vendor":     body.vendor,
-        "use_ssl":    body.use_ssl,
-        "secret_key": body.secret_key if body.secret_key else existing.get("secret_key", ""),
-    }
-    _save(r, _S3_STORAGE_KEY, cfg)
-    return S3StorageConfigOut(**{**cfg, "secret_key_set": bool(cfg["secret_key"])})
-
-
-@router.delete("/admin/s3-storage-config", status_code=204)
-def delete_s3_storage_config():
-    """Remove artifact storage backend config (reverts to internal MinIO)."""
-    _redis().delete(_S3_STORAGE_KEY)
-
-
-@router.post("/admin/s3-storage-config/test")
-def test_s3_storage_config():
-    """Test connectivity to the configured artifact storage backend."""
-    r = _redis()
-    cfg = _load(r, _S3_STORAGE_KEY)
-    if not cfg or not cfg.get("endpoint"):
-        raise HTTPException(status_code=400, detail="No artifact storage S3 config saved yet.")
-    try:
-        client = _build_client(cfg)
-        objects = list(itertools.islice(client.list_objects(cfg["bucket"]), 5))
-        return {
-            "ok": True,
-            "bucket": cfg["bucket"],
-            "objects": len(objects),
-            "message": f"Connected. Found {len(objects)} object(s) in sample.",
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Connection test failed: {exc}")
 
 
 # ── Scaleway region helper ─────────────────────────────────────────────────────
