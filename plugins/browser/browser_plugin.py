@@ -35,6 +35,15 @@ from plugins.base_plugin import (
 _WEBKIT_EPOCH_DELTA_US = 11_644_473_600_000_000  # difference to Unix epoch in us
 
 
+def _format_bytes(n: int) -> str:
+    """Return a compact human-readable file size string (e.g. 1.4 MB)."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
 def _webkit_to_iso(us: int | None) -> str:
     """Convert a Chromium/WebKit microsecond timestamp to ISO 8601 UTC string."""
     if not us or us <= 0:
@@ -314,7 +323,11 @@ class BrowserPlugin(BasePlugin):
                 }
                 transition_str = transition_names.get(transition_core, str(transition_core))
 
-                message = f"Visited: {title or url}"
+                # Build rich message: how navigated, title, full URL, visit count
+                visit_label = f"{visit_count}×" if visit_count > 1 else "1×"
+                typed_label = " [typed]" if transition_str == "typed" or typed_count else ""
+                title_part = f"{title} — " if title and title != url else ""
+                message = f"[{visit_label}{typed_label}] {title_part}{url}"
 
                 self._records_read += 1
                 yield {
@@ -383,7 +396,13 @@ class BrowserPlugin(BasePlugin):
                 danger_str = danger_names.get(danger, str(danger))
 
                 filename = Path(target_path).name if target_path else ""
-                message = f"Downloaded: {filename or tab_url}"
+
+                # Build rich message: filename, size, source URL, danger flag
+                size_str = _format_bytes(total_bytes) if total_bytes else ""
+                size_part = f" ({size_str})" if size_str else ""
+                src_part = f" from {tab_url}" if tab_url else ""
+                danger_part = f" ⚠ {danger_str}" if danger > 0 else ""
+                message = f"Downloaded: {filename or tab_url}{size_part}{src_part}{danger_part}"
 
                 self._records_read += 1
                 yield {
@@ -746,7 +765,10 @@ class BrowserPlugin(BasePlugin):
                 typed = row["typed"] or 0
                 visit_type = row["visit_type"] or 0
 
-                message = f"Visited: {title or url}"
+                visit_label = f"{visit_count}×" if visit_count > 1 else "1×"
+                typed_label = " [typed]" if typed else ""
+                title_part = f"{title} — " if title and title != url else ""
+                message = f"[{visit_label}{typed_label}] {title_part}{url}"
 
                 self._records_read += 1
                 yield {

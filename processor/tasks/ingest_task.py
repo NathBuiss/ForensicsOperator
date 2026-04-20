@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import tempfile
+import hashlib
 import uuid
 import zipfile as _zipfile
 from datetime import datetime, timezone
@@ -568,6 +569,17 @@ def _merge_base_fields(
         "raw": {},
     }
     base.update(event)
+    # Deterministic ID for ES deduplication — re-ingesting the same file won't create duplicates.
+    # Respect any fo_id a plugin has already set (e.g. registry plugin uses uuid4 per-event).
+    if not event.get("fo_id"):
+        _fp = (
+            f"{case_id}|{event.get('timestamp', ingested_at)}"
+            f"|{event.get('message', '')}"
+            f"|{event.get('artifact_type', 'generic')}"
+            f"|{event.get('host', {}).get('hostname', '')}"
+            f"|{event.get('user', {}).get('name', '')}"
+        )
+        base["fo_id"] = hashlib.sha256(_fp.encode()).hexdigest()[:32]
     # Coerce falsy timestamps (empty string, None) from plugins to ingested_at
     # so the event is never rejected by the ES date mapping.
     if not base.get("timestamp"):

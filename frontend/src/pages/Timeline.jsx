@@ -1192,6 +1192,39 @@ function FilterButtons({ field, value, onIn, onOut }) {
   )
 }
 
+/* ── Message cell — splits pipe-delimited enriched messages into readable layout ── */
+function MessageCell({ message }) {
+  if (!message) return <span className="text-gray-300">—</span>
+  const parts = message.split(' | ')
+  if (parts.length === 1) {
+    return <span className="text-sm break-words line-clamp-2" title={message}>{message}</span>
+  }
+  const [primary, ...details] = parts
+  return (
+    <div className="min-w-0">
+      <div className="text-sm text-brand-text font-medium truncate" title={primary}>{primary}</div>
+      <div className="flex flex-wrap gap-1 mt-0.5">
+        {details.map((seg, i) => {
+          const colonIdx = seg.indexOf(':')
+          if (colonIdx > 0) {
+            const label = seg.slice(0, colonIdx).trim()
+            const value = seg.slice(colonIdx + 1).trim()
+            return (
+              <span key={i} className="inline-flex items-center gap-1 text-[10px] bg-gray-100 rounded px-1.5 py-0.5 max-w-[26ch] truncate" title={seg}>
+                <span className="text-gray-400 font-semibold shrink-0">{label}</span>
+                <span className="text-gray-600 truncate">{value}</span>
+              </span>
+            )
+          }
+          return (
+            <span key={i} className="text-[10px] text-gray-500 bg-gray-50 rounded px-1.5 py-0.5 truncate max-w-[28ch]" title={seg}>{seg}</span>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 /* ── Event row ── */
 function EventRow({ event, index, onSelect, selected, keyboardSelected, onFilterIn, onFilterOut, rowRef, caseId, onFlagged, visibleCols, checked, onCheck }) {
   const vis  = col => visibleCols.includes(col)
@@ -1348,8 +1381,8 @@ function EventRow({ event, index, onSelect, selected, keyboardSelected, onFilter
       )}
 
       {vis('message') && (
-        <td className="px-3 py-2 text-brand-text max-w-sm">
-          <span className="line-clamp-1">{event.message}</span>
+        <td className="px-3 py-2 text-brand-text min-w-[280px] max-w-[520px]">
+          <MessageCell message={event.message} />
         </td>
       )}
 
