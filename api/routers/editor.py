@@ -57,6 +57,32 @@ def _list(directory: Path, suffix: str) -> list[dict]:
     return out
 
 
+def _list_recursive(directory: Path, suffix: str) -> list[dict]:
+    """Recursive version — returns relative paths for files in subdirectories."""
+    if not directory.exists():
+        return []
+    out = []
+    for f in sorted(directory.rglob(f"*{suffix}")):
+        if "__pycache__" in f.parts:
+            continue
+        rel = f.relative_to(directory).as_posix()
+        out.append({
+            "name":     rel,
+            "size":     f.stat().st_size,
+            "modified": f.stat().st_mtime,
+        })
+    return out
+
+
+def _safe_plugin(base: Path, name: str, suffix: str) -> Path:
+    """Resolve a relative plugin path safely (allows subdirs, blocks traversal)."""
+    if ".." in name or name.startswith("/"):
+        raise HTTPException(400, "Invalid file path")
+    if not name.endswith(suffix):
+        raise HTTPException(400, f"File name must end with '{suffix}'")
+    return base / name
+
+
 def _read(path: Path) -> str:
     if not path.exists():
         raise HTTPException(404, "File not found")
@@ -164,28 +190,28 @@ def delete_module_editor(name: str):
 
 @router.get("/editor/builtin-ingesters")
 def list_builtin_ingesters():
-    """List built-in plugin Python files."""
-    return {"files": [dict(f, builtin=True) for f in _list(PLUGINS_DIR, PLUGIN_SUFFIX)]}
+    """List built-in plugin Python files (recursive — plugins live in subdirs)."""
+    return {"files": [dict(f, builtin=True) for f in _list_recursive(PLUGINS_DIR, PLUGIN_SUFFIX)]}
 
 
-@router.get("/editor/builtin-ingesters/{name}")
+@router.get("/editor/builtin-ingesters/{name:path}")
 def get_builtin_ingester(name: str):
-    path = _safe(PLUGINS_DIR, name, PLUGIN_SUFFIX)
+    path = _safe_plugin(PLUGINS_DIR, name, PLUGIN_SUFFIX)
     return {"name": name, "content": _read(path), "builtin": True}
 
 
-@router.put("/editor/builtin-ingesters/{name}")
+@router.put("/editor/builtin-ingesters/{name:path}")
 def save_builtin_ingester(name: str, body: FileWrite):
     """Overwrite a built-in plugin file on the plugins PVC."""
-    path = _safe(PLUGINS_DIR, name, PLUGIN_SUFFIX)
+    path = _safe_plugin(PLUGINS_DIR, name, PLUGIN_SUFFIX)
     _write(path, body.content)
     return {"saved": True, "name": name, "builtin": True}
 
 
-@router.delete("/editor/builtin-ingesters/{name}", status_code=204)
+@router.delete("/editor/builtin-ingesters/{name:path}", status_code=204)
 def delete_builtin_ingester(name: str):
     """Delete a built-in plugin file from the plugins PVC."""
-    path = _safe(PLUGINS_DIR, name, PLUGIN_SUFFIX)
+    path = _safe_plugin(PLUGINS_DIR, name, PLUGIN_SUFFIX)
     if not path.exists():
         raise HTTPException(404, "File not found")
     path.unlink()
