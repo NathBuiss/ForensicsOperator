@@ -713,7 +713,7 @@ export default function Studio() {
       return
     }
 
-    const readOnly = builtin && type === 'module'
+    const readOnly = false
 
     const newTab = {
       type, name, label: name, ruleId: (type === 'yara' || type === 'alertrule') ? name : null,

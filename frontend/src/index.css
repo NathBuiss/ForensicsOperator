@@ -199,3 +199,152 @@
 @layer utilities {
   .scrollbar-thin { scrollbar-width: thin; }
 }
+
+/* ── Dark Blue Theme ──────────────────────────────────────────────────────── */
+/*
+ * Deep navy palette — dark but readable, blue-tinted neutrals.
+ * Base:   #0D1526   Card: #152035   Raised: #1A2A45
+ * Border: #243354   Text: #E2E8F0   Muted:  #94A3B8
+ * Accent: #3B9EDD   (brighter for dark bg)
+ */
+
+.dark {
+  color-scheme: dark;
+}
+
+.dark body {
+  background-color: #0D1526;
+  color: #E2E8F0;
+}
+
+.dark ::-webkit-scrollbar-thumb { background: #243354; }
+.dark ::-webkit-scrollbar-thumb:hover { background: #2E4270; }
+
+/* ── Cards ────────────────────────────────────────────────────────────────── */
+.dark .card {
+  background-color: #152035;
+  border-color: #243354;
+  box-shadow: 0 1px 3px 0 rgba(0,0,0,0.4);
+}
+.dark .card-hover {
+  background-color: #152035;
+  border-color: #243354;
+}
+.dark .card-hover:hover {
+  border-color: rgba(59, 158, 221, 0.5);
+  box-shadow: 0 4px 12px 0 rgba(0,0,0,0.35);
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────────── */
+.dark .btn-ghost {
+  color: #94A3B8;
+}
+.dark .btn-ghost:hover {
+  background-color: #1A2A45;
+  color: #E2E8F0;
+}
+.dark .btn-outline {
+  background-color: #152035;
+  border-color: #243354;
+  color: #CBD5E1;
+}
+.dark .btn-outline:hover {
+  background-color: #1A2A45;
+}
+.dark .btn-danger {
+  background-color: rgba(220, 38, 38, 0.15);
+  border-color: rgba(220, 38, 38, 0.35);
+  color: #FCA5A5;
+}
+.dark .btn-danger:hover {
+  background-color: rgba(220, 38, 38, 0.25);
+}
+.dark .btn-success {
+  background-color: rgba(22, 163, 74, 0.15);
+  border-color: rgba(22, 163, 74, 0.35);
+  color: #86EFAC;
+}
+.dark .btn-primary {
+  background-color: #2563EB;
+  border-color: #1D4ED8;
+}
+.dark .btn-primary:hover {
+  background-color: #1D4ED8;
+}
+
+/* ── Inputs ───────────────────────────────────────────────────────────────── */
+.dark .input,
+.dark .input-lg {
+  background-color: #0D1526;
+  border-color: #243354;
+  color: #E2E8F0;
+}
+.dark .input::placeholder,
+.dark .input-lg::placeholder {
+  color: #475569;
+}
+.dark .input:focus,
+.dark .input-lg:focus {
+  border-color: #3B9EDD;
+  box-shadow: 0 0 0 2px rgba(59, 158, 221, 0.2);
+}
+
+/* ── Skeleton ─────────────────────────────────────────────────────────────── */
+.dark .skeleton { background-color: #1A2A45; }
+
+/* ── Text colors ──────────────────────────────────────────────────────────── */
+.dark .text-brand-text { color: #E2E8F0; }
+.dark .text-gray-900   { color: #F1F5F9; }
+.dark .text-gray-800   { color: #E2E8F0; }
+.dark .text-gray-700   { color: #CBD5E1; }
+.dark .text-gray-600   { color: #94A3B8; }
+.dark .text-gray-500   { color: #64748B; }
+.dark .text-gray-400   { color: #475569; }
+
+/* ── Backgrounds ──────────────────────────────────────────────────────────── */
+.dark .bg-white        { background-color: #152035; }
+.dark .bg-gray-50      { background-color: #0D1526; }
+.dark .bg-gray-100     { background-color: #1A2A45; }
+.dark .bg-gray-200     { background-color: #243354; }
+
+/* ── Borders ──────────────────────────────────────────────────────────────── */
+.dark .border-gray-100 { border-color: #1E2E48; }
+.dark .border-gray-200 { border-color: #243354; }
+.dark .border-r        { border-color: #243354; }
+.dark .border-b        { border-color: #243354; }
+.dark .border-t        { border-color: #243354; }
+.dark .border-l        { border-color: #243354; }
+
+/* ── Panels (slide-over, modal) ───────────────────────────────────────────── */
+.dark .panel-slide {
+  background-color: #152035;
+  border-color: #243354;
+}
+.dark .modal-box {
+  background-color: #152035;
+}
+
+/* ── Table ────────────────────────────────────────────────────────────────── */
+.dark .data-table tr  { border-color: #1E2E48; }
+.dark .table-row-hover:hover { background-color: #1A2A45; }
+.dark .table-row-selected    { background-color: #1A3455; border-color: #3B9EDD; }
+
+/* ── Code block ───────────────────────────────────────────────────────────── */
+.dark code:not(.code-block code) {
+  background-color: #1A2A45;
+  color: #7DD3FC;
+}
+
+/* ── Drop zone ────────────────────────────────────────────────────────────── */
+.dark .drop-zone-inactive {
+  border-color: #243354;
+  background-color: #0D1526;
+}
+
+/* ── Form select ──────────────────────────────────────────────────────────── */
+.dark select option { background-color: #152035; color: #E2E8F0; }
+.dark select {
+  background-color: #0D1526;
+  border-color: #243354;
+  color: #E2E8F0;
+}

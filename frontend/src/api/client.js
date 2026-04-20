@@ -136,6 +136,7 @@ export const api = {
     importSigma:     (data)           => request('POST',   '/alert-rules/library/sigma', data),
     getLibraryRule:  (id)             => request('GET',    `/alert-rules/library/${id}`),
     generateRule:    (data)           => request('POST',   '/alert-rules/generate', data),
+    generateSigmaRule: (data)         => request('POST',   '/alert-rules/generate-sigma', data),
     analyzeResult:   (data)           => request('POST',   '/alert-rules/analyze', data),
     parseSigma:      (data)           => request('POST',   '/alert-rules/sigma/parse', data),
   },

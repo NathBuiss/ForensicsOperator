@@ -1413,7 +1413,7 @@ function ModuleRunCard({
 // ─────────────────────────────────────────────────────────────────────────────
 // ModuleRunsPanel
 // ─────────────────────────────────────────────────────────────────────────────
-function ModuleRunsPanel({ caseId, onClose }) {
+function ModuleRunsPanel({ caseId, onClose, alertResults }) {
   const navigate              = useNavigate()
   const [runs, setRuns]       = useState([])
   const [loading, setLoading] = useState(true)
@@ -1801,6 +1801,44 @@ function ModuleRunsPanel({ caseId, onClose }) {
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
+
+          {/* ── Alert rule results (injected from "Run Detection Rules") ── */}
+          {alertResults && (
+            <div className="card overflow-hidden border-l-4 border-l-red-400">
+              <div className="px-4 py-3 bg-red-50 border-b border-red-100 flex items-center gap-2">
+                <Shield size={14} className="text-red-500 flex-shrink-0" />
+                <span className="font-semibold text-sm text-red-700">Detection Rules</span>
+                <span className="badge bg-red-100 text-red-700 ml-auto">
+                  {alertResults.rules_checked ?? 0} rules · {alertResults.matches?.length ?? 0} hits
+                </span>
+              </div>
+              <div className="divide-y divide-gray-100">
+                {(alertResults.matches?.length ?? 0) === 0 ? (
+                  <div className="px-4 py-6 text-center text-sm text-green-600 flex items-center justify-center gap-2">
+                    <CheckCircle size={16} /> No alerts triggered
+                  </div>
+                ) : alertResults.matches.map((m, i) => {
+                  const rule = m.rule || {}
+                  return (
+                    <div key={i} className="px-4 py-3">
+                      <div className="flex items-start gap-2">
+                        <AlertTriangle size={13} className="text-red-400 flex-shrink-0 mt-0.5" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-brand-text truncate">{rule.name}</p>
+                          {rule.description && <p className="text-xs text-gray-500 truncate">{rule.description}</p>}
+                          <div className="flex items-center gap-2 mt-1 flex-wrap">
+                            <span className="badge bg-red-100 text-red-700">{m.match_count} hits</span>
+                            {rule.artifact_type && <span className={`badge ${ARTIFACT_BADGE[rule.artifact_type] || 'badge-generic'}`}>{rule.artifact_type}</span>}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
           {loading ? (
             <div className="flex items-center justify-center py-16 text-gray-400">
               <Loader2 size={20} className="animate-spin mr-2" />
@@ -1936,6 +1974,9 @@ export default function CaseTimeline() {
     try {
       const r = await api.alertRules.runLibrary(caseId)
       setAlertResults(r)
+      // Show results in the module runs panel alongside module outputs
+      setShowModules(false)
+      setShowModuleRuns(true)
     } catch (err) {
       console.error('Alert run failed:', err)
     } finally {
@@ -2120,14 +2161,6 @@ export default function CaseTimeline() {
         </div>
       )}
 
-      {alertResults && (
-        <AlertResultsPanel
-          results={alertResults}
-          caseId={caseId}
-          onClose={() => setAlertResults(null)}
-        />
-      )}
-
       {showModules && (
         <ModuleLaunchModal
           caseId={caseId}
@@ -2139,7 +2172,8 @@ export default function CaseTimeline() {
       {showModuleRuns && (
         <ModuleRunsPanel
           caseId={caseId}
-          onClose={() => setShowModuleRuns(false)}
+          onClose={() => { setShowModuleRuns(false); setAlertResults(null) }}
+          alertResults={alertResults}
         />
       )}
 

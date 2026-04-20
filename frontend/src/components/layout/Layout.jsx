@@ -17,7 +17,7 @@ const STATUS_DOT = {
   closed:   'status-dot-closed',
 }
 
-const THEMES = ['light', 'dark', 'midnight']
+const THEMES = ['light', 'dark']
 
 function useTheme() {
   const [theme, setTheme] = useState(() => {
@@ -99,15 +99,13 @@ export default function Layout({ user, onLogout }) {
             </span>
           </NavLink>
 
-          {/* Theme toggle — cycles: light → dark → midnight */}
+          {/* Theme toggle — cycles: light ↔ dark */}
           <button
             onClick={cycleTheme}
             className="w-6 h-6 flex items-center justify-center rounded text-brand-sidebarmuted hover:text-white hover:bg-white/10 transition-colors flex-shrink-0 ml-1"
-            title={`Theme: ${theme} (click to cycle)`}
+            title={theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
           >
-            {theme === 'light'    && <Moon size={13} />}
-            {theme === 'dark'     && <Stars size={13} />}
-            {theme === 'midnight' && <Sun size={13} />}
+            {theme === 'light' ? <Moon size={13} /> : <Sun size={13} />}
           </button>
         </div>
 
