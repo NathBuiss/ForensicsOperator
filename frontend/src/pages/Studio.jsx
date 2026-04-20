@@ -1063,8 +1063,10 @@ export default function Studio() {
     setModRun(p => ({ ...p, running: true, runId: null }))
     try {
       const r = await api.modules.createRun(modRun.caseId, {
-        module_id: moduleId,
-        job_ids: modRun.selectedJobs,
+        module_id:    moduleId,
+        source_files: modRun.sources
+          .filter(s => modRun.selectedJobs.includes(s.job_id))
+          .map(s => ({ job_id: s.job_id, filename: s.original_filename, minio_key: s.minio_object_key })),
       })
       setModRun(p => ({ ...p, running: false, runId: r.run_id, show: false }))
       openLogStream(r.run_id)

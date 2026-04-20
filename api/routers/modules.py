@@ -129,10 +129,17 @@ def _get_modules_by_id() -> dict[str, dict]:
 
 # ── Request models ────────────────────────────────────────────────────────────
 
+class SourceFileRef(BaseModel):
+    job_id:    str
+    filename:  str = ""
+    minio_key: str = ""
+
+
 class CreateModuleRunRequest(BaseModel):
-    module_id: str
-    job_ids: list[str]
-    params: dict[str, Any] = {}   # module-specific parameters (e.g. custom YARA rules)
+    module_id:    str
+    job_ids:      list[str] = []            # legacy: bare IDs resolved via Redis
+    source_files: list[SourceFileRef] = []  # preferred: pre-resolved metadata
+    params: dict[str, Any] = {}
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -266,24 +273,35 @@ def create_module_run(case_id: str, req: CreateModuleRunRequest):
     if not module.get("available"):
         reason = module.get("unavailable_reason", "Module unavailable")
         raise HTTPException(status_code=400, detail=reason)
-    if not req.job_ids:
+    if not req.source_files and not req.job_ids:
         raise HTTPException(status_code=400, detail="At least one source job is required")
 
     source_files: list[dict] = []
-    for job_id in req.job_ids:
-        job = get_job(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
-        if job.get("status") not in ("COMPLETED", "SKIPPED"):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Job '{job_id}' has not completed yet (status: {job.get('status')})",
-            )
-        source_files.append({
-            "job_id":    job_id,
-            "filename":  job.get("original_filename", ""),
-            "minio_key": job.get("minio_object_key", ""),
-        })
+
+    # Preferred path: caller already resolved filename + minio_key (no Redis needed)
+    if req.source_files:
+        for sf in req.source_files:
+            source_files.append({
+                "job_id":    sf.job_id,
+                "filename":  sf.filename,
+                "minio_key": sf.minio_key,
+            })
+    else:
+        # Legacy path: bare job_ids — look up Redis. Fails if TTL expired.
+        for job_id in req.job_ids:
+            job = get_job(job_id)
+            if not job:
+                raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+            if job.get("status") not in ("COMPLETED", "SKIPPED"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Job '{job_id}' has not completed yet (status: {job.get('status')})",
+                )
+            source_files.append({
+                "job_id":    job_id,
+                "filename":  job.get("original_filename", ""),
+                "minio_key": job.get("minio_object_key", ""),
+            })
 
     run_id = uuid.uuid4().hex
     run_svc.create_module_run(run_id, case_id, req.module_id, source_files)

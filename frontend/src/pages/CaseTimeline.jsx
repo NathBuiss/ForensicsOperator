@@ -551,8 +551,10 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
         params.patterns = grepPatterns.split('\n').map(p => p.trim()).filter(Boolean)
       }
       const run = await api.modules.createRun(caseId, {
-        module_id: selectedModule.id,
-        job_ids:   [...selectedJobs],
+        module_id:    selectedModule.id,
+        source_files: sources
+          .filter(s => selectedJobs.has(s.job_id))
+          .map(s => ({ job_id: s.job_id, filename: s.original_filename, minio_key: s.minio_object_key })),
         params,
       })
       onRunCreated(run)
@@ -609,7 +611,10 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
         .map(s => s.job_id)
       if (jobIds.length === 0) { done++; setRunAllProgress({ done, total: eligible.length }); continue }
       try {
-        const run = await api.modules.createRun(caseId, { module_id: mod.id, job_ids: jobIds, params: {} })
+        const resolvedFiles = sources
+          .filter(s => jobIds.includes(s.job_id))
+          .map(s => ({ job_id: s.job_id, filename: s.original_filename, minio_key: s.minio_object_key }))
+        const run = await api.modules.createRun(caseId, { module_id: mod.id, source_files: resolvedFiles, params: {} })
         onRunCreated(run)
       } catch {
         // best-effort — don't abort remaining modules on one failure
