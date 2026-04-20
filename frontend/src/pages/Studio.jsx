@@ -671,7 +671,7 @@ export default function Studio() {
         api.alertRules.listLibrary().catch(() => ({ rules: [] })),
       ])
       setIngFiles([...(ingBuiltin.files || []), ...(ing.files || [])])
-      setModFiles(mod.files || [])
+      setModFiles([...(modBuiltin.files || []), ...(mod.files || [])])
       setRefModFiles(modBuiltin.files || [])
       setYaraRules([...(yara.rules || [])].sort((a, b) => a.name.localeCompare(b.name)))
       setAlertRuleList([...(alertLib.rules || [])].sort((a, b) => a.name.localeCompare(b.name)))
@@ -1134,13 +1134,10 @@ export default function Studio() {
           className={`w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors ${
             isActive ? 'bg-brand-accentlight text-brand-accent'
             : isOpen  ? 'bg-blue-50/50 text-gray-700 hover:bg-blue-50'
-            : f.builtin ? 'text-gray-400 hover:bg-gray-50 hover:text-gray-600'
             : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
           }`}
         >
-          {f.builtin
-            ? <Lock size={11} className="flex-shrink-0 opacity-50" />
-            : <FileCode2 size={13} className="flex-shrink-0 opacity-60" />}
+          <FileCode2 size={13} className="flex-shrink-0 opacity-60" />
           <span className="text-[11px] font-mono truncate flex-1">{f.name}</span>
           {isDirtyTab && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0" />}
           {isActive && !isDirtyTab && <ChevronRight size={10} className="flex-shrink-0 opacity-50" />}
