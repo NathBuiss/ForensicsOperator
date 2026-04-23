@@ -49,7 +49,11 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import signal
+import socket
+import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 
 # ── Inline minimal deps so this script works without the full venv ────────────
@@ -59,13 +63,13 @@ except ImportError:
     sys.exit("Missing dependency: pip install redis")
 
 try:
-    from passlib.context import CryptContext
+    import bcrypt as _bcrypt_lib
 except ImportError:
-    sys.exit("Missing dependency: pip install passlib[bcrypt]")
+    sys.exit("Missing dependency: pip install bcrypt")
 
-# ── Config ────────────────────────────────────────────────────────────────────
 
-_pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+def _hash_password(password: str) -> str:
+    return _bcrypt_lib.hashpw(password.encode("utf-8"), _bcrypt_lib.gensalt()).decode("utf-8")
 
 _USERS_SET = "fo:users"
 _USER_KEY  = "fo:user:{username}"
@@ -87,6 +91,89 @@ def _ok(msg: str)   -> None: print(f"{_GREEN}✓{_RESET} {msg}")
 def _warn(msg: str) -> None: print(f"{_YELLOW}⚠{_RESET}  {msg}")
 def _err(msg: str)  -> None: print(f"{_RED}✗{_RESET} {msg}", file=sys.stderr)
 def _info(msg: str) -> None: print(f"{_CYAN}·{_RESET} {msg}")
+
+
+# ── kubectl port-forward auto-tunnel ─────────────────────────────────────────
+
+def _free_port() -> int:
+    """Return an available local TCP port."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _kubectl_find_redis(namespace: str) -> str | None:
+    """Return the first pod name whose name starts with 'redis'."""
+    try:
+        out = subprocess.check_output(
+            ["kubectl", "get", "pods", "-n", namespace,
+             "--no-headers", "-o", "custom-columns=NAME:.metadata.name"],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+        for line in out.splitlines():
+            name = line.strip()
+            if name.lower().startswith("redis"):
+                return name
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    return None
+
+
+def _start_port_forward(namespace: str, local_port: int) -> subprocess.Popen | None:
+    """
+    Try to start 'kubectl port-forward' to the Redis pod.
+    Returns the Popen handle on success, None if kubectl/pod not found.
+    """
+    pod = _kubectl_find_redis(namespace)
+    if not pod:
+        return None
+
+    _info(f"Auto port-forward: kubectl → pod/{pod}  6379 → localhost:{local_port}")
+    proc = subprocess.Popen(
+        ["kubectl", "port-forward", f"pod/{pod}",
+         f"{local_port}:6379", "-n", namespace],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    # Wait up to 3 s for the port to open
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", local_port), timeout=0.2):
+                return proc
+        except OSError:
+            time.sleep(0.1)
+
+    proc.terminate()
+    return None
+
+
+def _auto_redis_url(explicit_url: str, namespace: str) -> tuple[str, "subprocess.Popen | None"]:
+    """
+    If the default Redis URL is unreachable, attempt a kubectl port-forward.
+    Returns (url_to_use, popen_or_None).
+    """
+    # Check if the user supplied a non-default URL or env var
+    default_url = "redis://localhost:6379/0"
+    if explicit_url != default_url:
+        return explicit_url, None
+
+    # Probe current URL first
+    host, port = "localhost", 6379
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return explicit_url, None   # already reachable
+    except OSError:
+        pass
+
+    # Not reachable — try kubectl port-forward
+    local_port = _free_port()
+    proc = _start_port_forward(namespace, local_port)
+    if proc:
+        return f"redis://localhost:{local_port}/0", proc
+
+    return explicit_url, None   # fall through; _connect will give a nice error
 
 
 # ── Redis helpers ─────────────────────────────────────────────────────────────
@@ -140,7 +227,7 @@ def cmd_create(r: redis_lib.Redis, args: argparse.Namespace) -> None:
 
     user = {
         "username":        username,
-        "hashed_password": _pwd_ctx.hash(password),
+        "hashed_password": _hash_password(password),
         "role":            role,
         "created_at":      datetime.now(timezone.utc).isoformat(),
     }
@@ -197,7 +284,7 @@ def cmd_reset_password(r: redis_lib.Redis, args: argparse.Namespace) -> None:
         sys.exit(1)
 
     password = args.password or _read_password(f"New password for '{username}'")
-    r.hset(_USER_KEY.format(username=username), "hashed_password", _pwd_ctx.hash(password))
+    r.hset(_USER_KEY.format(username=username), "hashed_password", _hash_password(password))
     _ok(f"Password updated for '{username}'")
 
 
@@ -242,6 +329,12 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="URL",
         help="Redis URL (default: REDIS_URL env or redis://localhost:6379/0)",
     )
+    p.add_argument(
+        "--namespace", "-n",
+        default=os.getenv("K8S_NAMESPACE", "forensics-operator-dev"),
+        metavar="NS",
+        help="Kubernetes namespace for auto port-forward (default: forensics-operator-dev)",
+    )
 
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -279,19 +372,26 @@ def _build_parser() -> argparse.ArgumentParser:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    parser  = _build_parser()
-    args    = parser.parse_args()
-    r       = _connect(args.redis)
+    parser = _build_parser()
+    args   = parser.parse_args()
 
-    commands = {
-        "create":         cmd_create,
-        "delete":         cmd_delete,
-        "list":           cmd_list,
-        "reset-password": cmd_reset_password,
-        "change-role":    cmd_change_role,
-        "info":           cmd_info,
-    }
-    commands[args.command](r, args)
+    redis_url, pf_proc = _auto_redis_url(args.redis, args.namespace)
+
+    try:
+        r = _connect(redis_url)
+        commands = {
+            "create":         cmd_create,
+            "delete":         cmd_delete,
+            "list":           cmd_list,
+            "reset-password": cmd_reset_password,
+            "change-role":    cmd_change_role,
+            "info":           cmd_info,
+        }
+        commands[args.command](r, args)
+    finally:
+        if pf_proc is not None:
+            pf_proc.terminate()
+            _info("Port-forward closed.")
 
 
 if __name__ == "__main__":

@@ -503,7 +503,7 @@ class IOSPlugin(BasePlugin):
                     yield {
                         "fo_id": str(uuid.uuid4()),
                         "artifact_type": "ios",
-                        "timestamp": "",
+                        "timestamp": None,
                         "timestamp_desc": "Safari Bookmark",
                         "message": message,
                         "ios": {
@@ -663,7 +663,7 @@ class IOSPlugin(BasePlugin):
                     yield {
                         "fo_id": str(uuid.uuid4()),
                         "artifact_type": "ios",
-                        "timestamp": "",
+                        "timestamp": None,
                         "timestamp_desc": "Backup Manifest Entry",
                         "message": message,
                         "ios": {

@@ -127,6 +127,10 @@ export default function Settings() {
 
   const setS3Triage = (k, v) => setS3TriageForm(f => ({ ...f, [k]: v }))
 
+  // ── System Maintenance state ──────────────────────────────────────────────
+  const [purging, setPurging]       = useState(false)
+  const [purgeResult, setPurgeResult] = useState(null)
+
   // ── Cuckoo Sandbox config state ────────────────────────────────────────────
   const [cuckooConfig, setCuckooConfig]         = useState(null)
   const [cuckooLoading, setCuckooLoading]       = useState(true)
@@ -355,6 +359,40 @@ export default function Settings() {
       setS3TriageTestResult({ ok: false, error: err.message })
     } finally {
       setS3TriageTesting(false)
+    }
+  }
+
+  // ── Wipe all data state ────────────────────────────────────────────────────
+  const [wipeInput, setWipeInput]     = useState('')
+  const [wiping, setWiping]           = useState(false)
+  const [wipeResult, setWipeResult]   = useState(null)
+
+  async function runWipeAll() {
+    setWiping(true)
+    setWipeResult(null)
+    try {
+      const res = await api.admin.wipeAll()
+      setWipeResult({ ok: true, data: res })
+      setWipeInput('')
+    } catch (err) {
+      setWipeResult({ ok: false, error: err.message })
+    } finally {
+      setWiping(false)
+    }
+  }
+
+  // ── System Maintenance handlers ────────────────────────────────────────────
+  async function runPurge() {
+    if (!confirm('Purge all orphaned case data? This deletes MinIO objects, ES indices, and Redis job keys for cases no longer in the database. Active cases are untouched.')) return
+    setPurging(true)
+    setPurgeResult(null)
+    try {
+      const res = await api.admin.purgeOrphaned()
+      setPurgeResult({ ok: true, data: res })
+    } catch (err) {
+      setPurgeResult({ ok: false, error: err.message })
+    } finally {
+      setPurging(false)
     }
   }
 
@@ -1052,6 +1090,92 @@ export default function Settings() {
               )
             )}
           </form>
+        )}
+      </section>
+
+      {/* ── System Maintenance ───────────────────────────────────────────── */}
+      <section className="card p-5 space-y-4 mt-6">
+        <div className="flex items-center gap-2">
+          <Trash2 size={15} className="text-red-500" />
+          <h2 className="font-semibold text-brand-text">System Maintenance</h2>
+        </div>
+
+        <p className="text-xs text-gray-500">
+          Purge orphaned data left by cases that were deleted or expired — MinIO artifact files,
+          Elasticsearch indices, and Redis job records — without touching any active case.
+        </p>
+
+        <div className="flex items-center gap-3 flex-wrap">
+          <button
+            type="button"
+            onClick={runPurge}
+            disabled={purging}
+            className="btn-outline text-xs px-4 py-1.5 flex items-center gap-1.5 text-red-500 border-red-200 hover:border-red-400 disabled:opacity-50"
+          >
+            {purging ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+            {purging ? 'Purging…' : 'Purge Orphaned Case Data'}
+          </button>
+        </div>
+
+        {purgeResult && (
+          purgeResult.ok ? (
+            <div className="text-xs bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 space-y-1">
+              <p className="font-medium text-brand-text flex items-center gap-1"><Check size={12} className="text-green-600" /> Purge complete</p>
+              <p className="text-gray-500">MinIO cases purged: <strong>{purgeResult.data.minio_cases_purged.length}</strong> ({purgeResult.data.minio_cases_purged.map(c => c.case_id).join(', ') || 'none'})</p>
+              <p className="text-gray-500">ES cases purged: <strong>{purgeResult.data.es_cases_purged.length}</strong> ({purgeResult.data.es_cases_purged.join(', ') || 'none'})</p>
+              <p className="text-gray-500">Redis job keys deleted: <strong>{purgeResult.data.redis_job_keys_deleted.toLocaleString()}</strong></p>
+            </div>
+          ) : (
+            <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-start gap-1.5">
+              <AlertCircle size={12} className="mt-0.5 flex-shrink-0" />
+              <span>{purgeResult.error}</span>
+            </div>
+          )
+        )}
+      </section>
+
+      {/* ── Wipe All Data ───────────────────────────────────────────────── */}
+      <section className="card p-5 space-y-4 mt-6 border-red-300">
+        <div className="flex items-center gap-2">
+          <Trash2 size={15} className="text-red-600" />
+          <h2 className="font-semibold text-red-600">Danger Zone — Wipe All Data</h2>
+        </div>
+        <p className="text-xs text-gray-500">
+          Permanently deletes <strong>all case data</strong>: every Elasticsearch index, every MinIO artifact, and all
+          Redis case/job keys. This affects <em>all active cases</em> and cannot be undone.
+        </p>
+        <div className="flex items-center gap-3 flex-wrap">
+          <input
+            type="text"
+            value={wipeInput}
+            onChange={e => setWipeInput(e.target.value)}
+            placeholder='Type WIPE to confirm'
+            className="input text-xs w-48 font-mono"
+          />
+          <button
+            type="button"
+            onClick={runWipeAll}
+            disabled={wiping || wipeInput !== 'WIPE'}
+            className="btn text-xs px-4 py-1.5 bg-red-600 hover:bg-red-700 text-white border-0 disabled:opacity-40"
+          >
+            {wiping ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+            {wiping ? 'Wiping…' : 'Wipe All Data'}
+          </button>
+        </div>
+        {wipeResult && (
+          wipeResult.ok ? (
+            <div className="text-xs bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 space-y-1">
+              <p className="font-medium text-brand-text flex items-center gap-1"><Check size={12} className="text-green-600" /> Wipe complete</p>
+              <p className="text-gray-500">ES indices deleted: <strong>{wipeResult.data.es_indices_deleted.length}</strong></p>
+              <p className="text-gray-500">MinIO objects deleted: <strong>{wipeResult.data.minio_objects_deleted.toLocaleString()}</strong></p>
+              <p className="text-gray-500">Redis keys deleted: <strong>{wipeResult.data.redis_keys_deleted.toLocaleString()}</strong></p>
+            </div>
+          ) : (
+            <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-start gap-1.5">
+              <AlertCircle size={12} className="mt-0.5 flex-shrink-0" />
+              <span>{wipeResult.error}</span>
+            </div>
+          )
         )}
       </section>
 

@@ -11,3 +11,5 @@ input_extensions:
   - "*"
 available: true
 run_on_files: true
+category: Binary Analysis
+tags: [strings, binary, ioc, url, encoding]

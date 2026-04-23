@@ -2,22 +2,32 @@
 Case file viewer — browse and search the raw files stored in MinIO for a case.
 
 Endpoints:
-  GET  /cases/{case_id}/files                       — list all ingested files
-  GET  /cases/{case_id}/files/{job_id}/content      — read a readable file's text content
-  POST /cases/{case_id}/files/search                — search within readable file content
-  GET  /cases/{case_id}/disk-images                 — list disk-image jobs
-  GET  /cases/{case_id}/disk-images/{job_id}/browse — browse directory in indexed image
+  GET  /cases/{case_id}/files                          — list all ingested files
+  GET  /cases/{case_id}/files/{job_id}/content         — read a readable file's text content
+  GET  /cases/{case_id}/files/{job_id}/download        — stream the full stored file
+  GET  /cases/{case_id}/files/{job_id}/extract?member= — extract one member from an archive
+  POST /cases/{case_id}/files/search                   — search within readable file content
+  GET  /cases/{case_id}/disk-images                    — list disk-image jobs
+  GET  /cases/{case_id}/disk-images/{job_id}/browse    — browse directory in indexed image
 """
 from __future__ import annotations
 
+import io
 import logging
+import mimetypes
+import os
 import re
+import tarfile
+import zipfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from config import settings
 from services import jobs as job_svc
 from services import storage
 from services.cases import get_case
@@ -47,6 +57,19 @@ _DISK_IMAGE_EXTS = {
 
 _MAX_VIEW_BYTES   = 5 * 1024 * 1024   # 5 MB
 _MAX_SEARCH_BYTES = 2 * 1024 * 1024   # 2 MB per file during search
+
+
+def _content_disposition(filename: str) -> str:
+    """
+    Build a Content-Disposition header value that handles non-ASCII filenames.
+
+    Sends both an ASCII fallback (filename=) and an RFC 5987 UTF-8 encoded
+    version (filename*=) so all browsers get the correct name without raising
+    Python's UnicodeEncodeError when the header is serialised as latin-1.
+    """
+    ascii_name = filename.encode("ascii", errors="replace").decode("ascii").replace('"', '\\"')
+    utf8_name  = quote(filename, safe="")
+    return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_name}'
 
 
 def _is_readable(filename: str) -> bool:
@@ -100,6 +123,148 @@ def list_case_files(case_id: str):
             "source_zip":     job.get("source_zip", ""),
         })
     return {"case_id": case_id, "files": files, "total": len(files)}
+
+
+# ── Download raw file ────────────────────────────────────────────────────────
+
+def _minio_stream(minio_key: str):
+    """Generator that yields chunks directly from MinIO — no full-file RAM buffer."""
+    client = storage.get_minio()
+    response = client.get_object(settings.MINIO_BUCKET, minio_key)
+    try:
+        yield from response
+    finally:
+        try:
+            response.close()
+            response.release_conn()
+        except Exception:
+            pass
+
+
+@router.get("/cases/{case_id}/files/{job_id}/download")
+def download_file(case_id: str, job_id: str):
+    """
+    Stream the original stored file as a browser download.
+
+    Auth via ?_token= query param (same pattern as CSV export) so the browser
+    can trigger the download directly without AJAX.
+    """
+    if not get_case(case_id):
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    job = job_svc.get_job(job_id)
+    if not job or job.get("case_id") != case_id:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    minio_key = job.get("minio_object_key", "")
+    if not minio_key:
+        raise HTTPException(status_code=404, detail="File not yet in storage")
+
+    fname        = job.get("original_filename", "download")
+    content_type = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+
+    return StreamingResponse(
+        _minio_stream(minio_key),
+        media_type=content_type,
+        headers={"Content-Disposition": _content_disposition(fname)},
+    )
+
+
+# ── Extract single archive member ────────────────────────────────────────────
+
+@router.get("/cases/{case_id}/files/{job_id}/extract")
+def extract_archive_member(
+    case_id: str,
+    job_id:  str,
+    member:  str = Query(..., description="Relative path of the member inside the archive"),
+):
+    """
+    Extract and stream one member from an archived source file stored in MinIO.
+
+    Used by EventDetail when the event was produced from a file inside a ZIP or
+    TAR archive — in that case event.raw.archive_member holds the member path
+    and this endpoint serves the correct binary rather than the outer archive.
+    """
+    if not get_case(case_id):
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    job = job_svc.get_job(job_id)
+    if not job or job.get("case_id") != case_id:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    minio_key = job.get("minio_object_key", "")
+    if not minio_key:
+        raise HTTPException(status_code=404, detail="File not yet in storage")
+
+    # Sanitise member path — prevent path traversal
+    norm_member = member.replace("\\", "/").strip("/")
+    if not norm_member or ".." in norm_member.split("/"):
+        raise HTTPException(status_code=400, detail="Invalid member path")
+    member_name = norm_member.split("/")[-1]
+
+    try:
+        raw = storage.download_fileobj(minio_key)
+    except Exception as exc:
+        logger.error("Failed to download %s: %s", minio_key, exc)
+        raise HTTPException(status_code=502, detail=f"Storage read error: {exc}")
+
+    fname = job.get("original_filename", "").lower()
+    member_bytes: bytes | None = None
+
+    # ── ZIP ───────────────────────────────────────────────────────────────────
+    if fname.endswith(".zip"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                # Exact path match (normalised to forward slashes)
+                for n in zf.namelist():
+                    if n.replace("\\", "/").strip("/") == norm_member:
+                        member_bytes = zf.read(n)
+                        break
+                # Fallback: filename-only match (handles path differences)
+                if member_bytes is None:
+                    for n in zf.namelist():
+                        if Path(n).name == member_name:
+                            member_bytes = zf.read(n)
+                            break
+        except zipfile.BadZipFile as exc:
+            raise HTTPException(status_code=422, detail=f"Bad ZIP: {exc}")
+
+    # ── TAR family (.tar, .tgz, .tar.gz, …) ──────────────────────────────────
+    else:
+        try:
+            with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
+                match = None
+                for m in tf.getmembers():
+                    if not m.isfile():
+                        continue
+                    if m.name.replace("\\", "/").strip("/") == norm_member:
+                        match = m
+                        break
+                if match is None:
+                    for m in tf.getmembers():
+                        if m.isfile() and Path(m.name).name == member_name:
+                            match = m
+                            break
+                if match is not None:
+                    f = tf.extractfile(match)
+                    if f:
+                        member_bytes = f.read()
+        except tarfile.TarError as exc:
+            raise HTTPException(status_code=422, detail=f"TAR error: {exc}")
+
+    if member_bytes is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Member '{norm_member}' not found in archive",
+        )
+
+    content_type = mimetypes.guess_type(member_name)[0] or "application/octet-stream"
+
+    return StreamingResponse(
+        iter([member_bytes]),
+        media_type=content_type,
+        headers={"Content-Disposition": _content_disposition(member_name)},
+    )
 
 
 # ── Read file content ─────────────────────────────────────────────────────────

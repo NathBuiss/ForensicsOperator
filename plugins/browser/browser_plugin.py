@@ -35,6 +35,15 @@ from plugins.base_plugin import (
 _WEBKIT_EPOCH_DELTA_US = 11_644_473_600_000_000  # difference to Unix epoch in us
 
 
+def _format_bytes(n: int) -> str:
+    """Return a compact human-readable file size string (e.g. 1.4 MB)."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
 def _webkit_to_iso(us: int | None) -> str:
     """Convert a Chromium/WebKit microsecond timestamp to ISO 8601 UTC string."""
     if not us or us <= 0:
@@ -83,16 +92,23 @@ _HANDLED_FILENAMES: list[str] = [
     "BOOKMARKS",
     "WEB DATA",
     "DOWNLOADS",
+    "FAVICONS",          # Chrome: extensionless favicon database
+    "SHORTCUTS",         # Chrome: address bar shortcut/autocomplete database
+    "TOP SITES",         # Chrome: most-visited sites database
     "PLACES.SQLITE",
     "COOKIES.SQLITE",
     "FAVICONS.SQLITE",
     "FORMHISTORY.SQLITE",
+    "DOWNLOADS.SQLITE",  # Firefox: download history
+    "KEY4.DB",           # Firefox: password encryption keys (NSS key store)
 ]
 
 # Chromium-family filenames (no extension, title-case)
-_CHROMIUM_FILES = {"HISTORY", "COOKIES", "LOGIN DATA", "BOOKMARKS", "WEB DATA", "DOWNLOADS"}
+_CHROMIUM_FILES = {"HISTORY", "COOKIES", "LOGIN DATA", "BOOKMARKS", "WEB DATA", "DOWNLOADS",
+                   "FAVICONS", "SHORTCUTS", "TOP SITES"}
 # Firefox-family filenames
-_FIREFOX_FILES = {"PLACES.SQLITE", "COOKIES.SQLITE", "FAVICONS.SQLITE", "FORMHISTORY.SQLITE"}
+_FIREFOX_FILES = {"PLACES.SQLITE", "COOKIES.SQLITE", "FAVICONS.SQLITE", "FORMHISTORY.SQLITE",
+                  "DOWNLOADS.SQLITE", "KEY4.DB"}
 
 
 def _detect_browser_family(filename_upper: str) -> str:
@@ -111,12 +127,23 @@ class BrowserPlugin(BasePlugin):
     PLUGIN_NAME = "browser"
     PLUGIN_VERSION = "1.0.0"
     DEFAULT_ARTIFACT_TYPE = "browser"
-    SUPPORTED_EXTENSIONS = [".sqlite", ".db", ".sqlite3"]
+    SUPPORTED_EXTENSIONS: list[str] = []  # Claim only by exact filename — no broad extension matching
     SUPPORTED_MIME_TYPES: list[str] = []
 
     @classmethod
     def get_handled_filenames(cls) -> list[str]:
         return list(_HANDLED_FILENAMES)
+
+    @classmethod
+    def can_handle(cls, file_path: Path, mime_type: str) -> bool:
+        if super().can_handle(file_path, mime_type):
+            return True
+        # Accept any SQLite file with a standard DB extension — yields 0 events
+        # for unknown schemas (better than log2timeline exit 2 or strings noise).
+        return (
+            mime_type == "application/x-sqlite3"
+            and file_path.suffix.lower() in (".db", ".sqlite", ".sqlite3")
+        )
 
     def __init__(self, context: PluginContext) -> None:
         super().__init__(context)
@@ -130,21 +157,23 @@ class BrowserPlugin(BasePlugin):
     # ------------------------------------------------------------------
 
     def setup(self) -> None:
-        """Copy database to a temp file to avoid WAL/lock issues."""
+        """Copy artifact to a temp file to avoid WAL/lock issues."""
         src = self.ctx.source_file_path
         if not src.exists():
             raise PluginFatalError(f"Source file does not exist: {src}")
 
-        # Work on a copy so we never fight WAL locks or corrupt the original
-        tmp = tempfile.NamedTemporaryFile(
-            suffix=src.suffix or ".db", delete=False
-        )
+        suffix = src.suffix or (".json" if src.name.upper() == "BOOKMARKS" else ".db")
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
         tmp.close()
         self._tmp_path = Path(tmp.name)
         try:
             shutil.copy2(str(src), str(self._tmp_path))
         except OSError as exc:
-            raise PluginFatalError(f"Cannot copy database to temp: {exc}") from exc
+            raise PluginFatalError(f"Cannot copy file to temp: {exc}") from exc
+
+        # BOOKMARKS (Chrome/Edge/Brave) is JSON — skip the SQLite connection
+        if src.name.upper() == "BOOKMARKS":
+            return
 
         try:
             self._conn = sqlite3.connect(
@@ -153,7 +182,6 @@ class BrowserPlugin(BasePlugin):
                 timeout=5,
             )
             self._conn.row_factory = sqlite3.Row
-            # Try to access the database to catch corruption early
             self._conn.execute("SELECT name FROM sqlite_master LIMIT 1")
         except sqlite3.DatabaseError as exc:
             raise PluginFatalError(
@@ -177,10 +205,11 @@ class BrowserPlugin(BasePlugin):
     # ------------------------------------------------------------------
 
     def parse(self) -> Generator[dict[str, Any], None, None]:
-        if not self._conn:
+        filename_upper = self.ctx.source_file_path.name.upper()
+        # BOOKMARKS is JSON — no SQLite connection is needed
+        if not self._conn and filename_upper != "BOOKMARKS":
             raise PluginFatalError("Database connection not available")
 
-        filename_upper = self.ctx.source_file_path.name.upper()
         family = _detect_browser_family(filename_upper)
         tables = self._list_tables()
 
@@ -238,6 +267,15 @@ class BrowserPlugin(BasePlugin):
             # Chromium Bookmarks is JSON, not SQLite -- handle gracefully
             yield from self._parse_chromium_bookmarks_json()
 
+        elif filename_upper in ("FAVICONS", "FAVICONS.SQLITE"):
+            yield from self._parse_chromium_favicons(tables)
+
+        elif filename_upper == "SHORTCUTS":
+            yield from self._parse_chromium_shortcuts(tables)
+
+        elif filename_upper == "TOP SITES":
+            yield from self._parse_chromium_top_sites(tables)
+
     # ------------------------------------------------------------------
     # Chromium: History (urls + visits)
     # ------------------------------------------------------------------
@@ -285,7 +323,11 @@ class BrowserPlugin(BasePlugin):
                 }
                 transition_str = transition_names.get(transition_core, str(transition_core))
 
-                message = f"Visited: {title or url}"
+                # Build rich message: how navigated, title, full URL, visit count
+                visit_label = f"{visit_count}×" if visit_count > 1 else "1×"
+                typed_label = " [typed]" if transition_str == "typed" or typed_count else ""
+                title_part = f"{title} — " if title and title != url else ""
+                message = f"[{visit_label}{typed_label}] {title_part}{url}"
 
                 self._records_read += 1
                 yield {
@@ -354,7 +396,13 @@ class BrowserPlugin(BasePlugin):
                 danger_str = danger_names.get(danger, str(danger))
 
                 filename = Path(target_path).name if target_path else ""
-                message = f"Downloaded: {filename or tab_url}"
+
+                # Build rich message: filename, size, source URL, danger flag
+                size_str = _format_bytes(total_bytes) if total_bytes else ""
+                size_part = f" ({size_str})" if size_str else ""
+                src_part = f" from {tab_url}" if tab_url else ""
+                danger_part = f" ⚠ {danger_str}" if danger > 0 else ""
+                message = f"Downloaded: {filename or tab_url}{size_part}{src_part}{danger_part}"
 
                 self._records_read += 1
                 yield {
@@ -717,7 +765,10 @@ class BrowserPlugin(BasePlugin):
                 typed = row["typed"] or 0
                 visit_type = row["visit_type"] or 0
 
-                message = f"Visited: {title or url}"
+                visit_label = f"{visit_count}×" if visit_count > 1 else "1×"
+                typed_label = " [typed]" if typed else ""
+                title_part = f"{title} — " if title and title != url else ""
+                message = f"[{visit_label}{typed_label}] {title_part}{url}"
 
                 self._records_read += 1
                 yield {
@@ -1031,6 +1082,160 @@ class BrowserPlugin(BasePlugin):
             except Exception as exc:
                 self._records_skipped += 1
                 self.log.debug("Skipping firefox favicon row: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Chromium: Favicons (icon_mapping + favicons tables)
+    # ------------------------------------------------------------------
+
+    def _parse_chromium_favicons(
+        self, tables: set[str]
+    ) -> Generator[dict[str, Any], None, None]:
+        assert self._conn
+        # icon_mapping maps page URLs to favicon IDs
+        if "icon_mapping" not in tables or "favicons" not in tables:
+            return
+        query = """
+            SELECT im.page_url, f.url AS icon_url, f.expiry
+            FROM icon_mapping im
+            LEFT JOIN favicons f ON im.icon_id = f.id
+            ORDER BY im.id ASC
+        """
+        try:
+            cursor = self._conn.execute(query)
+        except sqlite3.DatabaseError as exc:
+            self.log.debug("Chromium favicons query failed: %s", exc)
+            return
+
+        for row in cursor:
+            try:
+                page_url = row["page_url"] or ""
+                icon_url = row["icon_url"] or ""
+                expiry = row["expiry"] or 0
+                ts = _webkit_to_iso(expiry) if expiry else ""
+
+                message = f"Favicon cached for: {page_url}"
+
+                self._records_read += 1
+                yield {
+                    "fo_id": str(uuid.uuid4()),
+                    "artifact_type": "browser",
+                    "timestamp": ts,
+                    "timestamp_desc": "Favicon Cache Entry",
+                    "message": message,
+                    "browser": {
+                        "browser_type": "chromium",
+                        "data_type": "favicon",
+                        "page_url": page_url,
+                        "icon_url": icon_url,
+                    },
+                    "raw": {},
+                }
+            except Exception as exc:
+                self._records_skipped += 1
+                self.log.debug("Skipping chromium favicon row: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Chromium: Shortcuts (address bar autocomplete)
+    # ------------------------------------------------------------------
+
+    def _parse_chromium_shortcuts(
+        self, tables: set[str]
+    ) -> Generator[dict[str, Any], None, None]:
+        assert self._conn
+        if "omni_box_shortcuts" not in tables:
+            return
+        query = """
+            SELECT text, fill_into_edit, url, contents, last_access_time, number_of_hits
+            FROM omni_box_shortcuts
+            ORDER BY last_access_time ASC
+        """
+        try:
+            cursor = self._conn.execute(query)
+        except sqlite3.DatabaseError as exc:
+            self.log.debug("Chromium shortcuts query failed: %s", exc)
+            return
+
+        for row in cursor:
+            try:
+                ts = _webkit_to_iso(row["last_access_time"])
+                text = row["text"] or ""
+                url = row["url"] or ""
+                contents = row["contents"] or ""
+                hits = row["number_of_hits"] or 0
+
+                message = f"Address bar shortcut: {text} → {url}"
+
+                self._records_read += 1
+                yield {
+                    "fo_id": str(uuid.uuid4()),
+                    "artifact_type": "browser",
+                    "timestamp": ts,
+                    "timestamp_desc": "Shortcut Last Access",
+                    "message": message,
+                    "browser": {
+                        "browser_type": "chromium",
+                        "data_type": "shortcut",
+                        "typed_text": text,
+                        "fill_into_edit": row["fill_into_edit"] or "",
+                        "url": url,
+                        "display_text": contents,
+                        "hit_count": hits,
+                    },
+                    "raw": {},
+                }
+            except Exception as exc:
+                self._records_skipped += 1
+                self.log.debug("Skipping chromium shortcut row: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Chromium: Top Sites (most-visited thumbnail database)
+    # ------------------------------------------------------------------
+
+    def _parse_chromium_top_sites(
+        self, tables: set[str]
+    ) -> Generator[dict[str, Any], None, None]:
+        assert self._conn
+        if "top_sites" not in tables:
+            return
+        query = """
+            SELECT url, url_rank, title, redirects
+            FROM top_sites
+            ORDER BY url_rank ASC
+        """
+        try:
+            cursor = self._conn.execute(query)
+        except sqlite3.DatabaseError as exc:
+            self.log.debug("Chromium top sites query failed: %s", exc)
+            return
+
+        for row in cursor:
+            try:
+                url = row["url"] or ""
+                title = row["title"] or ""
+                rank = row["url_rank"] or 0
+
+                message = f"Top site #{rank}: {title or url}"
+
+                self._records_read += 1
+                yield {
+                    "fo_id": str(uuid.uuid4()),
+                    "artifact_type": "browser",
+                    "timestamp": None,
+                    "timestamp_desc": "Top Site",
+                    "message": message,
+                    "browser": {
+                        "browser_type": "chromium",
+                        "data_type": "top_site",
+                        "url": url,
+                        "title": title,
+                        "rank": rank,
+                        "redirects": row["redirects"] or "",
+                    },
+                    "raw": {},
+                }
+            except Exception as exc:
+                self._records_skipped += 1
+                self.log.debug("Skipping chromium top site row: %s", exc)
 
     # ------------------------------------------------------------------
     # Stats

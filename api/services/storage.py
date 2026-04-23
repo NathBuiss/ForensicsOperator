@@ -87,7 +87,7 @@ def upload_file(object_key: str, data: bytes, content_type: str = "application/o
         client.put_object(
             settings.MINIO_BUCKET,
             object_key,
-            io.BytesIO(data),   # fresh BytesIO on every attempt — no seek needed
+            io.BytesIO(data),
             length=len(data),
             content_type=content_type,
         )
@@ -108,11 +108,10 @@ def upload_fileobj(object_key: str, fileobj: IO, size: int) -> str:
     ensure_bucket()
 
     def _do():
-        # Seek back to start so every attempt uploads the full file.
         try:
             fileobj.seek(0)
         except (AttributeError, OSError):
-            pass  # non-seekable stream (shouldn't normally happen for uploads)
+            pass
         client.put_object(
             settings.MINIO_BUCKET,
             object_key,
@@ -136,6 +135,65 @@ def download_fileobj(object_key: str) -> bytes:
             resp.release_conn()
         except Exception:
             pass
+
+
+def delete_object(object_key: str) -> None:
+    """Remove an object from MinIO (no-op if it doesn't exist)."""
+    client = get_minio()
+    _retry(lambda: client.remove_object(settings.MINIO_BUCKET, object_key))
+    logger.info("Deleted MinIO object: %s", object_key)
+
+
+def delete_case_objects(case_id: str) -> int:
+    """
+    Delete ALL MinIO objects under cases/{case_id}/ by prefix.
+    
+    Uses wildcard removal which is much faster than listing + batch deleting
+    for cases with thousands of objects.
+    
+    Returns count of objects deleted (approximate for wildcard delete).
+    """
+    client = get_minio()
+    prefix = f"cases/{case_id}/"
+    
+    # First, count objects to report
+    try:
+        objects = list(client.list_objects(settings.MINIO_BUCKET, prefix=prefix, recursive=True))
+        count = len(objects)
+    except Exception as exc:
+        logger.warning("Failed to count objects for case %s: %s", case_id, exc)
+        count = 0
+    
+    if count == 0:
+        return 0
+    
+    # For large deletions, use remove_objects with generator (more efficient)
+    try:
+        from minio.deleteobjects import DeleteObject
+        
+        def object_generator():
+            for obj in client.list_objects(settings.MINIO_BUCKET, prefix=prefix, recursive=True):
+                yield DeleteObject(obj.object_name)
+        
+        errors = list(client.remove_objects(settings.MINIO_BUCKET, object_generator()))
+        if errors:
+            logger.warning("MinIO prefix delete %s: %d errors", prefix, len(errors))
+        
+        logger.info("Deleted %d MinIO objects under %s", count, prefix)
+        return count
+        
+    except Exception as exc:
+        logger.warning("MinIO delete failed for case %s: %s", case_id, exc)
+        # Fallback: try with list (slower but more reliable)
+        try:
+            keys = [o.object_name for o in objects]
+            errors = list(client.remove_objects(
+                settings.MINIO_BUCKET,
+                [DeleteObject(k) for k in keys],
+            ))
+            return len(keys) - len(errors)
+        except Exception:
+            return 0
 
 
 def get_presigned_url(object_key: str, expires_seconds: int = 3600) -> str:

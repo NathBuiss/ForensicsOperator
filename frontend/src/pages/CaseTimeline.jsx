@@ -1,18 +1,38 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate, useLocation, useSearchParams } from 'react-router-dom'
 import {
   Upload, Search, Bell, X, ChevronRight, AlertTriangle,
   CheckCircle, Clock, Database, Loader2, Shield,
   Cpu, RefreshCw, Plus, Download, Play, Terminal,
   AlertCircle, ChevronDown, FileCode, ExternalLink,
   Flag, Filter, Sparkles, FileText,
+  Monitor, HardDrive, Globe, Brain,
+  Binary, Bug, Network, FileImage, TextSearch, Tag,
 } from 'lucide-react'
+
+const MOD_CATEGORY_ICONS = {
+  'Threat Hunting':     <Shield     size={13} className="text-red-500     flex-shrink-0" />,
+  'Malware Detection':  <Bug        size={13} className="text-red-400     flex-shrink-0" />,
+  'Binary Analysis':    <Binary     size={13} className="text-orange-500  flex-shrink-0" />,
+  'Windows':            <Monitor    size={13} className="text-sky-500     flex-shrink-0" />,
+  'Memory Forensics':   <Brain      size={13} className="text-purple-500  flex-shrink-0" />,
+  'Disk Forensics':     <HardDrive  size={13} className="text-amber-500   flex-shrink-0" />,
+  'Browser Forensics':  <Globe      size={13} className="text-blue-500    flex-shrink-0" />,
+  'Network':            <Network    size={13} className="text-teal-500    flex-shrink-0" />,
+  'Threat Intelligence':<Tag        size={13} className="text-pink-500    flex-shrink-0" />,
+  'Metadata Extraction':<FileImage  size={13} className="text-indigo-500  flex-shrink-0" />,
+  'Search':             <TextSearch size={13} className="text-gray-400    flex-shrink-0" />,
+}
+const MOD_CATEGORY_ORDER = [
+  'Threat Hunting', 'Malware Detection', 'Binary Analysis', 'Windows',
+  'Memory Forensics', 'Disk Forensics', 'Browser Forensics', 'Network',
+  'Threat Intelligence', 'Metadata Extraction', 'Search',
+]
 import { api } from '../api/client'
 import Timeline from './Timeline'
-import Ingest from './Ingest'
-import CollectorModal from '../components/CollectorModal'
 import AlertRules from './AlertRules'
 import CaseNotes from './CaseNotes'
+import IngestPanel from '../components/IngestPanel'
 
 // ── Artifact badge colours ────────────────────────────────────────────────────
 const ARTIFACT_BADGE = {
@@ -48,34 +68,6 @@ const MODULE_NAMES = {
   exiftool:    'ExifTool',
   bulk_extractor: 'Bulk Extractor',
   capa:        'CAPA',
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// IngestModal
-// ─────────────────────────────────────────────────────────────────────────────
-function IngestModal({ caseId, onClose, onComplete }) {
-  return (
-    <div className="panel-backdrop" onClick={onClose}>
-      <div
-        className="absolute right-0 top-0 h-full w-[520px] bg-white border-l border-gray-200 flex flex-col"
-        style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.10)' }}
-        onClick={e => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
-          <div className="flex items-center gap-2">
-            <Upload size={16} className="text-brand-accent" />
-            <span className="font-semibold text-brand-text">Add Evidence</span>
-          </div>
-          <button onClick={onClose} className="btn-ghost p-1.5 rounded-lg">
-            <X size={16} />
-          </button>
-        </div>
-        <div className="flex-1 overflow-y-auto">
-          <Ingest caseId={caseId} onComplete={onComplete} />
-        </div>
-      </div>
-    </div>
-  )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -131,7 +123,7 @@ function AlertMatchCard({ match, caseId, navigate }) {
   const rule = match.rule || {}
 
   function goToSearch(q) {
-    navigate(`/cases/${caseId}/search`, { state: { pivotQuery: q } })
+    navigate(`/cases/${caseId}`, { state: { pivotQuery: q } })
   }
 
   return (
@@ -207,6 +199,57 @@ function AlertMatchCard({ match, caseId, navigate }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ReIngestButton — re-submits a module output artifact as a new ingest job
+// ─────────────────────────────────────────────────────────────────────────────
+function ReIngestButton({ caseId, runId, filename }) {
+  const [state, setState] = useState('idle')  // 'idle' | 'loading' | 'done' | 'error'
+  const [jobId, setJobId] = useState(null)
+
+  async function handleReIngest(e) {
+    e.stopPropagation()
+    if (state !== 'idle') return
+    setState('loading')
+    try {
+      const res = await api.modules.reingestArtifact(caseId, runId, filename)
+      setJobId(res.job_id)
+      setState('done')
+    } catch {
+      setState('error')
+      setTimeout(() => setState('idle'), 3000)
+    }
+  }
+
+  if (state === 'done') {
+    return (
+      <span className="flex items-center gap-1 text-[10px] text-green-600 bg-green-50 rounded px-1.5 py-1">
+        <CheckCircle size={9} />
+        Ingesting
+      </span>
+    )
+  }
+
+  return (
+    <button
+      onClick={handleReIngest}
+      disabled={state === 'loading'}
+      className={`flex items-center gap-1 text-[10px] rounded px-1.5 py-1 transition-all ${
+        state === 'error'
+          ? 'text-red-500 bg-red-50'
+          : 'text-gray-400 hover:text-violet-600 hover:bg-violet-50'
+      }`}
+      title={`Re-ingest ${filename} into timeline`}
+    >
+      {state === 'loading'
+        ? <><Loader2 size={9} className="animate-spin" /> Re-ingesting…</>
+        : state === 'error'
+          ? <><AlertCircle size={9} /> Failed</>
+          : <><Plus size={9} /> Re-ingest</>
+      }
+    </button>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // LevelGroup — one severity accordion inside ModuleRunCard
 // ─────────────────────────────────────────────────────────────────────────────
 const LEVEL_HEADER_BG = {
@@ -217,7 +260,7 @@ const LEVEL_HEADER_BG = {
   informational: 'bg-gray-50',
 }
 
-function LevelGroup({ level, hits, totalInLevel, defaultOpen, caseId, navigate, buildQuery }) {
+function LevelGroup({ level, hits, totalInLevel, defaultOpen, caseId, runId, navigate, buildQuery }) {
   const [open, setOpen]       = useState(defaultOpen)
   const [expandedHit, setExpandedHit] = useState(null)
   const headerBg = LEVEL_HEADER_BG[level] || 'bg-gray-50'
@@ -282,19 +325,38 @@ function LevelGroup({ level, hits, totalInLevel, defaultOpen, caseId, navigate, 
                       </p>
                     )}
                   </div>
-                  {/* Search pivot */}
-                  <button
-                    onClick={() =>
-                      navigate(`/cases/${caseId}/search`, {
-                        state: { pivotQuery: buildQuery(hit) },
-                      })
-                    }
-                    className="flex-shrink-0 opacity-0 group-hover:opacity-100 flex items-center gap-1 text-[10px] text-gray-400 hover:text-brand-accent hover:bg-brand-accentlight rounded px-1.5 py-1 transition-all"
-                    title="Find matching events in Search"
-                  >
-                    <ExternalLink size={9} />
-                    Search
-                  </button>
+                  {/* Action buttons — appear on row hover */}
+                  <div className="flex-shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-all">
+                    {/* Download + Re-ingest buttons for module output artifacts (e.g. de4dot) */}
+                    {(() => {
+                      try {
+                        const det = JSON.parse(hit.details_raw || '{}')
+                        if (det.download_key && det.download_name && runId) {
+                          const dlUrl = `/api/v1/cases/${caseId}/modules/${runId}/artifacts/${encodeURIComponent(det.download_name)}`
+                          return (
+                            <>
+                              <a
+                                href={dlUrl}
+                                download={det.download_name}
+                                className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded px-1.5 py-1 transition-all"
+                                title={`Download: ${det.download_name}`}
+                                onClick={e => e.stopPropagation()}
+                              >
+                                <Download size={9} />
+                                Download
+                              </a>
+                              <ReIngestButton
+                                caseId={caseId}
+                                runId={runId}
+                                filename={det.download_name}
+                              />
+                            </>
+                          )
+                        }
+                      } catch { /* ignore JSON parse errors */ }
+                      return null
+                    })()}
+                  </div>
                 </div>
               </div>
             )
@@ -316,7 +378,11 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
   const [sourceSearch, setSourceSearch]     = useState('')
   const [loading, setLoading]               = useState(true)
   const [running, setRunning]               = useState(false)
+  const [runningAll, setRunningAll]         = useState(false)
+  const [runAllProgress, setRunAllProgress] = useState(null)  // null | {done, total}
   const [error, setError]                   = useState(null)
+  const [moduleSearch, setModuleSearch]     = useState('')
+  const moduleSearchRef                     = useRef(null)
 
   // YARA-specific state
   const [yaraRules, setYaraRules]                   = useState('')
@@ -324,18 +390,59 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
   const [yaraValid, setYaraValid]                   = useState(null)  // null | {valid, error}
   const [yaraLibraryRules, setYaraLibraryRules]     = useState([])
   const [selectedYaraIds, setSelectedYaraIds]       = useState(new Set())
-  const [grepPatterns, setGrepPatterns]             = useState('')
   const yaraDebounce                                = useRef(null)
 
+  // Grep-specific state
+  const [grepPatterns, setGrepPatterns]   = useState('')
+  const [grepPresets, setGrepPresets]     = useState(() => {
+    try { return JSON.parse(localStorage.getItem('fo_grep_presets') || '[]') }
+    catch { return [] }
+  })
+  const [grepPresetName, setGrepPresetName] = useState('')
+  const [showPresetInput, setShowPresetInput] = useState(false)
+
+  function saveGrepPreset() {
+    const name = grepPresetName.trim()
+    if (!name || !grepPatterns.trim()) return
+    const preset = { id: Date.now().toString(), name, patterns: grepPatterns.trim() }
+    const updated = [...grepPresets, preset]
+    setGrepPresets(updated)
+    localStorage.setItem('fo_grep_presets', JSON.stringify(updated))
+    setGrepPresetName('')
+    setShowPresetInput(false)
+  }
+
+  function deleteGrepPreset(id) {
+    const updated = grepPresets.filter(p => p.id !== id)
+    setGrepPresets(updated)
+    localStorage.setItem('fo_grep_presets', JSON.stringify(updated))
+  }
+
+  function loadGrepPreset(preset) {
+    setGrepPatterns(preset.patterns)
+  }
+
   useEffect(() => {
-    Promise.all([api.modules.list(), api.modules.listSources(caseId)])
-      .then(([modResp, srcResp]) => {
-        // Only show available modules
-        setModules((modResp.modules || []).filter(m => m.available))
-        setSources(srcResp.sources || [])
+    const settled = Promise.allSettled([api.modules.list(), api.modules.listSources(caseId)])
+    const timer   = new Promise(resolve => setTimeout(() => resolve('__timeout__'), 8000))
+
+    Promise.race([settled, timer]).then(result => {
+      if (result === '__timeout__') {
+        setError('Request timed out — the API may be starting up. Close and try again.')
         setLoading(false)
-      })
-      .catch(err => { setError(err.message); setLoading(false) })
+        return
+      }
+      const [modResult, srcResult] = result
+      if (modResult.status === 'fulfilled') {
+        setModules((modResult.value.modules || []).filter(m => m.available))
+      } else {
+        setError('Could not load modules: ' + (modResult.reason?.message || 'server error'))
+      }
+      if (srcResult.status === 'fulfilled') {
+        setSources(srcResult.value.sources || [])
+      }
+      setLoading(false)
+    })
   }, [caseId])
 
   // Load YARA library rules when YARA module is selected
@@ -380,6 +487,33 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
       )
     : compatibleSources
 
+  // Group modules by category for the left panel
+  const groupedModules = useMemo(() => {
+    const q = moduleSearch.toLowerCase().trim()
+    const filtered = q
+      ? modules.filter(m =>
+          (m.name || '').toLowerCase().includes(q) ||
+          (m.description || '').toLowerCase().includes(q) ||
+          (m.category || '').toLowerCase().includes(q) ||
+          (m.tags || []).some(t => t.toLowerCase().includes(q))
+        )
+      : modules
+    const groups = {}
+    filtered.forEach(m => {
+      const cat = m.category || 'Other'
+      if (!groups[cat]) groups[cat] = []
+      groups[cat].push(m)
+    })
+    return Object.entries(groups).sort(([a], [b]) => {
+      const ai = MOD_CATEGORY_ORDER.indexOf(a)
+      const bi = MOD_CATEGORY_ORDER.indexOf(b)
+      if (ai !== -1 && bi !== -1) return ai - bi
+      if (ai !== -1) return -1
+      if (bi !== -1) return 1
+      return a.localeCompare(b)
+    })
+  }, [modules, moduleSearch])
+
   function toggleJob(jobId) {
     setSelectedJobs(prev => {
       const next = new Set(prev)
@@ -398,6 +532,8 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
     setYaraRules('')
     setYaraValid(null)
     setGrepPatterns('')
+    setShowPresetInput(false)
+    setGrepPresetName('')
   }
 
   async function handleRun() {
@@ -415,8 +551,10 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
         params.patterns = grepPatterns.split('\n').map(p => p.trim()).filter(Boolean)
       }
       const run = await api.modules.createRun(caseId, {
-        module_id: selectedModule.id,
-        job_ids:   [...selectedJobs],
+        module_id:    selectedModule.id,
+        source_files: sources
+          .filter(s => selectedJobs.has(s.job_id))
+          .map(s => ({ job_id: s.job_id, filename: s.original_filename, minio_key: s.minio_object_key })),
         params,
       })
       onRunCreated(run)
@@ -426,26 +564,100 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
     }
   }
 
+  async function handleRunAll() {
+    if (runningAll || sources.length === 0) return
+    const eligible = modules.filter(m => {
+      // Skip modules that require external service credentials (API keys, sandbox URLs)
+      if (m.config_keys?.length > 0) return false
+      const extList  = m.input_extensions || []
+      const nameList = m.input_filenames  || []
+      const acceptsAll = extList.length === 0 && nameList.length === 0
+      if (acceptsAll) return sources.length > 0
+      const hasCompatible = sources.some(s => {
+        const fnameLower = (s.original_filename || '').toLowerCase()
+        if (extList.some(e => e === '*' || e === '.*')) return true
+        const extMatch  = extList.some(ext => fnameLower.endsWith(ext.toLowerCase()))
+        const basename  = fnameLower.split('/').pop().split('\\').pop()
+        const nameMatch = nameList.some(fn => basename === fn.toLowerCase())
+        return extMatch || nameMatch
+      })
+      return hasCompatible
+    })
+    if (eligible.length === 0) return
+    if (!window.confirm(
+      `Launch all ${eligible.length} applicable module${eligible.length > 1 ? 's' : ''} against their compatible files?\n\n` +
+      eligible.map(m => `• ${m.name}`).join('\n')
+    )) return
+
+    setRunningAll(true)
+    setRunAllProgress({ done: 0, total: eligible.length })
+    setError(null)
+
+    let done = 0
+    for (const mod of eligible) {
+      const extList  = mod.input_extensions || []
+      const nameList = mod.input_filenames  || []
+      const acceptsAll = extList.length === 0 && nameList.length === 0
+      const jobIds = sources
+        .filter(s => {
+          if (acceptsAll) return true
+          if (extList.some(e => e === '*' || e === '.*')) return true
+          const fnameLower = (s.original_filename || '').toLowerCase()
+          const extMatch  = extList.some(ext => fnameLower.endsWith(ext.toLowerCase()))
+          const basename  = fnameLower.split('/').pop().split('\\').pop()
+          const nameMatch = nameList.some(fn => basename === fn.toLowerCase())
+          return extMatch || nameMatch
+        })
+        .map(s => s.job_id)
+      if (jobIds.length === 0) { done++; setRunAllProgress({ done, total: eligible.length }); continue }
+      try {
+        const resolvedFiles = sources
+          .filter(s => jobIds.includes(s.job_id))
+          .map(s => ({ job_id: s.job_id, filename: s.original_filename, minio_key: s.minio_object_key }))
+        const run = await api.modules.createRun(caseId, { module_id: mod.id, source_files: resolvedFiles, params: {} })
+        onRunCreated(run)
+      } catch {
+        // best-effort — don't abort remaining modules on one failure
+      }
+      done++
+      setRunAllProgress({ done, total: eligible.length })
+    }
+    setRunningAll(false)
+    setRunAllProgress(null)
+    onClose()
+  }
+
   const yaraInvalid = selectedModule?.id === 'yara' && yaraValid && !yaraValid.valid
-  const canRun = selectedModule && selectedJobs.size > 0 && !running && !yaraInvalid
+  const canRun = selectedModule && selectedJobs.size > 0 && !running && !yaraInvalid && !runningAll
 
   return (
     <div className="panel-backdrop" onClick={onClose}>
       <div
-        className="absolute right-0 top-0 h-full w-[800px] bg-white border-l border-gray-200 flex flex-col"
-        style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.10)' }}
+        className="absolute right-0 top-0 h-full w-[860px] bg-white border-l border-gray-200 flex flex-col"
+        style={{ boxShadow: '-4px 0 32px rgba(0,0,0,0.12)' }}
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
-          <div className="flex items-center gap-2">
-            <Play size={15} className="text-brand-accent" />
-            <span className="font-semibold text-brand-text">Run Analysis Module</span>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 bg-gray-50/60">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-xl bg-brand-accent/10 flex items-center justify-center">
+              <Play size={15} className="text-brand-accent" />
+            </div>
+            <div>
+              <p className="font-bold text-brand-text text-base leading-tight">Run Analysis Module</p>
+              <p className="text-[11px] text-gray-400 leading-tight mt-0.5">Select a module, pick source files, launch</p>
+            </div>
           </div>
           <button onClick={onClose} className="btn-ghost p-1.5 rounded-lg">
             <X size={16} />
           </button>
         </div>
+
+        {error && (
+          <div className="mx-6 mt-3 flex items-center gap-2 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex-shrink-0">
+            <AlertCircle size={13} className="flex-shrink-0" /> {error}
+          </div>
+        )}
 
         {loading ? (
           <div className="flex-1 flex items-center justify-center text-gray-400">
@@ -455,44 +667,81 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
           <div className="flex-1 flex overflow-hidden">
 
             {/* ── Left: module list ──────────────────────────────────────── */}
-            <div className="w-[280px] flex-shrink-0 border-r border-gray-100 flex flex-col bg-gray-50/50">
-              <div className="px-4 pt-4 pb-2">
-                <p className="section-title text-[11px] uppercase tracking-wider text-gray-400">Modules</p>
-              </div>
-              <div className="flex-1 overflow-y-auto px-3 pb-4 space-y-1.5">
-                {modules.map(mod => {
-                  const isSelected = selectedModule?.id === mod.id
-                  return (
-                    <button
-                      key={mod.id}
-                      onClick={() => selectModule(mod)}
-                      className={`w-full text-left p-3 rounded-xl border-2 transition-all ${
-                        isSelected
-                          ? 'border-brand-accent bg-brand-accentlight shadow-sm'
-                          : 'border-transparent bg-white hover:border-gray-200 hover:shadow-sm'
-                      }`}
-                    >
-                      <div className="flex items-start gap-2">
-                        <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 ${
-                          isSelected ? 'bg-brand-accent text-white' : 'bg-gray-100 text-gray-500'
-                        }`}>
-                          <Cpu size={13} />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="font-semibold text-xs text-brand-text">{mod.name}</p>
-                          <p className="text-[10px] text-gray-400 mt-0.5 line-clamp-2 leading-relaxed">
-                            {mod.description}
-                          </p>
-                          {(mod.input_extensions?.length > 0 || mod.input_filenames?.length > 0) && (
-                            <p className="text-[9px] text-gray-400 mt-1 font-mono truncate">
-                              {[...(mod.input_extensions || []), ...(mod.input_filenames || [])].slice(0, 6).join(' ')}
-                            </p>
-                          )}
-                        </div>
-                      </div>
+            <div className="w-[320px] flex-shrink-0 border-r border-gray-100 flex flex-col bg-gray-50/60">
+              {/* Search bar */}
+              <div className="px-3 pt-3 pb-2 flex-shrink-0">
+                <div className="relative">
+                  <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                  <input
+                    ref={moduleSearchRef}
+                    value={moduleSearch}
+                    onChange={e => setModuleSearch(e.target.value)}
+                    placeholder="Search modules…"
+                    className="input w-full text-xs py-2 pl-8 pr-7 bg-white rounded-xl"
+                  />
+                  {moduleSearch && (
+                    <button onClick={() => setModuleSearch('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                      <X size={11} />
                     </button>
-                  )
-                })}
+                  )}
+                </div>
+              </div>
+
+              {/* Categorized module list */}
+              <div className="flex-1 overflow-y-auto px-2.5 pb-4">
+                {groupedModules.length === 0 ? (
+                  <p className="text-xs text-gray-400 italic text-center py-8">No modules match</p>
+                ) : groupedModules.map(([category, mods]) => (
+                  <div key={category} className="mb-4">
+                    {/* Category header */}
+                    <div className="flex items-center gap-2 px-1 pt-3 pb-2 sticky top-0 bg-gray-50/95 backdrop-blur-sm z-10">
+                      <span className="flex items-center gap-1.5">
+                        {MOD_CATEGORY_ICONS[category]}
+                        <span className="text-[11px] font-bold uppercase tracking-widest text-gray-500">
+                          {category}
+                        </span>
+                      </span>
+                      <div className="flex-1 h-px bg-gray-200" />
+                      <span className="text-[10px] text-gray-400 flex-shrink-0">{mods.length}</span>
+                    </div>
+                    {/* Module cards in this category */}
+                    <div className="space-y-1">
+                      {mods.map(mod => {
+                        const isSelected = selectedModule?.id === mod.id
+                        return (
+                          <button
+                            key={mod.id}
+                            onClick={() => selectModule(mod)}
+                            className={`w-full text-left px-3 py-2.5 rounded-xl border transition-all ${
+                              isSelected
+                                ? 'border-brand-accent bg-brand-accentlight shadow-sm'
+                                : 'border-transparent hover:bg-white hover:border-gray-200 hover:shadow-sm'
+                            }`}
+                          >
+                            <p className={`font-semibold text-sm leading-tight ${isSelected ? 'text-brand-accent' : 'text-brand-text'}`}>
+                              {mod.name}
+                            </p>
+                            <p className={`text-[11px] mt-1 line-clamp-2 leading-relaxed ${isSelected ? 'text-brand-accent/70' : 'text-gray-500'}`}>
+                              {mod.description}
+                            </p>
+                            {(mod.tags || []).length > 0 && (
+                              <div className="flex flex-wrap gap-1 mt-1.5">
+                                {mod.tags.slice(0, 4).map(tag => (
+                                  <span key={tag} className={`px-1.5 py-px rounded text-[9px] font-medium ${
+                                    isSelected ? 'bg-brand-accent/10 text-brand-accent/80' : 'bg-gray-100 text-gray-500'
+                                  }`}>
+                                    {tag}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
 
@@ -587,18 +836,76 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
 
                   {/* ── Grep search patterns ─────────────────────────────── */}
                   {selectedModule.id === 'grep_search' && (
-                    <div className="flex-1 flex flex-col px-4 pb-4 min-h-0">
-                      <p className="section-title text-[11px] uppercase tracking-wider text-gray-400 mb-2 flex-shrink-0">
-                        Search Patterns
-                        <span className="ml-1.5 font-normal normal-case text-gray-400">(one regex per line — leave empty for built-in IOC patterns)</span>
-                      </p>
-                      <textarea
-                        value={grepPatterns}
-                        onChange={e => setGrepPatterns(e.target.value)}
-                        placeholder={"192\\.168\\.\\d+\\.\\d+\ncmd\\.exe\nbase64\\.b64decode"}
-                        spellCheck={false}
-                        className="flex-1 w-full min-h-0 px-3 py-2.5 text-[11px] font-mono border border-gray-200 bg-gray-950 text-green-300 rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-brand-accent/30 focus:border-brand-accent leading-relaxed"
-                      />
+                    <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+
+                      {/* Saved presets */}
+                      {grepPresets.length > 0 && (
+                        <div className="px-4 pt-2 pb-2 flex-shrink-0 border-b border-gray-100">
+                          <p className="text-[10px] uppercase tracking-wider text-gray-400 font-medium mb-1.5">
+                            Saved Presets
+                          </p>
+                          <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                            {grepPresets.map(preset => (
+                              <div key={preset.id} className="flex items-center gap-1 bg-gray-100 hover:bg-brand-accentlight border border-gray-200 hover:border-brand-accent/30 rounded-lg px-2 py-1 group transition-colors">
+                                <button
+                                  onClick={() => loadGrepPreset(preset)}
+                                  className="text-[11px] text-gray-700 group-hover:text-brand-text font-medium"
+                                  title={`Load: ${preset.patterns.split('\n').slice(0,3).join(', ')}`}
+                                >
+                                  {preset.name}
+                                </button>
+                                <button
+                                  onClick={() => deleteGrepPreset(preset.id)}
+                                  className="text-gray-300 hover:text-red-500 transition-colors ml-0.5"
+                                  title="Delete preset"
+                                >
+                                  <X size={9} />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Pattern editor */}
+                      <div className="flex-1 flex flex-col px-4 pt-2 pb-3 min-h-0">
+                        <div className="flex items-center gap-2 mb-1.5 flex-shrink-0">
+                          <p className="text-[10px] uppercase tracking-wider text-gray-400 font-medium flex-1">
+                            Patterns
+                            <span className="normal-case font-normal text-gray-400 ml-1">(one regex per line)</span>
+                          </p>
+                          {!showPresetInput ? (
+                            <button
+                              onClick={() => setShowPresetInput(true)}
+                              disabled={!grepPatterns.trim()}
+                              className="text-[10px] text-gray-400 hover:text-brand-accent disabled:opacity-40 transition-colors"
+                              title="Save current patterns as a preset"
+                            >
+                              + Save preset
+                            </button>
+                          ) : (
+                            <div className="flex items-center gap-1">
+                              <input
+                                autoFocus
+                                value={grepPresetName}
+                                onChange={e => setGrepPresetName(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter') saveGrepPreset(); if (e.key === 'Escape') setShowPresetInput(false) }}
+                                placeholder="Preset name…"
+                                className="text-[10px] border border-gray-200 rounded px-1.5 py-0.5 w-24 focus:outline-none focus:border-brand-accent"
+                              />
+                              <button onClick={saveGrepPreset} className="text-[10px] text-green-600 hover:text-green-700 font-medium">Save</button>
+                              <button onClick={() => setShowPresetInput(false)} className="text-[10px] text-gray-400 hover:text-gray-600">✕</button>
+                            </div>
+                          )}
+                        </div>
+                        <textarea
+                          value={grepPatterns}
+                          onChange={e => setGrepPatterns(e.target.value)}
+                          placeholder={"Leave empty to run built-in IOC patterns:\n  URLs, IPs, MD5/SHA hashes,\n  powershell, cmd.exe, certutil…\n\nOr enter your own (one per line):\n  192\\.168\\.\\d+\\.\\d+\n  base64\\.b64decode\n  C:\\\\Windows\\\\Temp"}
+                          spellCheck={false}
+                          className="flex-1 w-full min-h-0 px-3 py-2.5 text-[11px] font-mono border border-gray-200 bg-gray-950 text-green-300 rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-brand-accent/30 focus:border-brand-accent leading-relaxed"
+                        />
+                      </div>
                     </div>
                   )}
 
@@ -677,13 +984,30 @@ function ModuleLaunchModal({ caseId, onClose, onRunCreated }) {
 
         {/* Footer */}
         <div className="border-t border-gray-200 px-5 py-3.5 flex items-center gap-3 bg-gray-50/50">
+          {/* Launch all modules button */}
+          <button
+            onClick={handleRunAll}
+            disabled={runningAll || running || sources.length === 0}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl font-medium text-xs border transition-all ${
+              runningAll || running || sources.length === 0
+                ? 'border-gray-200 text-gray-400 cursor-not-allowed bg-white'
+                : 'border-gray-300 text-gray-600 hover:border-brand-accent hover:text-brand-accent bg-white'
+            }`}
+            title="Launch every applicable module against its compatible files"
+          >
+            {runningAll
+              ? <><Loader2 size={12} className="animate-spin" /> {runAllProgress ? `${runAllProgress.done}/${runAllProgress.total}` : 'Launching…'}</>
+              : <><Sparkles size={12} /> Launch all modules</>
+            }
+          </button>
+
           {error && (
             <p className="flex-1 text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2 truncate" title={error}>
               {error}
             </p>
           )}
           <div className="ml-auto flex items-center gap-2">
-            {selectedModule && selectedJobs.size === 0 && (
+            {selectedModule && selectedJobs.size === 0 && !runningAll && (
               <p className="text-xs text-gray-400">Select at least one file</p>
             )}
             <button
@@ -896,16 +1220,27 @@ function ModuleRunCard({
   // Auto-open completed cards that have detections matching the active filter
   const [open, setOpen] = useState(hasFilteredHits && run.status === 'COMPLETED')
 
-  // Build smart Lucene pivot query for a hit
+  // Build smart Lucene pivot query for a hit.
+  // EVTX modules (hayabusa, wintriage) → event_id + hostname
+  // Event-query modules (browser_report, access_log) → artifact_type
+  // File-scan modules (yara, grep, de4dot, pe_analysis…) → rule_title message search
+  // computer = hostname ONLY when event_id is also present (EVTX hits)
+  const MODULE_ARTIFACT_TYPES = {
+    browser_report:      'browser',
+    access_log_analysis: 'access_log',
+    hindsight:           'browser',
+    cti_match:           null,
+  }
   function buildQuery(hit) {
-    const parts = []
-    if (hit.event_id) parts.push(`evtx.event_id:${hit.event_id}`)
-    if (hit.computer) parts.push(`host.hostname:"${hit.computer}"`)
-    if (parts.length === 0) {
-      const title = (hit.rule_title || '').replace(/"/g, '')
-      return title ? `message:"${title}"` : '*'
+    if (hit.event_id) {
+      const parts = [`evtx.event_id:${hit.event_id}`]
+      if (hit.computer) parts.push(`host.hostname:"${hit.computer}"`)
+      return parts.join(' AND ')
     }
-    return parts.join(' AND ')
+    const artType = MODULE_ARTIFACT_TYPES[run.module_id]
+    if (artType) return `artifact_type:${artType}`
+    const title = (hit.rule_title || '').replace(/"/g, '')
+    return title ? `message:"${title}"` : '*'
   }
 
   return (
@@ -1004,6 +1339,7 @@ function ModuleRunCard({
               totalInLevel={byLevel[lvl] || 0}
               defaultOpen={lvl === 'critical' || lvl === 'high'}
               caseId={caseId}
+              runId={run.run_id}
               navigate={navigate}
               buildQuery={buildQuery}
             />
@@ -1077,10 +1413,11 @@ function ModuleRunCard({
 // ─────────────────────────────────────────────────────────────────────────────
 // ModuleRunsPanel
 // ─────────────────────────────────────────────────────────────────────────────
-function ModuleRunsPanel({ caseId, onClose }) {
+function ModuleRunsPanel({ caseId, onClose, alertResults }) {
   const navigate              = useNavigate()
   const [runs, setRuns]       = useState([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState(null)
 
   const [showFilters, setShowFilters]   = useState(false)
 
@@ -1101,8 +1438,8 @@ function ModuleRunsPanel({ caseId, onClose }) {
 
   const fetchRuns = useCallback(() => {
     api.modules.listRuns(caseId)
-      .then(r => { setRuns(r.runs || []); setLoading(false) })
-      .catch(() => setLoading(false))
+      .then(r => { setRuns(r.runs || []); setLoadError(null); setLoading(false) })
+      .catch(e => { setLoadError(e.message); setLoading(false) })
   }, [caseId])
 
   useEffect(() => { fetchRuns() }, [fetchRuns])
@@ -1464,6 +1801,44 @@ function ModuleRunsPanel({ caseId, onClose }) {
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
+
+          {/* ── Alert rule results (injected from "Run Detection Rules") ── */}
+          {alertResults && (
+            <div className="card overflow-hidden border-l-4 border-l-red-400">
+              <div className="px-4 py-3 bg-red-50 border-b border-red-100 flex items-center gap-2">
+                <Shield size={14} className="text-red-500 flex-shrink-0" />
+                <span className="font-semibold text-sm text-red-700">Detection Rules</span>
+                <span className="badge bg-red-100 text-red-700 ml-auto">
+                  {alertResults.rules_checked ?? 0} rules · {alertResults.matches?.length ?? 0} hits
+                </span>
+              </div>
+              <div className="divide-y divide-gray-100">
+                {(alertResults.matches?.length ?? 0) === 0 ? (
+                  <div className="px-4 py-6 text-center text-sm text-green-600 flex items-center justify-center gap-2">
+                    <CheckCircle size={16} /> No alerts triggered
+                  </div>
+                ) : alertResults.matches.map((m, i) => {
+                  const rule = m.rule || {}
+                  return (
+                    <div key={i} className="px-4 py-3">
+                      <div className="flex items-start gap-2">
+                        <AlertTriangle size={13} className="text-red-400 flex-shrink-0 mt-0.5" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-brand-text truncate">{rule.name}</p>
+                          {rule.description && <p className="text-xs text-gray-500 truncate">{rule.description}</p>}
+                          <div className="flex items-center gap-2 mt-1 flex-wrap">
+                            <span className="badge bg-red-100 text-red-700">{m.match_count} hits</span>
+                            {rule.artifact_type && <span className={`badge ${ARTIFACT_BADGE[rule.artifact_type] || 'badge-generic'}`}>{rule.artifact_type}</span>}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
           {loading ? (
             <div className="flex items-center justify-center py-16 text-gray-400">
               <Loader2 size={20} className="animate-spin mr-2" />
@@ -1472,10 +1847,15 @@ function ModuleRunsPanel({ caseId, onClose }) {
           ) : runs.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <Cpu size={40} className="text-gray-300 mb-3" />
-              <p className="font-medium text-gray-500">No module runs yet</p>
-              <p className="text-sm text-gray-400 mt-1">
-                Launch a module to analyse ingested files
-              </p>
+              {loadError
+                ? <p className="text-xs text-red-400">{loadError}</p>
+                : <>
+                    <p className="font-medium text-gray-500">No module runs yet</p>
+                    <p className="text-sm text-gray-400 mt-1">
+                      Launch a module to analyse ingested files
+                    </p>
+                  </>
+              }
             </div>
           ) : filteredRuns.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-center">
@@ -1523,6 +1903,9 @@ function ModuleRunsPanel({ caseId, onClose }) {
 export default function CaseTimeline() {
   const { caseId } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
+  const [searchParams] = useSearchParams()
+  const initialQuery = location.state?.pivotQuery || searchParams.get('q') || ''
 
   const [caseData, setCaseData]             = useState(null)
   const [loading, setLoading]               = useState(true)
@@ -1531,9 +1914,50 @@ export default function CaseTimeline() {
   const [runningAlerts, setRunningAlerts]   = useState(false)
   const [showModules, setShowModules]       = useState(false)
   const [showModuleRuns, setShowModuleRuns] = useState(false)
-  const [showCollector, setShowCollector]   = useState(false)
   const [showAlertRules, setShowAlertRules] = useState(false)
   const [showNotes, setShowNotes]           = useState(false)
+  const [jobSummary, setJobSummary]         = useState({ active: 0, failed: 0, eventsPerSec: null, totalEvents: 0 })
+  const prevJobSnap                         = useRef(null)
+
+  // Poll job counts + compute live events/s rate when the IngestPanel is closed.
+  // Suspended while the panel is open — IngestPanel runs its own 3 s batch poller.
+  useEffect(() => {
+    if (showIngest) return
+    prevJobSnap.current = null  // discard stale baseline on each poller start
+    const ACTIVE = new Set(['RUNNING', 'PENDING', 'UPLOADING'])
+    async function fetchSummary() {
+      try {
+        const r    = await api.ingest.listJobs(caseId)
+        const jobs = r.jobs || []
+        const now  = Date.now()
+
+        // Sum events_indexed only across RUNNING jobs so that already-completed
+        // jobs don't inflate the baseline and produce a false rate spike.
+        const totalEvents = jobs
+          .filter(j => j.status === 'RUNNING')
+          .reduce((s, j) => s + (parseInt(j.events_indexed) || 0), 0)
+
+        // Rate is undefined on the first sample (no baseline to diff against).
+        let eventsPerSec = null
+        if (prevJobSnap.current !== null) {
+          const elapsed = (now - prevJobSnap.current.ts) / 1000
+          if (elapsed > 0)
+            eventsPerSec = Math.max(0, Math.round((totalEvents - prevJobSnap.current.total) / elapsed))
+        }
+        prevJobSnap.current = { total: totalEvents, ts: now }
+
+        setJobSummary({
+          active:      jobs.filter(j => ACTIVE.has(j.status)).length,
+          failed:      jobs.filter(j => j.status === 'FAILED').length,
+          totalEvents,
+          eventsPerSec,
+        })
+      } catch { /* silent */ }
+    }
+    fetchSummary()
+    const id = setInterval(fetchSummary, 3000)
+    return () => clearInterval(id)
+  }, [caseId, showIngest])
 
   const loadCase = useCallback(() => {
     api.cases.get(caseId)
@@ -1550,6 +1974,9 @@ export default function CaseTimeline() {
     try {
       const r = await api.alertRules.runLibrary(caseId)
       setAlertResults(r)
+      // Show results in the module runs panel alongside module outputs
+      setShowModules(false)
+      setShowModuleRuns(true)
     } catch (err) {
       console.error('Alert run failed:', err)
     } finally {
@@ -1613,14 +2040,24 @@ export default function CaseTimeline() {
           >
             <Upload size={14} />
             Ingest
-          </button>
-
-          <button
-            onClick={() => navigate(`/cases/${caseId}/search`)}
-            className="btn-outline"
-          >
-            <Search size={14} />
-            Search
+            {jobSummary.active > 0 && (
+              <span className="ml-1 flex items-center gap-1 bg-white/20 rounded px-1.5 py-px text-[10px] font-mono leading-none">
+                <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse flex-shrink-0" />
+                {jobSummary.active}
+                {jobSummary.eventsPerSec !== null && (
+                  <span className="opacity-75">
+                    {' · '}{jobSummary.eventsPerSec > 0
+                      ? `${jobSummary.eventsPerSec.toLocaleString()} ev/s`
+                      : 'indexing…'}
+                  </span>
+                )}
+              </span>
+            )}
+            {jobSummary.failed > 0 && (
+              <span className="ml-1 bg-red-500 rounded px-1.5 py-px text-[10px] font-mono">
+                ⚠ {jobSummary.failed}
+              </span>
+            )}
           </button>
 
           <button
@@ -1647,15 +2084,6 @@ export default function CaseTimeline() {
             Modules
           </button>
 
-          <button
-            onClick={() => setShowCollector(true)}
-            className="btn-outline"
-            title="Download artifact collector pre-configured for this case"
-          >
-            <Download size={14} />
-            Collector
-          </button>
-
           {/* View runs shortcut — only when runs panel is closed */}
           {!showModuleRuns && (
             <button
@@ -1671,15 +2099,15 @@ export default function CaseTimeline() {
 
       {/* ── Timeline ─────────────────────────────────────────────────────── */}
       <div className="flex-1 overflow-hidden">
-        <Timeline caseId={caseId} artifactTypes={artifactTypes} />
+        <Timeline key={initialQuery || '_'} caseId={caseId} artifactTypes={artifactTypes} initialQuery={initialQuery} />
       </div>
 
       {/* ── Modals / Panels ───────────────────────────────────────────────── */}
       {showIngest && (
-        <IngestModal
+        <IngestPanel
           caseId={caseId}
           onClose={() => setShowIngest(false)}
-          onComplete={() => { setShowIngest(false); loadCase() }}
+          onComplete={() => loadCase()}
         />
       )}
 
@@ -1726,19 +2154,11 @@ export default function CaseTimeline() {
               caseId={caseId}
               onSearchQuery={q => {
                 setShowAlertRules(false)
-                navigate(`/cases/${caseId}/search`, { state: { pivotQuery: q } })
+                navigate(`/cases/${caseId}`, { state: { pivotQuery: q } })
               }}
             />
           </div>
         </div>
-      )}
-
-      {alertResults && (
-        <AlertResultsPanel
-          results={alertResults}
-          caseId={caseId}
-          onClose={() => setAlertResults(null)}
-        />
       )}
 
       {showModules && (
@@ -1752,17 +2172,11 @@ export default function CaseTimeline() {
       {showModuleRuns && (
         <ModuleRunsPanel
           caseId={caseId}
-          onClose={() => setShowModuleRuns(false)}
+          onClose={() => { setShowModuleRuns(false); setAlertResults(null) }}
+          alertResults={alertResults}
         />
       )}
 
-      {showCollector && (
-        <CollectorModal
-          caseId={caseId}
-          apiUrl={`${window.location.origin}/api/v1`}
-          onClose={() => setShowCollector(false)}
-        />
-      )}
     </div>
   )
 }

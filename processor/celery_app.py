@@ -15,7 +15,7 @@ app = Celery(
     "forensics_processor",
     broker=REDIS_URL,
     backend=REDIS_URL,
-    include=["tasks.ingest_task", "tasks.module_task"],
+    include=["tasks.ingest_task", "tasks.module_task", "tasks.harvest_task"],
 )
 
 app.conf.update(
@@ -57,7 +57,9 @@ app.conf.update(
         # All ingest.* tasks → ingest queue (I/O-bound: MinIO + Elasticsearch)
         "ingest.*": {"queue": "ingest",  "routing_key": "ingest"},
         # All module.* tasks → modules queue (CPU-bound: hayabusa, YARA, etc.)
-        "module.*": {"queue": "modules", "routing_key": "modules"},
+        "module.*":   {"queue": "modules", "routing_key": "modules"},
+        # harvest.* tasks → modules queue (pytsk3 image traversal is CPU-bound)
+        "harvest.*":  {"queue": "modules", "routing_key": "modules"},
     },
 
     # ── Broker connection tuning ───────────────────────────────────────────

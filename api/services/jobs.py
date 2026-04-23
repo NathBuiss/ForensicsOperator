@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,6 +28,7 @@ def create_job(
         "original_filename": filename,
         "minio_object_key": minio_key,
         "events_indexed": "0",
+        "events_failed": "0",
         "error": "",
         "plugin_used": "",
         "plugin_stats": "{}",
@@ -39,9 +41,12 @@ def create_job(
     r.hset(f"job:{job_id}", mapping=job)
     r.expire(f"job:{job_id}", JOB_TTL)
 
-    # Add to case job set
+    # Add to case job set (unordered, kept for backward compat)
     r.sadd(f"case:{case_id}:jobs", job_id)
     r.expire(f"case:{case_id}:jobs", JOB_TTL)
+    # Add to sorted set (score = creation timestamp) for O(log N) recent lookups
+    r.zadd(f"case:{case_id}:jobs:zs", {job_id: time.time()})
+    r.expire(f"case:{case_id}:jobs:zs", JOB_TTL)
     return job
 
 
@@ -57,7 +62,7 @@ def get_job(job_id: str) -> dict | None:
                 data[field] = json.loads(data[field])
             except (json.JSONDecodeError, TypeError):
                 data[field] = {}
-    for field in ("events_indexed",):
+    for field in ("events_indexed", "events_failed"):
         if field in data:
             try:
                 data[field] = int(data[field])
@@ -91,12 +96,42 @@ def reset_job_for_retry(job_id: str) -> None:
     r.expire(key, JOB_TTL)
 
 
-def list_case_jobs(case_id: str) -> list[dict]:
+def delete_job(job_id: str, case_id: str) -> None:
+    """Remove a job record from Redis and from the case's job set."""
     r = get_redis()
-    job_ids = r.smembers(f"case:{case_id}:jobs")
+    r.delete(f"job:{job_id}")
+    r.srem(f"case:{case_id}:jobs", job_id)
+    r.zrem(f"case:{case_id}:jobs:zs", job_id)
+
+
+def count_case_jobs(case_id: str) -> int:
+    """Return total job count for a case without loading job data."""
+    return get_redis().scard(f"case:{case_id}:jobs")
+
+
+def list_case_job_ids(case_id: str) -> list[str]:
+    """Return all job IDs for a case — lightweight, no hgetall."""
+    return list(get_redis().smembers(f"case:{case_id}:jobs"))
+
+
+def list_case_job_ids_recent(case_id: str, n: int = 5000) -> list[str]:
+    """Return up to N most-recently-created job IDs, newest first (sorted-set backed)."""
+    r = get_redis()
+    ids = r.zrevrange(f"case:{case_id}:jobs:zs", 0, n - 1)
+    if ids:
+        return list(ids)
+    # Fallback to unordered set for cases created before the sorted set was added
+    return list(r.smembers(f"case:{case_id}:jobs"))
+
+
+def list_case_jobs(case_id: str, limit: int = 500, page: int = 0) -> list[dict]:
+    """Return paginated job records. Avoids loading all N jobs into memory at once."""
+    r = get_redis()
+    all_ids = list(r.smembers(f"case:{case_id}:jobs"))
+    page_ids = all_ids[page * limit:(page + 1) * limit]
     jobs = []
-    for jid in sorted(job_ids):
+    for jid in page_ids:
         job = get_job(jid)
         if job:
             jobs.append(job)
-    return sorted(jobs, key=lambda j: j.get("started_at", ""), reverse=True)
+    return sorted(jobs, key=lambda j: j.get("created_at", ""), reverse=True)

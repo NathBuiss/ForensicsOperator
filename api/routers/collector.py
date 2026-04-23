@@ -8,6 +8,7 @@ DELETE /collector/ingress       — remove the K8s LoadBalancer service
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -17,11 +18,14 @@ import logging
 import subprocess
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
+
+from auth.dependencies import require_admin
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["collector"])
@@ -98,6 +102,302 @@ def download_collector(
         media_type="text/x-python",
         headers={
             "Content-Disposition": 'attachment; filename="fo-collector.py"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+# ── ForensicsOperator Harvester package download ──────────────────────────────
+
+# Complete ordered list of artifact categories supported by fo-harvester.py.
+# Mode, input source (--path / --disk), and BitLocker key are CLI arguments —
+# they are never stored in config.json.
+_ALL_CATEGORIES: List[str] = [
+    # Core
+    "evtx", "registry", "prefetch", "mft", "execution", "persistence", "filesystem",
+    # Network & USB
+    "network_cfg", "usb_devices",
+    # Credentials & Security
+    "credentials", "antivirus", "wer_crashes", "win_logs",
+    "boot_uefi", "encryption", "etw_diagnostics",
+    # Browsers
+    "browser", "browser_chrome", "browser_edge", "browser_ie",
+    # Email
+    "email_outlook", "email_thunderbird",
+    # Messaging
+    "teams", "slack", "discord", "signal", "whatsapp", "telegram",
+    # Cloud storage
+    "cloud_onedrive", "cloud_google_drive", "cloud_dropbox",
+    # Remote access
+    "remote_access", "rdp", "ssh_ftp",
+    # Apps & user data
+    "lnk", "tasks", "office", "dev_tools", "password_managers",
+    "database_clients", "gaming", "windows_apps", "wsl",
+    # Infrastructure
+    "vpn", "iis_web", "active_directory", "virtualization", "recovery", "printing",
+    # Heavy / opt-in
+    "pe", "documents", "memory_artifacts",
+]
+
+_RUN_BAT = """\
+@echo off
+echo ForensicsOperator Harvester — starting collection...
+python fo-harvester.py
+pause
+"""
+
+_RUN_SH = """\
+#!/bin/sh
+# ForensicsOperator Harvester — run on Linux or macOS
+python3 fo-harvester.py
+"""
+
+_README = """\
+ForensicsOperator Harvester — Self-contained collection package
+================================================================
+
+Python 3.8+ required — no additional packages needed.
+
+Contents
+--------
+  fo-harvester.py   Standalone collector (reads artifact settings from config.json)
+  config.json       Pre-filled artifact profile (true/false per category)
+  run.bat           Windows launcher (double-click or run as Administrator)
+  run.sh            Linux / macOS launcher
+
+Step 1 — Copy to the target machine
+--------------------------------------
+  Transfer the fo-harvester/ folder to the target machine.
+
+Step 2 — Run the collector
+----------------------------
+  Windows — live OS collection (run as Administrator):
+      double-click run.bat
+      — or —
+      python fo-harvester.py
+
+  Linux / macOS — live OS collection (run as root):
+      chmod +x run.sh && ./run.sh
+      — or —
+      python3 fo-harvester.py
+
+  Dead-box: already-mounted directory (any OS):
+      python fo-harvester.py --path D:\\
+      python3 fo-harvester.py --path /mnt/windows
+
+  Dead-box: raw block device — Linux only (ntfs-3g required):
+      python3 fo-harvester.py --disk /dev/sdb1
+
+  BitLocker-encrypted drive — key stays local, never stored in config.json:
+      python fo-harvester.py --path E:\\ --bitlocker-key 123456-123456-...
+      python3 fo-harvester.py --disk /dev/sdb1 --bitlocker-key 123456-123456-...
+
+  Override output path:
+      python fo-harvester.py --output C:\\evidence\\output.zip
+
+  Override artifact selection (comma-separated, overrides config.json):
+      python fo-harvester.py --collect evtx,registry,prefetch
+
+Step 3 — Upload results to ForensicsOperator
+---------------------------------------------
+  A ZIP archive is created in ./output/ (or --output path).
+  Upload it via:  Case → Ingest tab → Upload ZIP
+"""
+
+
+@router.get("/collector/package")
+def download_harvester_package(
+    categories: Optional[str] = Query(
+        default=None,
+        description="Comma-separated enabled category keys. All others set to false.",
+    ),
+    case_name: Optional[str] = Query(
+        default=None,
+        description="Case name — used only in the output ZIP filename.",
+    ),
+):
+    """
+    Return a self-contained ZIP: fo-harvester.py + config.json (true/false per
+    artifact category) + launch scripts.
+
+    config.json format:
+      { "output_dir": "./output", "case_name": "...", "evtx": true, ... }
+
+    Input source (--path / --disk) and BitLocker key (--bitlocker-key) are
+    CLI arguments on the target machine — never stored in config.json.
+    """
+    enabled = {c.strip() for c in categories.split(",") if c.strip()} if categories else set()
+
+    config: dict = {"output_dir": "./output"}
+    if case_name:
+        config["case_name"] = case_name.strip()
+    for cat in _ALL_CATEGORIES:
+        config[cat] = cat in enabled
+
+    try:
+        script_bytes = _find_collect_script().read_bytes()
+    except FileNotFoundError as exc:
+        logger.error("collect.py not found for package: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        zf.writestr("fo-harvester/fo-harvester.py", script_bytes)
+        zf.writestr("fo-harvester/config.json",     json.dumps(config, indent=2))
+        zf.writestr("fo-harvester/run.bat",          _RUN_BAT)
+        zf.writestr("fo-harvester/run.sh",           _RUN_SH)
+        zf.writestr("fo-harvester/README.txt",       _README)
+
+    n = len(enabled)
+    filename = f"fo-harvester-{n}cats.zip" if n else "fo-harvester.zip"
+
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+# ── fo-uploader package download ─────────────────────────────────────────────
+
+_UPLOADER_CANDIDATES = [
+    Path("/app/collector/fo_uploader.py"),                              # docker
+    Path(__file__).parent.parent / "collector" / "fo_uploader.py",     # api/../collector/
+    Path(__file__).parent.parent.parent / "collector" / "fo_uploader.py",  # mono-repo root
+]
+
+_UPLOADER_REQUIREMENTS = "boto3\n"
+
+_UPLOADER_RUN_BAT = """\
+@echo off
+echo Installing dependencies...
+pip install boto3
+echo.
+echo Uploading artifacts...
+python fo-uploader.py
+pause
+"""
+
+_UPLOADER_RUN_SH = """\
+#!/bin/sh
+echo "Installing dependencies..."
+pip3 install boto3
+echo
+echo "Uploading artifacts..."
+python3 fo-uploader.py
+"""
+
+_UPLOADER_README = """\
+fo-uploader — S3 Evidence Uploader
+====================================
+
+Uploads fo-harvester artifacts (fo-artifacts-*.zip) to the configured S3 bucket.
+Pre-filled with your ForensicsOperator S3 triage configuration.
+
+WARNING: This script contains your S3 credentials.
+         Do not share it or commit it to source control.
+
+Requirements
+------------
+  pip install boto3      (or: pip3 install boto3)
+
+Usage
+-----
+  1. Run fo-harvester.py to collect artifacts → creates ./output/fo-artifacts-*.zip
+  2. Run fo-uploader.py (or the included run.bat / run.sh):
+
+       Windows:
+           run.bat
+           — or —
+           pip install boto3 && python fo-uploader.py
+
+       Linux / macOS:
+           chmod +x run.sh && ./run.sh
+           — or —
+           pip3 install boto3 && python3 fo-uploader.py
+
+Options
+-------
+  --file PATH      Upload a specific file instead of auto-detecting
+  --dir  DIR       Directory to scan for fo-artifacts-*.zip (default: ./output)
+  --prefix PREFIX  S3 key prefix / sub-folder inside the bucket
+
+After upload, open ForensicsOperator → Admin → S3 Triage browser,
+locate the file, and pull it into a case for analysis.
+"""
+
+
+def _find_uploader_script() -> Path:
+    for p in _UPLOADER_CANDIDATES:
+        if p.exists():
+            return p
+    raise FileNotFoundError(
+        "fo_uploader.py not found — checked: "
+        + ", ".join(str(p) for p in _UPLOADER_CANDIDATES)
+    )
+
+
+def _inject_uploader_config(source: str, cfg: dict) -> str:
+    """Replace the six blank constants in fo_uploader.py with the S3 triage config values."""
+    use_ssl_str = "true" if cfg.get("use_ssl", True) else "false"
+    replacements = [
+        ('ENDPOINT   = ""', f'ENDPOINT   = {json.dumps(cfg.get("endpoint", ""))}'),
+        ('ACCESS_KEY = ""', f'ACCESS_KEY = {json.dumps(cfg.get("access_key", ""))}'),
+        ('SECRET_KEY = ""', f'SECRET_KEY = {json.dumps(cfg.get("secret_key", ""))}'),
+        ('BUCKET     = ""', f'BUCKET     = {json.dumps(cfg.get("bucket", ""))}'),
+        ('REGION     = ""', f'REGION     = {json.dumps(cfg.get("region", ""))}'),
+        ('USE_SSL    = "true"', f'USE_SSL    = {json.dumps(use_ssl_str)}'),
+    ]
+    for old, new in replacements:
+        source = source.replace(old, new, 1)
+    return source
+
+
+@router.get("/collector/uploader", dependencies=[Depends(require_admin)])
+def download_uploader_package():
+    """
+    Return a pre-configured fo-uploader.zip with S3 triage credentials injected.
+
+    Admin-only: the ZIP contains the raw S3 secret key for the triage upload bucket.
+    Requires the S3 triage config to be saved in Admin → S3 Triage Upload.
+    """
+    from config import get_redis as _get_redis
+    r = _get_redis()
+    raw = r.get("fo:s3_triage_config")
+    if not raw:
+        raise HTTPException(
+            status_code=404,
+            detail="No S3 triage upload config saved. Configure it in Admin → S3 Triage Upload first.",
+        )
+    cfg = json.loads(raw)
+
+    try:
+        source = _find_uploader_script().read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        logger.error("fo_uploader.py not found: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        logger.error("Failed to read fo_uploader.py: %s", exc)
+        raise HTTPException(status_code=500, detail="Could not load uploader script")
+
+    injected = _inject_uploader_config(source, cfg)
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        zf.writestr("fo-uploader/fo-uploader.py",   injected.encode("utf-8"))
+        zf.writestr("fo-uploader/requirements.txt",  _UPLOADER_REQUIREMENTS)
+        zf.writestr("fo-uploader/run.bat",           _UPLOADER_RUN_BAT)
+        zf.writestr("fo-uploader/run.sh",            _UPLOADER_RUN_SH)
+        zf.writestr("fo-uploader/README.txt",        _UPLOADER_README)
+
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="fo-uploader.zip"',
             "Cache-Control": "no-store",
         },
     )

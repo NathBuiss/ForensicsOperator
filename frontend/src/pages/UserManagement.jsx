@@ -229,13 +229,16 @@ export default function UserManagement() {
           />
         </div>
         <div>
-          <label className="block text-xs font-medium text-gray-600 mb-1">New Password</label>
+          <label className="block text-xs font-medium text-gray-600 mb-1">
+            New Password <span className="text-gray-400 font-normal">(min. 8 characters)</span>
+          </label>
           <input
             type="password"
             className="input text-xs"
-            placeholder="Enter new password"
+            placeholder="Enter new password (min. 8 characters)"
             value={ownPw.new_password}
             onChange={e => setOwnPw(f => ({ ...f, new_password: e.target.value }))}
+            minLength={8}
             required
           />
         </div>

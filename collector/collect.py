@@ -7,11 +7,13 @@ them as a timestamped ZIP archive, then optionally upload directly to a case.
 
 Usage
 -----
-  tracex-collector                                           # collect everything
-  tracex-collector --collect evtx,registry,prefetch          # selective collection
-  tracex-collector --api-url http://TRACEX/api/v1 --case-id XYZ  # upload to case
-  tracex-collector --output /tmp/evidence.zip                # custom output path
-  tracex-collector --dry-run --verbose                       # preview only
+  tracex-collector                                               # collect everything (live OS)
+  tracex-collector --collect evtx,registry,prefetch              # selective collection
+  tracex-collector --path /mnt/evidence                          # dead-box: mounted directory
+  tracex-collector --disk /dev/sdb1 --bitlocker-key 123456-...  # dead-box: raw device (Linux)
+  tracex-collector --api-url http://TRACEX/api/v1 --case-id XYZ # upload to case
+  tracex-collector --output /tmp/evidence.zip                    # custom output path
+  tracex-collector --dry-run --verbose                           # preview only
 
 Build
 -----
@@ -29,15 +31,51 @@ EMBEDDED_CONFIG: dict = {}
 
 import argparse
 import datetime
+import json
+import io
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
+
+# ── Load config.json when EMBEDDED_CONFIG was not injected ───────────────────
+# ForensicsOperator package mode: config.json ships next to this script.
+# Format: {artifact_key: true/false, output_dir: "path"}
+# Mode, input source, and BitLocker key are CLI arguments — not stored here.
+if not EMBEDDED_CONFIG:
+    _cfg_path = Path(__file__).with_name("config.json")
+    if _cfg_path.exists():
+        try:
+            _raw = json.loads(_cfg_path.read_text("utf-8"))
+            # Accept only known category keys with boolean True — safe against
+            # old-format config files that have string/list values.
+            _known_cats = {
+                "evtx", "registry", "prefetch", "mft", "execution", "persistence",
+                "filesystem", "network_cfg", "usb_devices", "credentials", "antivirus",
+                "wer_crashes", "win_logs", "boot_uefi", "encryption", "etw_diagnostics",
+                "browser", "browser_chrome", "browser_edge", "browser_ie",
+                "email_outlook", "email_thunderbird", "teams", "slack", "discord",
+                "signal", "whatsapp", "telegram", "cloud_onedrive", "cloud_google_drive",
+                "cloud_dropbox", "remote_access", "rdp", "ssh_ftp", "lnk", "tasks",
+                "office", "dev_tools", "password_managers", "database_clients", "gaming",
+                "windows_apps", "wsl", "vpn", "iis_web", "active_directory",
+                "virtualization", "recovery", "printing", "pe", "documents", "memory_artifacts",
+            }
+            EMBEDDED_CONFIG = {
+                "collect":    [k for k, v in _raw.items() if k in _known_cats and v is True],
+                "output_dir": _raw.get("output_dir", "./output"),
+                "case_name":  _raw.get("case_name", ""),
+            }
+        except Exception as _cfg_err:
+            print(f"  [!] Warning: could not read config.json: {_cfg_err}", file=sys.stderr)
 
 VERSION  = "1.1.0"
 HOSTNAME = socket.gethostname()
@@ -48,36 +86,92 @@ IS_LINUX   = platform.system() == "Linux"
 IS_MACOS   = platform.system() == "Darwin"
 
 BANNER = f"""
-╔══════════════════════════════════════════════════════════╗
-║              TraceX Artifact Collector  v{VERSION}             ║
-╚══════════════════════════════════════════════════════════╝"""
+╔══════════════════════════════════════════════════════════════╗
+║         ForensicsOperator Harvester  v{VERSION}                    ║
+╚══════════════════════════════════════════════════════════════╝"""
+
+_HR = "  " + "─" * 62  # section separator line
 
 # Default collection sets — all enabled when nothing is specified
-DEFAULT_WINDOWS = {"evtx", "registry", "prefetch", "lnk", "browser", "tasks", "triage"}
+DEFAULT_WINDOWS = {"evtx", "registry", "prefetch", "lnk", "browser", "tasks", "mft", "triage"}
 DEFAULT_LINUX   = {"logs", "history", "config", "cron", "ssh", "triage", "network", "suricata", "zeek"}
-DEFAULT_MACOS   = {"logs", "history", "config", "launchagents", "browser", "triage", "network"}
+DEFAULT_MACOS   = {"logs", "history", "config", "launchagents", "browser", "plist", "triage", "network"}
+# "pe" and "documents" are opt-in — they can be large and broad in scope.
+# Add explicitly: --collect pe,documents,evtx
 # "memory" is intentionally NOT in the defaults — dumps are multi-GB.
 # Add explicitly with --collect memory or --collect memory,evtx,...
 
 # Human-readable names (used in the header printout)
 ARTIFACT_LABELS = {
-    "evtx":         "Event Logs (EVTX)",
-    "registry":     "Registry Hives",
-    "prefetch":     "Prefetch Files",
-    "lnk":          "LNK / Recent Items",
-    "browser":      "Browser Artifacts",
-    "tasks":        "Scheduled Tasks",
-    "triage":       "System Triage (live)",
+    # ── Live Windows ──────────────────────────────────────────────────────────
+    "evtx":              "Event Logs (EVTX)",
+    "registry":          "Registry Hives",
+    "prefetch":          "Prefetch Files",
+    "lnk":               "LNK / Recent Items",
+    "browser":           "Browser Artifacts (all)",
+    "tasks":             "Scheduled Tasks",
+    "mft":               "Master File Table ($MFT)",
+    "pe":                "PE / Executable Binaries",
+    "documents":         "Office Documents & PDFs",
+    "triage":            "System Triage (live)",
+    # ── Dead-box / ForensicHarvester categories ───────────────────────────────
+    "execution":         "Execution Evidence (SRUM, Amcache, Prefetch)",
+    "persistence":       "Persistence (Tasks, WMI)",
+    "network_cfg":       "Network Config (Hosts, WLAN, Firewall)",
+    "usb_devices":       "USB Device History",
+    "credentials":       "Credentials (DPAPI, Credential Manager)",
+    "antivirus":         "Antivirus / Windows Defender",
+    "wer_crashes":       "WER Crash Dumps & Reports",
+    "filesystem":        "NTFS Metadata ($MFT, $LogFile, $Boot)",
+    "browser_chrome":    "Chrome Browser Artifacts",
+    "browser_firefox":   "Firefox Browser Artifacts",
+    "browser_edge":      "Edge Browser Artifacts",
+    "browser_ie":        "Internet Explorer WebCache",
+    "email_outlook":     "Outlook Email (.pst / .ost)",
+    "email_thunderbird":  "Thunderbird Email",
+    "teams":             "Microsoft Teams",
+    "slack":             "Slack",
+    "discord":           "Discord",
+    "signal":            "Signal Desktop",
+    "whatsapp":          "WhatsApp Desktop",
+    "telegram":          "Telegram Desktop",
+    "cloud_onedrive":    "OneDrive Sync Artifacts",
+    "cloud_google_drive":"Google Drive Sync Artifacts",
+    "cloud_dropbox":     "Dropbox Sync Artifacts",
+    "remote_access":     "Remote Access (AnyDesk, TeamViewer)",
+    "rdp":               "RDP / Terminal Services",
+    "ssh_ftp":           "SSH / FTP Clients (PuTTY, WinSCP)",
+    "office":            "Office MRU / Trusted Documents",
+    "iis_web":           "IIS Web Server Logs",
+    "active_directory":  "Active Directory (NTDS.dit, SYSVOL)",
+    "dev_tools":         "Dev Tools (.gitconfig, PS history, .aws)",
+    "password_managers": "Password Managers (KeePass)",
+    "vpn":               "VPN Config (OpenVPN, WireGuard)",
+    "encryption":        "Encryption Metadata (BitLocker / EFS)",
+    "boot_uefi":         "Boot Config (BCD, EFI)",
+    "win_logs":          "Windows Logs (CBS, DISM, WU)",
+    "memory_artifacts":  "Memory Artifacts (pagefile, hiberfil)",
+    "etw_diagnostics":   "ETW Diagnostic Traces",
+    "windows_apps":      "Windows UWP / Modern Apps",
+    "wsl":               "WSL Filesystem & Config",
+    "virtualization":    "Virtualization (Hyper-V, Docker)",
+    "recovery":          "Recovery (VSS, Windows.old)",
+    "database_clients":  "Database Clients (SSMS, DBeaver)",
+    "gaming":            "Gaming Platforms (Steam, Epic)",
+    "printing":          "Print Spool Files",
+    # ── Linux / macOS ────────────────────────────────────────────────────────
     "logs":         "System Logs",
     "history":      "Shell Histories",
     "config":       "System Configuration",
     "cron":         "Cron Jobs",
     "ssh":          "SSH Artifacts",
     "launchagents": "Launch Agents / Daemons",
+    "plist":        "macOS Preference Plists",
     "network":      "PCAP / Network Captures",
     "suricata":     "Suricata IDS Logs (EVE JSON)",
     "zeek":         "Zeek / Bro Network Logs",
     "memory":       "Physical Memory Dump (live acquisition)",
+    "external_disk": "External / BitLocker Disk Triage",
 }
 
 
@@ -100,6 +194,11 @@ class Collector:
         self.staging  = Path(tempfile.mkdtemp(prefix="fo_collect_"))
         self._items: list[tuple[str, Path]] = []
         self._errors: list[str] = []
+        self._seen_arcnames: set[str] = set()   # duplicate path guard
+        # Progress / results tracking
+        self._results: list[dict]  = []
+        self._total_cats: int      = 0
+        self._current_cat: int     = 0
 
     def _want(self, key: str) -> bool:
         return key in self.collect
@@ -110,14 +209,8 @@ class Collector:
 
     def _warn(self, msg: str) -> None:
         self._errors.append(msg)
+        # Buffered during _timed(); written directly otherwise.
         print(f"  [!] {msg}", file=sys.stderr)
-
-    def _section(self, key: str, label: str) -> bool:
-        """Print a section header and return False if the section is disabled."""
-        if not self._want(key):
-            return False
-        print(f"  [*] {label}")
-        return True
 
     def _add(self, src: Path, arcname: str) -> bool:
         if not src.exists() or not src.is_file():
@@ -127,9 +220,117 @@ class Collector:
         if size == 0:
             self._log(f"empty    {src.name}")
             return False
+        # Deduplicate arcnames — same relative path can appear for multiple users
+        if arcname in self._seen_arcnames:
+            if "." in arcname.split("/")[-1]:
+                stem, ext = arcname.rsplit(".", 1)
+            else:
+                stem, ext = arcname, ""
+            n = 2
+            while True:
+                candidate = f"{stem}_{n}.{ext}" if ext else f"{stem}_{n}"
+                if candidate not in self._seen_arcnames:
+                    arcname = candidate
+                    break
+                n += 1
+        self._seen_arcnames.add(arcname)
         self._items.append((arcname, src))
         self._log(f"ok  ({size:>11,} B)  {arcname}")
         return True
+
+    # ── Per-category progress tracking ───────────────────────────────────────
+
+    @contextmanager
+    def _timed(self, key: str, label: str):
+        """
+        Context manager that wraps a single artifact-category collection call.
+        • Prints a live 'collecting…' placeholder on stdout.
+        • Suppresses the [*] section-header that _from() methods print.
+        • Buffers stderr (warnings) so they don't interleave with the status line.
+        • On exit: overwrites the placeholder with a result line (files / time / ✓✗).
+        • Appends a result dict to self._results for the final summary.
+        """
+        self._current_cat += 1
+        idx   = self._current_cat
+        total = self._total_cats or "?"
+        pad   = f"{label:<44}"
+        pfx   = f"  [{idx:>2}/{total}]  {pad}"
+
+        items_before  = len(self._items)
+        errors_before = len(self._errors)
+        t0 = time.monotonic()
+
+        # Live placeholder — overwritten by the result line on exit
+        sys.stdout.write(f"{pfx}  collecting…\r")
+        sys.stdout.flush()
+
+        # ── stdout filter: swallow "  [*] …" lines emitted by _from() methods ──
+        class _FilterOut:
+            def __init__(self, w):
+                self._w = w
+                self._skip_nl = False
+            def write(self, txt):
+                if "  [*]" in txt:
+                    self._skip_nl = True
+                    return
+                if self._skip_nl and txt in ("\n", "\r\n", "\r"):
+                    self._skip_nl = False
+                    return
+                self._skip_nl = False
+                self._w.write(txt)
+            def flush(self):        self._w.flush()
+            def __getattr__(self, n): return getattr(self._w, n)
+
+        # ── stderr capture: keep warnings from interleaving with status lines ──
+        class _BufErr:
+            def __init__(self):
+                self._buf = io.StringIO()
+            def write(self, txt):   self._buf.write(txt)
+            def flush(self):        pass
+            def getvalue(self):     return self._buf.getvalue()
+            def __getattr__(self, n): return getattr(sys.__stderr__, n)
+
+        orig_out = sys.stdout
+        orig_err = sys.stderr
+        ferr = _BufErr()
+        sys.stdout = _FilterOut(orig_out)
+        sys.stderr = ferr
+        try:
+            yield
+        finally:
+            sys.stdout = orig_out
+            sys.stderr = orig_err
+
+            elapsed = time.monotonic() - t0
+            added   = len(self._items) - items_before
+            new_errs = self._errors[errors_before:]
+            ok   = added > 0
+            mark = "✓" if ok else "✗"
+            stat = f"  {added:>5} files  {elapsed:>5.1f}s  {mark}"
+            if not ok and new_errs:
+                stat += f"  ({new_errs[0][:36]})"
+            print(f"{pfx}{stat}")
+
+            # Flush captured warnings in verbose mode only
+            if self.verbose:
+                captured = ferr.getvalue()
+                if captured:
+                    sys.stderr.write(captured)
+
+            self._results.append({
+                "label":    label,
+                "files":    added,
+                "duration": elapsed,
+                "ok":       ok,
+                "errors":   list(new_errs),
+            })
+
+    def _run_cat(self, key: str, fn, *args) -> None:
+        """Run fn(*args) inside a _timed() context if the category is wanted."""
+        if self._want(key):
+            label = ARTIFACT_LABELS.get(key, key)
+            with self._timed(key, label):
+                fn(*args)
 
     def _copy_locked(self, src: Path, dest: Path) -> bool:
         try:
@@ -162,15 +363,33 @@ class Collector:
 
     def package(self) -> None:
         n = len(self._items)
-        print(f"\n  [+] Packaging {n} file{'s' if n != 1 else ''} → {self.output.name}")
+        BAR_W = 44
+        t0 = time.monotonic()
+
+        print(f"\n{_HR}")
+        print(f"  Packaging")
+        print(_HR)
+        print(f"\n  {n} file{'s' if n != 1 else ''} → {self.output.name}\n")
+
+        self.output.parent.mkdir(parents=True, exist_ok=True)
+        last_bar = ""
         with zipfile.ZipFile(str(self.output), "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            for arcname, path in self._items:
+            for i, (arcname, path) in enumerate(self._items, 1):
                 try:
                     zf.write(str(path), arcname)
                 except Exception as exc:
                     self._warn(f"Archive failed for {arcname}: {exc}")
+                filled = int(BAR_W * i / n) if n else BAR_W
+                last_bar = "█" * filled + "░" * (BAR_W - filled)
+                sys.stdout.write(f"\r  [{last_bar}] {i}/{n}  ")
+                sys.stdout.flush()
+
+        elapsed = time.monotonic() - t0
         size_mb = self.output.stat().st_size / (1024 * 1024)
-        print(f"  [+] Archive ready: {self.output}  ({size_mb:.1f} MB)")
+        print(f"\r  [{'█' * BAR_W}] {n}/{n}  done          ")
+        print(f"\n  Archive  : {self.output}")
+        print(f"  Size     : {size_mb:.1f} MB")
+        print(f"  Packed   : {elapsed:.1f}s")
 
     def cleanup(self) -> None:
         shutil.rmtree(self.staging, ignore_errors=True)
@@ -183,14 +402,18 @@ class Collector:
 class WindowsCollector(Collector):
 
     def collect_all(self) -> None:
-        if self._want("evtx"):     self._evtx()
-        if self._want("registry"): self._registry()
-        if self._want("prefetch"): self._prefetch()
-        if self._want("lnk"):      self._lnk()
-        if self._want("browser"):  self._browser()
-        if self._want("tasks"):    self._scheduled_tasks()
-        if self._want("triage"):   self._system_triage()
-        if self._want("memory"):   self._memory()
+        self._total_cats = len(self.collect)
+        self._run_cat("evtx",      self._evtx)
+        self._run_cat("registry",  self._registry)
+        self._run_cat("prefetch",  self._prefetch)
+        self._run_cat("lnk",       self._lnk)
+        self._run_cat("browser",   self._browser)
+        self._run_cat("tasks",     self._scheduled_tasks)
+        self._run_cat("mft",       self._mft)
+        self._run_cat("pe",        self._pe_binaries)
+        self._run_cat("documents", self._documents)
+        self._run_cat("triage",    self._system_triage)
+        self._run_cat("memory",    self._memory)
 
     def _evtx(self) -> None:
         print("  [*] Event Logs (EVTX)")
@@ -341,6 +564,180 @@ class WindowsCollector(Collector):
                 if self._add(p, f"scheduled_tasks/{rel}"):
                     count += 1
 
+    def _mft(self) -> None:
+        """Raw-copy $MFT from all NTFS volumes via Windows kernel API (requires Admin)."""
+        print("  [*] Master File Table ($MFT)")
+        try:
+            import ctypes, ctypes.wintypes, struct
+        except ImportError:
+            self._warn("$MFT: ctypes not available")
+            return
+
+        # Detect lettered NTFS drives
+        bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+        drives = [chr(65 + i) for i in range(26) if bitmask & (1 << i)]
+
+        for drive in drives:
+            dest = self.staging / f"{drive}_MFT"
+            try:
+                h = ctypes.windll.kernel32.CreateFileW(
+                    f"\\\\.\\{drive}:",
+                    0x80000000,           # GENERIC_READ
+                    0x00000001 | 0x00000002,  # FILE_SHARE_READ | FILE_SHARE_WRITE
+                    None, 3, 0, None,     # OPEN_EXISTING, no flags
+                )
+                INVALID = ctypes.c_void_p(-1).value
+                if h == INVALID or h == 0:
+                    self._warn(f"$MFT ({drive}:): cannot open volume — run as Administrator")
+                    continue
+
+                try:
+                    # ── Read NTFS boot sector ────────────────────────────────
+                    buf = ctypes.create_string_buffer(512)
+                    n   = ctypes.wintypes.DWORD(0)
+                    ctypes.windll.kernel32.ReadFile(h, buf, 512, ctypes.byref(n), None)
+                    bs  = buf.raw
+
+                    if bs[3:7] != b'NTFS':
+                        self._log(f"{drive}: not NTFS — skipping")
+                        continue
+
+                    bps      = struct.unpack_from('<H', bs, 11)[0]   # bytes/sector
+                    spc      = struct.unpack_from('<B', bs, 13)[0]   # sectors/cluster
+                    mft_lcn  = struct.unpack_from('<Q', bs, 48)[0]   # MFT first LCN
+                    cls_sz   = bps * spc
+
+                    # MFT record size (boot sector offset 64)
+                    rs_raw   = struct.unpack_from('<b', bs, 64)[0]
+                    mft_rs   = cls_sz * (2 ** rs_raw) if rs_raw >= 0 else 2 ** (-rs_raw)
+                    mft_rs   = max(512, min(int(mft_rs), 65536))
+
+                    # ── Seek to MFT start, read first FILE record ────────────
+                    mft_off  = mft_lcn * cls_sz
+                    ctypes.windll.kernel32.SetFilePointerEx(
+                        h, ctypes.c_longlong(mft_off), None, 0,  # FILE_BEGIN
+                    )
+                    rec0 = ctypes.create_string_buffer(mft_rs)
+                    ctypes.windll.kernel32.ReadFile(h, rec0, mft_rs, ctypes.byref(n), None)
+
+                    if rec0.raw[:4] != b'FILE':
+                        self._warn(f"$MFT ({drive}:): first record has no FILE signature")
+                        continue
+
+                    # ── Parse attributes to find $DATA total size ────────────
+                    attr_p     = struct.unpack_from('<H', rec0.raw, 20)[0]
+                    total_size = 0
+                    while attr_p + 8 < mft_rs:
+                        at = struct.unpack_from('<I', rec0.raw, attr_p)[0]
+                        al = struct.unpack_from('<I', rec0.raw, attr_p + 4)[0]
+                        if at == 0xFFFFFFFF or al == 0:
+                            break
+                        if at == 0x80 and rec0.raw[attr_p + 8]:  # non-resident $DATA
+                            total_size = struct.unpack_from('<Q', rec0.raw, attr_p + 0x30)[0]
+                            break
+                        attr_p += al
+
+                    if total_size == 0 or total_size > 30 * 1024 ** 3:
+                        total_size = 512 * 1024 * 1024  # 512 MB safety cap
+                        self._log(f"$MFT ({drive}:): size unknown, capping at 512 MB")
+
+                    # ── Re-seek and stream out the full MFT ──────────────────
+                    ctypes.windll.kernel32.SetFilePointerEx(
+                        h, ctypes.c_longlong(mft_off), None, 0,
+                    )
+                    CHUNK     = 4 * 1024 * 1024  # 4 MB
+                    remaining = total_size
+                    with open(dest, "wb") as out_f:
+                        while remaining > 0:
+                            to_read   = min(CHUNK, remaining)
+                            cbuf      = ctypes.create_string_buffer(to_read)
+                            ok        = ctypes.windll.kernel32.ReadFile(
+                                h, cbuf, to_read, ctypes.byref(n), None,
+                            )
+                            if not ok or n.value == 0:
+                                break
+                            out_f.write(cbuf.raw[:n.value])
+                            remaining -= n.value
+
+                    self._add(dest, f"mft/{drive}_$MFT")
+                    sz_mb = dest.stat().st_size / 1024 / 1024
+                    print(f"      {drive}:\\$MFT  ({sz_mb:.1f} MB)")
+
+                finally:
+                    ctypes.windll.kernel32.CloseHandle(h)
+
+            except Exception as exc:
+                self._warn(f"$MFT ({drive}:): {exc}")
+
+    def _pe_binaries(self) -> None:
+        """Collect PE executables from high-risk staging locations."""
+        print("  [*] PE / Executable Binaries")
+        users_dir  = Path(os.environ.get("SystemDrive", "C:")) / "Users"
+        system_tmp = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "Temp"
+        PE_EXTS    = {".exe", ".dll", ".scr", ".bat", ".ps1", ".vbs", ".js", ".msi", ".hta"}
+        MAX_FILE   = 200 * 1024 * 1024   # 200 MB
+        MAX_TOTAL  = 2 * 1024 ** 3       # 2 GB total
+        MAX_FILES  = 1000
+
+        dirs: list[Path] = [system_tmp]
+        if users_dir.exists():
+            for ud in sorted(users_dir.iterdir()):
+                if not ud.is_dir():
+                    continue
+                for rel in [
+                    r"AppData\Local\Temp",
+                    r"AppData\Roaming",
+                    r"Downloads",
+                    r"Desktop",
+                    r"AppData\Local\Microsoft\Windows\INetCache",
+                ]:
+                    dirs.append(ud / rel)
+
+        count = 0
+        total = 0
+        for d in dirs:
+            if not d.exists():
+                continue
+            for p in sorted(d.rglob("*")):
+                if count >= MAX_FILES or total >= MAX_TOTAL:
+                    break
+                if not p.is_file() or p.suffix.lower() not in PE_EXTS:
+                    continue
+                sz = p.stat().st_size
+                if sz == 0 or sz > MAX_FILE:
+                    continue
+                rel = p.relative_to(d.parent) if d.parent in p.parents else Path(d.name) / p.name
+                if self._add(p, f"pe/{rel}"):
+                    count += 1
+                    total += sz
+
+    def _documents(self) -> None:
+        """Collect Office documents and PDFs from user directories."""
+        print("  [*] Office Documents & PDFs")
+        users_dir = Path(os.environ.get("SystemDrive", "C:")) / "Users"
+        DOC_EXTS  = {".doc", ".docx", ".docm", ".xls", ".xlsx", ".xlsm",
+                     ".ppt", ".pptx", ".pptm", ".rtf", ".pdf", ".odt", ".ods"}
+        MAX_FILE  = 100 * 1024 * 1024  # 100 MB
+        MAX_FILES = 500
+
+        count = 0
+        for ud in (sorted(users_dir.iterdir()) if users_dir.exists() else []):
+            if not ud.is_dir():
+                continue
+            for rel in ["Documents", "Downloads", "Desktop"]:
+                d = ud / rel
+                if not d.exists():
+                    continue
+                for p in sorted(d.rglob("*")):
+                    if count >= MAX_FILES:
+                        break
+                    if not p.is_file() or p.suffix.lower() not in DOC_EXTS:
+                        continue
+                    if p.stat().st_size == 0 or p.stat().st_size > MAX_FILE:
+                        continue
+                    if self._add(p, f"documents/{ud.name}/{rel}/{p.name}"):
+                        count += 1
+
     def _system_triage(self) -> None:
         print("  [*] System Triage (live commands)")
         lines: list[str] = []
@@ -429,16 +826,19 @@ class WindowsCollector(Collector):
 class LinuxCollector(Collector):
 
     def collect_all(self) -> None:
-        if self._want("logs"):     self._logs()
-        if self._want("history"):  self._shell_history()
-        if self._want("config"):   self._system_config()
-        if self._want("cron"):     self._cron()
-        if self._want("ssh"):      self._ssh_artifacts()
-        if self._want("network"):  self._network_captures()
-        if self._want("suricata"): self._suricata_logs()
-        if self._want("zeek"):     self._zeek_logs()
-        if self._want("triage"):   self._system_triage()
-        if self._want("memory"):   self._memory()
+        self._total_cats = len(self.collect)
+        self._run_cat("logs",      self._logs)
+        self._run_cat("history",   self._shell_history)
+        self._run_cat("config",    self._system_config)
+        self._run_cat("cron",      self._cron)
+        self._run_cat("ssh",       self._ssh_artifacts)
+        self._run_cat("network",   self._network_captures)
+        self._run_cat("suricata",  self._suricata_logs)
+        self._run_cat("zeek",      self._zeek_logs)
+        self._run_cat("pe",        self._pe_binaries)
+        self._run_cat("documents", self._documents)
+        self._run_cat("triage",    self._system_triage)
+        self._run_cat("memory",    self._memory)
 
     def _logs(self) -> None:
         print("  [*] System Logs")
@@ -596,6 +996,67 @@ class LinuxCollector(Collector):
             if count > 0:
                 break  # Found logs in this dir, no need to check others
 
+    def _pe_binaries(self) -> None:
+        """Collect suspicious ELF/PE binaries dropped in volatile locations."""
+        print("  [*] PE / Executable Binaries")
+        SEARCH_DIRS = [Path("/tmp"), Path("/var/tmp"), Path("/dev/shm"),
+                       Path("/var/www"), Path("/opt"), Path("/root")]
+        ELF_MAGIC   = b'\x7fELF'
+        PE_MAGIC    = b'MZ'
+        MAX_FILE    = 50 * 1024 * 1024   # 50 MB
+        MAX_FILES   = 500
+
+        count = 0
+        for d in SEARCH_DIRS:
+            if not d.exists():
+                continue
+            for p in sorted(d.rglob("*")):
+                if count >= MAX_FILES:
+                    break
+                if not p.is_file():
+                    continue
+                sz = p.stat().st_size
+                if sz < 4 or sz > MAX_FILE:
+                    continue
+                try:
+                    magic = p.read_bytes()[:4]
+                except (PermissionError, OSError):
+                    continue
+                if not (magic[:4] == ELF_MAGIC or magic[:2] == PE_MAGIC):
+                    continue
+                rel = p.relative_to(d.parent) if d.parent in p.parents else Path(d.name) / p.name
+                if self._add(p, f"pe/{rel}"):
+                    count += 1
+
+    def _documents(self) -> None:
+        """Collect Office documents and PDFs from home directories."""
+        print("  [*] Office Documents & PDFs")
+        DOC_EXTS  = {".doc", ".docx", ".docm", ".xls", ".xlsx", ".xlsm",
+                     ".ppt", ".pptx", ".pptm", ".rtf", ".pdf", ".odt", ".ods"}
+        MAX_FILE  = 100 * 1024 * 1024
+        MAX_FILES = 500
+        candidates = [Path("/root")]
+        if Path("/home").exists():
+            candidates += sorted(Path("/home").iterdir())
+
+        count = 0
+        for user_dir in candidates:
+            if not user_dir.is_dir():
+                continue
+            for rel in ["Documents", "Downloads", "Desktop"]:
+                d = user_dir / rel
+                if not d.exists():
+                    continue
+                for p in sorted(d.rglob("*")):
+                    if count >= MAX_FILES:
+                        break
+                    if not p.is_file() or p.suffix.lower() not in DOC_EXTS:
+                        continue
+                    if p.stat().st_size == 0 or p.stat().st_size > MAX_FILE:
+                        continue
+                    if self._add(p, f"documents/{user_dir.name}/{rel}/{p.name}"):
+                        count += 1
+
     def _system_triage(self) -> None:
         print("  [*] System Triage (live commands)")
         lines: list[str] = []
@@ -685,13 +1146,18 @@ class LinuxCollector(Collector):
 class MacOSCollector(Collector):
 
     def collect_all(self) -> None:
-        if self._want("logs"):         self._logs()
-        if self._want("history"):      self._shell_history()
-        if self._want("config"):       self._system_config()
-        if self._want("launchagents"): self._launch_agents()
-        if self._want("browser"):      self._browser()
-        if self._want("triage"):       self._system_triage()
-        if self._want("memory"):       self._memory()
+        self._total_cats = len(self.collect)
+        self._run_cat("logs",         self._logs)
+        self._run_cat("history",      self._shell_history)
+        self._run_cat("config",       self._system_config)
+        self._run_cat("launchagents", self._launch_agents)
+        self._run_cat("browser",      self._browser)
+        self._run_cat("plist",        self._plist_preferences)
+        self._run_cat("network",      self._network_captures)
+        self._run_cat("pe",           self._pe_binaries)
+        self._run_cat("documents",    self._documents)
+        self._run_cat("triage",       self._system_triage)
+        self._run_cat("memory",       self._memory)
 
     # ── Logs ──────────────────────────────────────────────────────────────────
 
@@ -815,6 +1281,142 @@ class MacOSCollector(Collector):
             quarantine = lib / "Preferences" / "com.apple.LaunchServices.QuarantineEventsV2"
             self._add(quarantine, f"browser/{user_dir.name}/quarantine_events.sqlite")
 
+    # ── Plist preferences ─────────────────────────────────────────────────────
+
+    def _plist_preferences(self) -> None:
+        """Collect plist files from system and per-user preference directories."""
+        print("  [*] macOS Preference Plists")
+        PREF_DIRS = [
+            Path("/Library/Preferences"),
+            Path("/Library/Application Support"),
+            Path("/System/Library/Preferences"),
+        ]
+        home = Path.home().parent  # /Users
+        if home.exists():
+            for user_dir in sorted(home.iterdir()):
+                if user_dir.is_dir():
+                    PREF_DIRS.append(user_dir / "Library" / "Preferences")
+                    PREF_DIRS.append(user_dir / "Library" / "Application Support")
+
+        MAX_FILES = 5000
+        count = 0
+        for d in PREF_DIRS:
+            if not d.exists():
+                continue
+            for p in sorted(d.rglob("*.plist"))[:MAX_FILES - count]:
+                if count >= MAX_FILES:
+                    break
+                try:
+                    rel = p.relative_to(d.parent)
+                except ValueError:
+                    rel = Path(d.name) / p.name
+                if self._add(p, f"plist/{rel}"):
+                    count += 1
+
+    # ── Network captures ──────────────────────────────────────────────────────
+
+    def _network_captures(self) -> None:
+        """Collect PCAP/PCAPNG files or run a short live capture via tcpdump."""
+        print("  [*] PCAP / Network Captures")
+        SEARCH_DIRS = [
+            Path("/var/log"), Path("/tmp"), Path.home().parent,
+            Path("/Library/Logs"), Path("/var/capture"),
+        ]
+        MAX_SIZE = 500 * 1024 * 1024  # 500 MB per file
+        count = 0
+        for d in SEARCH_DIRS:
+            if not d.exists():
+                continue
+            for p in sorted(d.rglob("*.pcap")) + sorted(d.rglob("*.pcapng")) + sorted(d.rglob("*.cap")):
+                if count >= 10:
+                    break
+                if p.stat().st_size <= MAX_SIZE:
+                    if self._add(p, f"network/{p.name}"):
+                        count += 1
+            if count >= 10:
+                break
+
+        if count == 0 and shutil.which("tcpdump"):
+            cap_path = self.staging / f"live-{HOSTNAME}-{TS_NOW}.pcap"
+            print("      Live capture: 30 s via tcpdump (requires sudo)")
+            try:
+                subprocess.run(
+                    ["tcpdump", "-i", "any", "-w", str(cap_path), "-G", "30", "-W", "1"],
+                    timeout=35, capture_output=True,
+                )
+                self._add(cap_path, f"network/{cap_path.name}")
+            except Exception as exc:
+                self._log(f"tcpdump: {exc}")
+
+    # ── PE binaries ───────────────────────────────────────────────────────────
+
+    def _pe_binaries(self) -> None:
+        """Collect suspicious binaries from temp/download locations."""
+        print("  [*] PE / Executable Binaries")
+        home = Path.home().parent
+        SEARCH_DIRS = [Path("/tmp"), Path("/var/tmp")]
+        if home.exists():
+            for user_dir in sorted(home.iterdir()):
+                if user_dir.is_dir():
+                    SEARCH_DIRS += [
+                        user_dir / "Downloads",
+                        user_dir / "Desktop",
+                    ]
+
+        ELF_MAGIC = b'\x7fELF'
+        PE_MAGIC  = b'MZ'
+        MAX_FILE  = 50 * 1024 * 1024
+        MAX_FILES = 500
+        count = 0
+        for d in SEARCH_DIRS:
+            if not d.exists():
+                continue
+            for p in sorted(d.rglob("*")):
+                if count >= MAX_FILES:
+                    break
+                if not p.is_file():
+                    continue
+                sz = p.stat().st_size
+                if sz < 4 or sz > MAX_FILE:
+                    continue
+                try:
+                    magic = p.read_bytes()[:4]
+                except (PermissionError, OSError):
+                    continue
+                if not (magic[:4] == ELF_MAGIC or magic[:2] == PE_MAGIC):
+                    continue
+                if self._add(p, f"pe/{d.name}/{p.name}"):
+                    count += 1
+
+    # ── Office documents ──────────────────────────────────────────────────────
+
+    def _documents(self) -> None:
+        """Collect Office documents and PDFs from user directories."""
+        print("  [*] Office Documents & PDFs")
+        DOC_EXTS  = {".doc", ".docx", ".docm", ".xls", ".xlsx", ".xlsm",
+                     ".ppt", ".pptx", ".pptm", ".rtf", ".pdf", ".odt", ".ods",
+                     ".pages", ".numbers", ".key"}
+        MAX_FILE  = 100 * 1024 * 1024
+        MAX_FILES = 500
+        home = Path.home().parent
+        count = 0
+        for user_dir in (sorted(home.iterdir()) if home.exists() else []):
+            if not user_dir.is_dir():
+                continue
+            for rel in ["Documents", "Downloads", "Desktop"]:
+                d = user_dir / rel
+                if not d.exists():
+                    continue
+                for p in sorted(d.rglob("*")):
+                    if count >= MAX_FILES:
+                        break
+                    if not p.is_file() or p.suffix.lower() not in DOC_EXTS:
+                        continue
+                    if p.stat().st_size == 0 or p.stat().st_size > MAX_FILE:
+                        continue
+                    if self._add(p, f"documents/{user_dir.name}/{rel}/{p.name}"):
+                        count += 1
+
     # ── System triage ─────────────────────────────────────────────────────────
 
     def _system_triage(self) -> None:
@@ -892,6 +1494,922 @@ class MacOSCollector(Collector):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# External Disk Collector (BitLocker support via dislocker-fuse)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ExternalDiskCollector(Collector):
+    """
+    Collect forensic artifacts from an external Windows disk (NTFS).
+
+    Works on Linux with dislocker-fuse for BitLocker-encrypted partitions,
+    or with a plain ntfs-3g/mount for unencrypted NTFS disks.
+    Also accepts a path to an already-mounted directory.
+
+    Usage
+    -----
+      # Unencrypted NTFS partition:
+      tracex-collector --disk /dev/sdb1
+
+      # BitLocker-encrypted partition (recovery key):
+      tracex-collector --disk /dev/sdb1 --bitlocker-key "123456-789012-345678-901234-567890-123456-789012-345678"
+
+      # Already-mounted directory (no root needed):
+      tracex-collector --disk /mnt/external
+
+    Requirements (Linux)
+    --------------------
+      apt-get install dislocker ntfs-3g
+    """
+
+    # Mirrors harvest_task LEVEL_CATEGORIES["small"] — safe defaults for dead-box triage.
+    # Heavy categories (memory_artifacts, pe, documents, printing) are opt-in only.
+    DEFAULT_COLLECT = {
+        "evtx", "registry", "prefetch", "mft",
+        "execution", "persistence", "network_cfg",
+        "usb_devices", "credentials", "antivirus", "wer_crashes", "win_logs",
+    }
+
+    def __init__(self, disk: str, bitlocker_key: str = "", **kwargs):
+        super().__init__(**kwargs)
+        self.disk          = disk
+        self.bitlocker_key = bitlocker_key.strip()
+        self._dislocker_dir: Path | None = None
+        self._ntfs_dir: Path | None = None
+
+    # ── Mount lifecycle ───────────────────────────────────────────────────────
+
+    def _run_privileged(self, cmd: list, timeout: int = 60) -> bool:
+        """Run a command, prepending sudo when not already root."""
+        if IS_LINUX and os.getuid() != 0:
+            cmd = ["sudo"] + cmd
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+            if r.returncode != 0:
+                err = (r.stderr or r.stdout or b"").decode(errors="replace")[:300]
+                self._warn(f"{cmd[0]} failed: {err}")
+                return False
+            return True
+        except subprocess.TimeoutExpired:
+            self._warn(f"{cmd[0]} timed out")
+            return False
+        except Exception as exc:
+            self._warn(f"{cmd[0]} error: {exc}")
+            return False
+
+    def _detect_bitlocker(self, device: str) -> bool:
+        """Check for BitLocker volume signature at sector offset 3."""
+        try:
+            with open(device, "rb") as fh:
+                header = fh.read(16)
+            return header[3:11] == b"-FVE-FS-"
+        except (PermissionError, OSError):
+            # Cannot read raw device — assume it may be BitLocker if key provided
+            return bool(self.bitlocker_key)
+
+    def _unlock_bitlocker(self, device: str, mount_point: Path) -> str | None:
+        """
+        Unlock a BitLocker partition using dislocker-fuse.
+
+        Creates a virtual NTFS image (dislocker-file) inside mount_point.
+        Returns the path to that file on success, None on failure.
+        """
+        mount_point.mkdir(parents=True, exist_ok=True)
+
+        dl_bin = shutil.which("dislocker-fuse") or shutil.which("dislocker")
+        if not dl_bin:
+            self._warn(
+                "dislocker-fuse not found. Install with: apt-get install dislocker"
+            )
+            return None
+
+        cmd = [dl_bin, device]
+        if self.bitlocker_key:
+            # 48-digit recovery key (digits + hyphens) → -p flag
+            # Passphrase → -u flag
+            if re.match(r"^[\d\-]+$", self.bitlocker_key):
+                cmd += ["-p", self.bitlocker_key]
+            else:
+                cmd += ["-u", self.bitlocker_key]
+        else:
+            self._warn(
+                "No BitLocker key supplied — attempting unauthenticated unlock "
+                "(only works on volumes with clear-key protector)."
+            )
+
+        cmd += ["--", str(mount_point)]
+        print(f"      dislocker-fuse: unlocking {device} → {mount_point}")
+
+        if not self._run_privileged(cmd, timeout=120):
+            return None
+
+        dl_file = mount_point / "dislocker-file"
+        if not dl_file.exists():
+            self._warn(f"dislocker-fuse succeeded but dislocker-file is absent in {mount_point}")
+            return None
+
+        return str(dl_file)
+
+    def _mount_ntfs(self, source: str, mount_point: Path) -> bool:
+        """Mount an NTFS image or partition read-only at mount_point."""
+        mount_point.mkdir(parents=True, exist_ok=True)
+
+        # Prefer ntfs-3g (handles advanced NTFS features and compressed files)
+        ntfs3g = shutil.which("ntfs-3g") or shutil.which("mount.ntfs-3g")
+        if ntfs3g:
+            ok = self._run_privileged(
+                [ntfs3g, source, str(mount_point),
+                 "-o", "ro,noatime,streams_interface=none,nodev,nosuid"],
+                timeout=30,
+            )
+            if ok:
+                return True
+
+        # Generic mount fallback (kernel NTFS module)
+        ok = self._run_privileged(
+            ["mount", "-t", "ntfs", "-o", "ro,noatime", source, str(mount_point)],
+            timeout=30,
+        )
+        return ok
+
+    def _umount(self, path: Path) -> None:
+        self._run_privileged(["umount", "-l", str(path)], timeout=30)
+
+    def unlock_and_mount(self) -> Path | None:
+        """
+        Full pipeline: detect → BitLocker unlock → NTFS mount.
+        Returns the filesystem root Path, or None on any failure.
+        """
+        disk_path = Path(self.disk)
+
+        # Already a mounted directory
+        if disk_path.is_dir():
+            print(f"      Using existing mount: {disk_path}")
+            return disk_path
+
+        device = str(disk_path)
+
+        # ── BitLocker unlock ───────────────────────────────────────────────────
+        is_bitlocker = self.bitlocker_key or self._detect_bitlocker(device)
+        if is_bitlocker:
+            print(f"  [*] BitLocker volume detected — unlocking {device}")
+            self._dislocker_dir = Path(tempfile.mkdtemp(prefix="fo_dislocker_"))
+            dl_file = self._unlock_bitlocker(device, self._dislocker_dir)
+            if dl_file is None:
+                return None
+            ntfs_source = dl_file
+        else:
+            ntfs_source = device
+
+        # ── NTFS mount ─────────────────────────────────────────────────────────
+        self._ntfs_dir = Path(tempfile.mkdtemp(prefix="fo_ntfs_"))
+        print(f"  [*] Mounting NTFS → {self._ntfs_dir}")
+        if not self._mount_ntfs(ntfs_source, self._ntfs_dir):
+            self._warn(f"Failed to mount NTFS from {ntfs_source}")
+            return None
+
+        return self._ntfs_dir
+
+    def cleanup(self) -> None:
+        """Unmount filesystems before removing the staging directory."""
+        if self._ntfs_dir and self._ntfs_dir.exists():
+            self._umount(self._ntfs_dir)
+            try:
+                self._ntfs_dir.rmdir()
+            except OSError:
+                pass
+
+        if self._dislocker_dir and self._dislocker_dir.exists():
+            self._umount(self._dislocker_dir)
+            try:
+                self._dislocker_dir.rmdir()
+            except OSError:
+                pass
+
+        super().cleanup()
+
+    # ── Artifact collection from filesystem root ──────────────────────────────
+
+    def collect_all(self) -> None:
+        root = self.unlock_and_mount()
+        if root is None:
+            self._warn("Could not access the disk — no artifacts collected")
+            return
+
+        win_dir   = root / "Windows"
+        users_dir = root / "Users"
+
+        print(f"  Filesystem root : {root}")
+        print(f"  Windows dir     : {'found' if win_dir.exists() else 'not found'}")
+        print(f"  Users dir       : {'found' if users_dir.exists() else 'not found'}")
+        print()
+
+        self._total_cats = len(self.collect)
+
+        # ── Core ─────────────────────────────────────────────────────────────
+        self._run_cat("evtx",            self._evtx_from,            win_dir)
+        self._run_cat("registry",        self._registry_from,        win_dir, users_dir)
+        self._run_cat("prefetch",        self._prefetch_from,        win_dir)
+        self._run_cat("mft",             self._mft_from,             root)
+        self._run_cat("execution",       self._execution_from,       win_dir)
+        self._run_cat("persistence",     self._persistence_from,     win_dir)
+        self._run_cat("filesystem",      self._filesystem_from,      root)
+        # ── Network & USB ────────────────────────────────────────────────────
+        self._run_cat("network_cfg",     self._network_cfg_from,     root, win_dir)
+        self._run_cat("usb_devices",     self._usb_devices_from,     win_dir)
+        # ── Credentials & Security ───────────────────────────────────────────
+        self._run_cat("credentials",     self._credentials_from,     win_dir, users_dir)
+        self._run_cat("antivirus",       self._antivirus_from,       root)
+        self._run_cat("wer_crashes",     self._wer_crashes_from,     root)
+        self._run_cat("win_logs",        self._win_logs_from,        win_dir)
+        self._run_cat("boot_uefi",       self._boot_uefi_from,       win_dir)
+        self._run_cat("encryption",      self._encryption_from,      win_dir)
+        self._run_cat("etw_diagnostics", self._etw_diagnostics_from, win_dir)
+        # ── Browsers ─────────────────────────────────────────────────────────
+        self._run_cat("browser",         self._browser_from,         users_dir)
+        self._run_cat("browser_chrome",  self._browser_chrome_from,  users_dir)
+        self._run_cat("browser_edge",    self._browser_edge_from,    users_dir)
+        self._run_cat("browser_ie",      self._browser_ie_from,      users_dir)
+        # ── Email ────────────────────────────────────────────────────────────
+        self._run_cat("email_outlook",    self._email_outlook_from,    users_dir)
+        self._run_cat("email_thunderbird",self._email_thunderbird_from,users_dir)
+        # ── Messaging ────────────────────────────────────────────────────────
+        self._run_cat("teams",           self._teams_from,            users_dir)
+        self._run_cat("slack",           self._slack_from,            users_dir)
+        self._run_cat("discord",         self._discord_from,          users_dir)
+        self._run_cat("signal",          self._signal_from,           users_dir)
+        self._run_cat("whatsapp",        self._whatsapp_from,         users_dir)
+        self._run_cat("telegram",        self._telegram_from,         users_dir)
+        # ── Cloud ────────────────────────────────────────────────────────────
+        self._run_cat("cloud_onedrive",    self._cloud_onedrive_from,    users_dir)
+        self._run_cat("cloud_google_drive",self._cloud_google_drive_from,users_dir)
+        self._run_cat("cloud_dropbox",     self._cloud_dropbox_from,     users_dir)
+        # ── Remote access ────────────────────────────────────────────────────
+        self._run_cat("remote_access",   self._remote_access_from,   root, users_dir)
+        self._run_cat("rdp",             self._rdp_from,             users_dir)
+        self._run_cat("ssh_ftp",         self._ssh_ftp_from,         users_dir)
+        # ── Apps & user data ─────────────────────────────────────────────────
+        self._run_cat("lnk",             self._lnk_from,             users_dir)
+        self._run_cat("tasks",           self._tasks_from,           win_dir)
+        self._run_cat("office",          self._office_from,          users_dir)
+        self._run_cat("dev_tools",       self._dev_tools_from,       users_dir)
+        self._run_cat("password_managers",self._password_managers_from,users_dir)
+        self._run_cat("database_clients",self._database_clients_from,users_dir)
+        self._run_cat("gaming",          self._gaming_from,          root, users_dir)
+        self._run_cat("windows_apps",    self._windows_apps_from,    users_dir)
+        self._run_cat("wsl",             self._wsl_from,             users_dir)
+        # ── Infrastructure ───────────────────────────────────────────────────
+        self._run_cat("vpn",             self._vpn_from,             root)
+        self._run_cat("iis_web",         self._iis_web_from,         root)
+        self._run_cat("active_directory",self._active_directory_from,win_dir)
+        self._run_cat("virtualization",  self._virtualization_from,  root)
+        self._run_cat("recovery",        self._recovery_from,        root)
+        self._run_cat("printing",        self._printing_from,        win_dir)
+        # ── Heavy / opt-in ───────────────────────────────────────────────────
+        self._run_cat("pe",              self._pe_from,              win_dir, users_dir)
+        self._run_cat("documents",       self._documents_from,       users_dir)
+        self._run_cat("memory_artifacts",self._memory_artifacts_from,root)
+
+    def _evtx_from(self, win_dir: Path) -> None:
+        print("  [*] Event Logs (EVTX)")
+        evtx_dir = win_dir / "System32" / "winevt" / "Logs"
+        if not evtx_dir.exists():
+            self._warn(f"EVTX directory not found: {evtx_dir}")
+            return
+        priority = [
+            "Security.evtx", "System.evtx", "Application.evtx",
+            "Microsoft-Windows-PowerShell%4Operational.evtx",
+            "Microsoft-Windows-Sysmon%4Operational.evtx",
+            "Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx",
+            "Microsoft-Windows-TaskScheduler%4Operational.evtx",
+            "Microsoft-Windows-WinRM%4Operational.evtx",
+            "Microsoft-Windows-WindowsDefender%4Operational.evtx",
+            "Microsoft-Windows-Bits-Client%4Operational.evtx",
+            "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Operational.evtx",
+        ]
+        seen: set = set()
+        for name in priority:
+            if self._add(evtx_dir / name, f"evtx/{name}"):
+                seen.add(name)
+        count = 0
+        for p in sorted(evtx_dir.glob("*.evtx")):
+            if count >= 100:
+                break
+            if p.name not in seen and self._add(p, f"evtx/{p.name}"):
+                count += 1
+
+    def _registry_from(self, win_dir: Path, users_dir: Path) -> None:
+        print("  [*] Registry Hives")
+        config_dir = win_dir / "System32" / "config"
+        for name in ["SYSTEM", "SOFTWARE", "SAM", "SECURITY"]:
+            self._add(config_dir / name, f"registry/{name}")
+        if users_dir.exists():
+            for user_dir in sorted(users_dir.iterdir()):
+                if not user_dir.is_dir():
+                    continue
+                self._add(
+                    user_dir / "NTUSER.DAT",
+                    f"registry/users/{user_dir.name}/NTUSER.DAT",
+                )
+                usrclass = (
+                    user_dir / "AppData" / "Local" / "Microsoft" / "Windows" / "UsrClass.dat"
+                )
+                self._add(
+                    usrclass,
+                    f"registry/users/{user_dir.name}/USRCLASS.DAT",
+                )
+
+    def _prefetch_from(self, win_dir: Path) -> None:
+        print("  [*] Prefetch Files")
+        pf_dir = win_dir / "Prefetch"
+        count = 0
+        for p in (sorted(pf_dir.glob("*.pf")) if pf_dir.exists() else []):
+            if count >= 500:
+                break
+            if self._add(p, f"prefetch/{p.name}"):
+                count += 1
+
+    def _lnk_from(self, users_dir: Path) -> None:
+        print("  [*] LNK / Recent Items")
+        count = 0
+        for user_dir in (sorted(users_dir.iterdir()) if users_dir.exists() else []):
+            if not user_dir.is_dir():
+                continue
+            recent = (
+                user_dir / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Recent"
+            )
+            for p in (recent.rglob("*.lnk") if recent.exists() else []):
+                if count >= 2000:
+                    break
+                if self._add(p, f"lnk/{user_dir.name}/{p.name}"):
+                    count += 1
+
+    def _browser_from(self, users_dir: Path) -> None:
+        print("  [*] Browser Artifacts")
+        PROFILES = [
+            ("chrome",  "AppData/Local/Google/Chrome/User Data/Default"),
+            ("edge",    "AppData/Local/Microsoft/Edge/User Data/Default"),
+            ("brave",   "AppData/Local/BraveSoftware/Brave-Browser/User Data/Default"),
+            ("opera",   "AppData/Roaming/Opera Software/Opera Stable"),
+            ("vivaldi", "AppData/Local/Vivaldi/User Data/Default"),
+        ]
+        DB_FILES = ["History", "Web Data", "Cookies", "Login Data", "Bookmarks"]
+
+        for user_dir in (sorted(users_dir.iterdir()) if users_dir.exists() else []):
+            if not user_dir.is_dir():
+                continue
+            for browser, rel in PROFILES:
+                profile_dir = user_dir / Path(rel.replace("/", os.sep))
+                for db in DB_FILES:
+                    self._add(
+                        profile_dir / db,
+                        f"browser/{browser}/{user_dir.name}/{db}",
+                    )
+            # Firefox
+            ff_profiles = (
+                user_dir / "AppData" / "Roaming" / "Mozilla" / "Firefox" / "Profiles"
+            )
+            if ff_profiles.exists():
+                for prof in ff_profiles.iterdir():
+                    if not prof.is_dir():
+                        continue
+                    for db in ("places.sqlite", "cookies.sqlite", "logins.json", "formhistory.sqlite"):
+                        self._add(
+                            prof / db,
+                            f"browser/firefox/{user_dir.name}/{prof.name}/{db}",
+                        )
+
+    def _tasks_from(self, win_dir: Path) -> None:
+        print("  [*] Scheduled Tasks")
+        tasks_dir = win_dir / "System32" / "Tasks"
+        count = 0
+        for p in (tasks_dir.rglob("*") if tasks_dir.exists() else []):
+            if count >= 500:
+                break
+            if p.is_file() and not p.suffix:
+                rel = p.relative_to(tasks_dir)
+                if self._add(p, f"scheduled_tasks/{rel}"):
+                    count += 1
+
+    def _mft_from(self, root: Path) -> None:
+        """Copy $MFT directly from the NTFS mount point root."""
+        print("  [*] Master File Table ($MFT)")
+        mft = root / "$MFT"
+        if mft.exists():
+            self._add(mft, "mft/C_$MFT")
+        else:
+            self._warn("$MFT not found at filesystem root (may require elevated access)")
+
+    def _pe_from(self, win_dir: Path, users_dir: Path) -> None:
+        print("  [*] PE / Executable Binaries")
+        PE_EXTS  = {".exe", ".dll", ".scr", ".bat", ".ps1", ".vbs", ".js", ".msi", ".hta"}
+        MAX_FILE = 200 * 1024 * 1024
+        MAX_FILES = 1000
+        dirs: list = [win_dir / "Temp"]
+        if users_dir.exists():
+            for ud in sorted(users_dir.iterdir()):
+                if not ud.is_dir():
+                    continue
+                for rel in [
+                    "AppData/Local/Temp", "AppData/Roaming",
+                    "Downloads", "Desktop",
+                    "AppData/Local/Microsoft/Windows/INetCache",
+                ]:
+                    dirs.append(ud / Path(rel.replace("/", os.sep)))
+        count = 0
+        total = 0
+        for d in dirs:
+            if not d.exists():
+                continue
+            for p in sorted(d.rglob("*")):
+                if count >= MAX_FILES or total >= 2 * 1024 ** 3:
+                    break
+                if not p.is_file() or p.suffix.lower() not in PE_EXTS:
+                    continue
+                sz = p.stat().st_size
+                if sz == 0 or sz > MAX_FILE:
+                    continue
+                if self._add(p, f"pe/{d.name}/{p.name}"):
+                    count += 1
+                    total += sz
+
+    def _documents_from(self, users_dir: Path) -> None:
+        print("  [*] Office Documents & PDFs")
+        DOC_EXTS = {".doc", ".docx", ".docm", ".xls", ".xlsx", ".xlsm",
+                    ".ppt", ".pptx", ".pptm", ".rtf", ".pdf", ".odt", ".ods"}
+        MAX_FILE  = 100 * 1024 * 1024
+        MAX_FILES = 500
+        count = 0
+        for ud in (sorted(users_dir.iterdir()) if users_dir.exists() else []):
+            if not ud.is_dir():
+                continue
+            for rel in ["Documents", "Downloads", "Desktop"]:
+                d = ud / rel
+                if not d.exists():
+                    continue
+                for p in sorted(d.rglob("*")):
+                    if count >= MAX_FILES:
+                        break
+                    if not p.is_file() or p.suffix.lower() not in DOC_EXTS:
+                        continue
+                    if p.stat().st_size == 0 or p.stat().st_size > MAX_FILE:
+                        continue
+                    if self._add(p, f"documents/{ud.name}/{rel}/{p.name}"):
+                        count += 1
+
+    # ── ForensicHarvester category methods ────────────────────────────────────
+
+    _USER_SKIP = {"Default", "Default User", "Public", "All Users"}
+
+    def _iter_users(self, users_dir: Path):
+        """Yield user subdirectories, skipping built-in system accounts."""
+        if not users_dir.exists():
+            return
+        for d in sorted(users_dir.iterdir()):
+            if d.is_dir() and d.name not in self._USER_SKIP:
+                yield d
+
+    def _execution_from(self, win_dir: Path) -> None:
+        print("  [*] Execution Evidence (SRUM, Amcache, Prefetch)")
+        self._add(win_dir / "System32" / "sru" / "SRUDB.dat",    "execution/SRUDB.dat")
+        self._add(win_dir / "AppCompat" / "Programs" / "Amcache.hve", "execution/Amcache.hve")
+        self._add(win_dir / "System32" / "Amcache.hve",           "execution/Amcache.hve")
+        pf = win_dir / "Prefetch"
+        count = 0
+        for p in (sorted(pf.glob("*.pf")) if pf.exists() else []):
+            if count >= 500:
+                break
+            if self._add(p, f"execution/prefetch/{p.name}"):
+                count += 1
+
+    def _persistence_from(self, win_dir: Path) -> None:
+        print("  [*] Persistence (Tasks, WMI)")
+        for tasks_dir in [win_dir / "System32" / "Tasks", win_dir / "SysWOW64" / "Tasks"]:
+            count = 0
+            for p in (tasks_dir.rglob("*") if tasks_dir.exists() else []):
+                if count >= 500:
+                    break
+                if p.is_file() and not p.suffix:
+                    rel = p.relative_to(tasks_dir)
+                    if self._add(p, f"persistence/tasks/{tasks_dir.name}/{rel}"):
+                        count += 1
+        wmi_repo = win_dir / "System32" / "wbem" / "Repository"
+        self._add(wmi_repo / "OBJECTS.DATA", "persistence/wmi/OBJECTS.DATA")
+        self._add(wmi_repo / "INDEX.BTR",    "persistence/wmi/INDEX.BTR")
+
+    def _network_cfg_from(self, root: Path, win_dir: Path) -> None:
+        print("  [*] Network Config (Hosts, WLAN, Firewall)")
+        self._add(win_dir / "System32" / "drivers" / "etc" / "hosts",
+                  "network_cfg/hosts")
+        self._add(win_dir / "System32" / "LogFiles" / "Firewall" / "pfirewall.log",
+                  "network_cfg/pfirewall.log")
+        wlan = root / "ProgramData" / "Microsoft" / "Wlansvc" / "Profiles" / "Interfaces"
+        if wlan.exists():
+            for p in wlan.rglob("*.xml"):
+                self._add(p, f"network_cfg/wlan/{p.parent.name}/{p.name}")
+
+    def _usb_devices_from(self, win_dir: Path) -> None:
+        print("  [*] USB Device History")
+        inf = win_dir / "INF"
+        self._add(inf / "setupapi.dev.log",   "usb_devices/setupapi.dev.log")
+        self._add(inf / "setupapi.setup.log",  "usb_devices/setupapi.setup.log")
+
+    def _credentials_from(self, win_dir: Path, users_dir: Path) -> None:
+        print("  [*] Credentials (DPAPI, Credential Manager)")
+        cfg = win_dir / "System32" / "config"
+        self._add(cfg / "SAM",      "credentials/SAM")
+        self._add(cfg / "SECURITY", "credentials/SECURITY")
+        for ud in self._iter_users(users_dir):
+            for rel in ["AppData/Local/Microsoft/Credentials",
+                        "AppData/Roaming/Microsoft/Credentials",
+                        "AppData/Local/Microsoft/Protect"]:
+                d = ud / Path(rel.replace("/", os.sep))
+                if d.exists():
+                    for p in d.rglob("*"):
+                        if p.is_file():
+                            self._add(p, f"credentials/{ud.name}/{rel.split('/')[-1]}/{p.name}")
+
+    def _antivirus_from(self, root: Path) -> None:
+        print("  [*] Antivirus / Windows Defender")
+        base = root / "ProgramData" / "Microsoft" / "Windows Defender"
+        for sub in ["Quarantine", "Support"]:
+            d = base / sub
+            if d.exists():
+                for p in d.rglob("*"):
+                    if p.is_file():
+                        self._add(p, f"antivirus/{sub}/{p.name}")
+
+    def _wer_crashes_from(self, root: Path) -> None:
+        print("  [*] WER Crash Dumps & Reports")
+        base = root / "ProgramData" / "Microsoft" / "Windows" / "WER"
+        count = 0
+        for sub in ["ReportQueue", "ReportArchive"]:
+            d = base / sub
+            for p in (d.rglob("*") if d.exists() else []):
+                if count >= 200:
+                    break
+                if p.is_file():
+                    if self._add(p, f"wer_crashes/{sub}/{p.name}"):
+                        count += 1
+
+    def _win_logs_from(self, win_dir: Path) -> None:
+        print("  [*] Windows Logs (CBS, DISM, WU)")
+        self._add(win_dir / "Logs" / "CBS" / "CBS.log",   "win_logs/CBS.log")
+        self._add(win_dir / "Logs" / "DISM" / "dism.log", "win_logs/dism.log")
+        self._add(win_dir / "WindowsUpdate.log",           "win_logs/WindowsUpdate.log")
+        panther = win_dir / "Panther"
+        if panther.exists():
+            for p in panther.glob("*.log"):
+                self._add(p, f"win_logs/panther/{p.name}")
+
+    def _filesystem_from(self, root: Path) -> None:
+        print("  [*] NTFS Metadata ($MFT, $LogFile, $Boot)")
+        for name in ["$MFT", "$LogFile", "$Boot"]:
+            self._add(root / name, f"filesystem/{name}")
+
+    def _boot_uefi_from(self, win_dir: Path) -> None:
+        print("  [*] Boot Config (BCD, EFI)")
+        cfg = win_dir / "System32" / "config"
+        self._add(cfg / "BCD",              "boot_uefi/BCD")
+        self._add(win_dir / "bootstat.dat", "boot_uefi/bootstat.dat")
+
+    def _encryption_from(self, win_dir: Path) -> None:
+        print("  [*] Encryption Metadata (BitLocker / EFS)")
+        self._add(win_dir / "System32" / "FVE" / "BDE-Recovery.txt",
+                  "encryption/BDE-Recovery.txt")
+
+    def _etw_diagnostics_from(self, win_dir: Path) -> None:
+        print("  [*] ETW Diagnostic Traces")
+        d = win_dir / "System32" / "LogFiles" / "WMI"
+        count = 0
+        for p in (d.glob("*.etl") if d.exists() else []):
+            if count >= 50:
+                break
+            if self._add(p, f"etw_diagnostics/{p.name}"):
+                count += 1
+
+    def _browser_chrome_from(self, users_dir: Path) -> None:
+        print("  [*] Chrome Browser Artifacts")
+        FILES = ["History", "Cookies", "Web Data", "Login Data", "Bookmarks"]
+        for ud in self._iter_users(users_dir):
+            profile = ud / "AppData" / "Local" / "Google" / "Chrome" / "User Data" / "Default"
+            for f in FILES:
+                self._add(profile / f, f"browser_chrome/{ud.name}/{f}")
+
+    def _browser_edge_from(self, users_dir: Path) -> None:
+        print("  [*] Edge Browser Artifacts")
+        FILES = ["History", "Cookies", "Web Data", "Login Data"]
+        for ud in self._iter_users(users_dir):
+            profile = ud / "AppData" / "Local" / "Microsoft" / "Edge" / "User Data" / "Default"
+            for f in FILES:
+                self._add(profile / f, f"browser_edge/{ud.name}/{f}")
+
+    def _browser_ie_from(self, users_dir: Path) -> None:
+        print("  [*] Internet Explorer WebCache")
+        FILES = ["WebCacheV01.dat", "WebCacheV24.dat"]
+        for ud in self._iter_users(users_dir):
+            wc = ud / "AppData" / "Local" / "Microsoft" / "Windows" / "WebCache"
+            for f in FILES:
+                self._add(wc / f, f"browser_ie/{ud.name}/{f}")
+
+    def _email_outlook_from(self, users_dir: Path) -> None:
+        print("  [*] Outlook Email (.pst / .ost)")
+        count = 0
+        for ud in self._iter_users(users_dir):
+            for rel in ["Documents/Outlook Files",
+                        "AppData/Local/Microsoft/Outlook"]:
+                d = ud / Path(rel.replace("/", os.sep))
+                for p in (d.rglob("*.pst") if d.exists() else []):
+                    if self._add(p, f"email_outlook/{ud.name}/{p.name}"):
+                        count += 1
+                for p in (d.rglob("*.ost") if d.exists() else []):
+                    if self._add(p, f"email_outlook/{ud.name}/{p.name}"):
+                        count += 1
+
+    def _email_thunderbird_from(self, users_dir: Path) -> None:
+        print("  [*] Thunderbird Email")
+        for ud in self._iter_users(users_dir):
+            tb = ud / "AppData" / "Roaming" / "Thunderbird" / "Profiles"
+            if tb.exists():
+                for prof in tb.iterdir():
+                    if prof.is_dir():
+                        for p in prof.rglob("*.sqlite"):
+                            self._add(p, f"email_thunderbird/{ud.name}/{prof.name}/{p.name}")
+                        for p in prof.rglob("*.msf"):
+                            self._add(p, f"email_thunderbird/{ud.name}/{prof.name}/{p.name}")
+
+    def _teams_from(self, users_dir: Path) -> None:
+        print("  [*] Microsoft Teams")
+        PATHS = ["AppData/Roaming/Microsoft/Teams/logs.txt",
+                 "AppData/Roaming/Microsoft/Teams/IndexedDB",
+                 "AppData/Roaming/Microsoft/Teams/Local Storage"]
+        for ud in self._iter_users(users_dir):
+            for rel in PATHS:
+                p = ud / Path(rel.replace("/", os.sep))
+                if p.is_file():
+                    self._add(p, f"teams/{ud.name}/{p.name}")
+                elif p.is_dir():
+                    for f in p.rglob("*"):
+                        if f.is_file():
+                            self._add(f, f"teams/{ud.name}/{p.name}/{f.name}")
+
+    def _slack_from(self, users_dir: Path) -> None:
+        print("  [*] Slack")
+        for ud in self._iter_users(users_dir):
+            d = ud / "AppData" / "Roaming" / "Slack" / "logs"
+            if d.exists():
+                for p in d.rglob("*.log"):
+                    self._add(p, f"slack/{ud.name}/{p.name}")
+
+    def _discord_from(self, users_dir: Path) -> None:
+        print("  [*] Discord")
+        for ud in self._iter_users(users_dir):
+            d = ud / "AppData" / "Roaming" / "discord" / "Local Storage"
+            if d.exists():
+                for p in d.rglob("*"):
+                    if p.is_file():
+                        self._add(p, f"discord/{ud.name}/{p.name}")
+
+    def _signal_from(self, users_dir: Path) -> None:
+        print("  [*] Signal Desktop")
+        for ud in self._iter_users(users_dir):
+            db = ud / "AppData" / "Roaming" / "Signal" / "databases" / "db.sqlite"
+            self._add(db, f"signal/{ud.name}/db.sqlite")
+
+    def _whatsapp_from(self, users_dir: Path) -> None:
+        print("  [*] WhatsApp Desktop")
+        for ud in self._iter_users(users_dir):
+            base = ud / "AppData" / "Local" / "Packages"
+            if base.exists():
+                for pkg in base.iterdir():
+                    if pkg.is_dir() and "WhatsApp" in pkg.name:
+                        for p in pkg.rglob("*.db"):
+                            self._add(p, f"whatsapp/{ud.name}/{p.name}")
+
+    def _telegram_from(self, users_dir: Path) -> None:
+        print("  [*] Telegram Desktop")
+        for ud in self._iter_users(users_dir):
+            tdata = ud / "AppData" / "Roaming" / "Telegram Desktop" / "tdata"
+            if tdata.exists():
+                for p in tdata.iterdir():
+                    if p.is_file() and p.suffix not in {".db"}:
+                        self._add(p, f"telegram/{ud.name}/{p.name}")
+
+    def _cloud_onedrive_from(self, users_dir: Path) -> None:
+        print("  [*] OneDrive Sync Artifacts")
+        for ud in self._iter_users(users_dir):
+            d = ud / "AppData" / "Local" / "Microsoft" / "OneDrive"
+            if d.exists():
+                for p in d.rglob("*.db"):
+                    self._add(p, f"cloud_onedrive/{ud.name}/{p.name}")
+                for p in d.rglob("*.log"):
+                    self._add(p, f"cloud_onedrive/{ud.name}/{p.name}")
+
+    def _cloud_google_drive_from(self, users_dir: Path) -> None:
+        print("  [*] Google Drive Sync Artifacts")
+        for ud in self._iter_users(users_dir):
+            d = ud / "AppData" / "Local" / "Google" / "DriveFS"
+            if d.exists():
+                for p in d.rglob("*.db"):
+                    self._add(p, f"cloud_google_drive/{ud.name}/{p.name}")
+
+    def _cloud_dropbox_from(self, users_dir: Path) -> None:
+        print("  [*] Dropbox Sync Artifacts")
+        for ud in self._iter_users(users_dir):
+            d = ud / "AppData" / "Local" / "Dropbox"
+            if d.exists():
+                for p in d.rglob("*.db"):
+                    self._add(p, f"cloud_dropbox/{ud.name}/{p.name}")
+                for p in d.rglob("*.json"):
+                    self._add(p, f"cloud_dropbox/{ud.name}/{p.name}")
+
+    def _remote_access_from(self, root: Path, users_dir: Path) -> None:
+        print("  [*] Remote Access (AnyDesk, TeamViewer)")
+        tv_logs = root / "ProgramData" / "TeamViewer" / "Logs"
+        if tv_logs.exists():
+            for p in tv_logs.glob("*.log"):
+                self._add(p, f"remote_access/teamviewer/{p.name}")
+        for ud in self._iter_users(users_dir):
+            ad = ud / "AppData" / "Roaming" / "AnyDesk"
+            if ad.exists():
+                for p in ad.rglob("*.trace"):
+                    self._add(p, f"remote_access/anydesk/{ud.name}/{p.name}")
+                for p in ad.rglob("*.conf"):
+                    self._add(p, f"remote_access/anydesk/{ud.name}/{p.name}")
+
+    def _rdp_from(self, users_dir: Path) -> None:
+        print("  [*] RDP / Terminal Services")
+        for ud in self._iter_users(users_dir):
+            cache = (ud / "AppData" / "Local" / "Microsoft" /
+                     "Terminal Server Client" / "Cache")
+            if cache.exists():
+                for p in cache.rglob("*"):
+                    if p.is_file():
+                        self._add(p, f"rdp/{ud.name}/{p.name}")
+
+    def _ssh_ftp_from(self, users_dir: Path) -> None:
+        print("  [*] SSH / FTP Clients (PuTTY, WinSCP)")
+        for ud in self._iter_users(users_dir):
+            ssh = ud / ".ssh"
+            if ssh.exists():
+                for p in ssh.iterdir():
+                    if p.is_file() and "id_" not in p.name:  # skip private keys
+                        self._add(p, f"ssh_ftp/{ud.name}/ssh/{p.name}")
+            putty = ud / "AppData" / "Roaming" / "PuTTY"
+            if putty.exists():
+                for p in putty.rglob("*"):
+                    if p.is_file():
+                        self._add(p, f"ssh_ftp/{ud.name}/putty/{p.name}")
+            winscp = ud / "AppData" / "Roaming" / "WinSCP.ini"
+            self._add(winscp, f"ssh_ftp/{ud.name}/WinSCP.ini")
+
+    def _office_from(self, users_dir: Path) -> None:
+        print("  [*] Office MRU / Trusted Documents")
+        for ud in self._iter_users(users_dir):
+            d = ud / "AppData" / "Roaming" / "Microsoft" / "Office"
+            if d.exists():
+                for p in d.rglob("*.json"):
+                    self._add(p, f"office/{ud.name}/{p.name}")
+                for p in d.rglob("Recent"):
+                    if p.is_dir():
+                        for f in p.iterdir():
+                            if f.is_file():
+                                self._add(f, f"office/{ud.name}/Recent/{f.name}")
+
+    def _iis_web_from(self, root: Path) -> None:
+        print("  [*] IIS Web Server Logs")
+        d = root / "inetpub" / "logs" / "LogFiles"
+        count = 0
+        for p in (d.rglob("*.log") if d.exists() else []):
+            if count >= 200:
+                break
+            if self._add(p, f"iis_web/{p.parent.name}/{p.name}"):
+                count += 1
+        self._add(root / "Windows" / "System32" / "inetsrv" / "config" / "applicationHost.config",
+                  "iis_web/applicationHost.config")
+
+    def _active_directory_from(self, win_dir: Path) -> None:
+        print("  [*] Active Directory (NTDS.dit, SYSVOL)")
+        ntds = win_dir / "NTDS"
+        self._add(ntds / "ntds.dit", "active_directory/ntds.dit")
+        self._add(ntds / "edb.log",  "active_directory/edb.log")
+
+    def _dev_tools_from(self, users_dir: Path) -> None:
+        print("  [*] Dev Tools (.gitconfig, PS history, .aws)")
+        for ud in self._iter_users(users_dir):
+            self._add(ud / ".gitconfig",
+                      f"dev_tools/{ud.name}/.gitconfig")
+            self._add(ud / ".git-credentials",
+                      f"dev_tools/{ud.name}/.git-credentials")
+            ps_hist = (ud / "AppData" / "Roaming" / "Microsoft" / "Windows" /
+                       "PowerShell" / "PSReadLine" / "ConsoleHost_history.txt")
+            self._add(ps_hist, f"dev_tools/{ud.name}/ConsoleHost_history.txt")
+            aws = ud / ".aws" / "credentials"
+            self._add(aws, f"dev_tools/{ud.name}/aws_credentials")
+            azure = ud / ".azure" / "accessTokens.json"
+            self._add(azure, f"dev_tools/{ud.name}/azure_accessTokens.json")
+
+    def _password_managers_from(self, users_dir: Path) -> None:
+        print("  [*] Password Managers (KeePass)")
+        count = 0
+        for ud in self._iter_users(users_dir):
+            for p in ud.rglob("*.kdbx"):
+                if count >= 20:
+                    break
+                if self._add(p, f"password_managers/{ud.name}/{p.name}"):
+                    count += 1
+
+    def _vpn_from(self, root: Path) -> None:
+        print("  [*] VPN Config (OpenVPN, WireGuard)")
+        openvpn = root / "ProgramData" / "OpenVPN" / "config"
+        if openvpn.exists():
+            for p in openvpn.rglob("*.ovpn"):
+                self._add(p, f"vpn/openvpn/{p.name}")
+        wg = root / "ProgramData" / "WireGuard"
+        if wg.exists():
+            for p in wg.rglob("*.conf"):
+                self._add(p, f"vpn/wireguard/{p.name}")
+
+    def _windows_apps_from(self, users_dir: Path) -> None:
+        print("  [*] Windows UWP / Modern Apps")
+        APPS = ["Microsoft.MicrosoftStickyNotes_8wekyb3d8bbwe"]
+        for ud in self._iter_users(users_dir):
+            pkg_base = ud / "AppData" / "Local" / "Packages"
+            for app in APPS:
+                d = pkg_base / app
+                if d.exists():
+                    for p in d.rglob("*.sqlite"):
+                        self._add(p, f"windows_apps/{ud.name}/{app}/{p.name}")
+
+    def _wsl_from(self, users_dir: Path) -> None:
+        print("  [*] WSL Filesystem & Config")
+        for ud in self._iter_users(users_dir):
+            pkg_base = ud / "AppData" / "Local" / "Packages"
+            if pkg_base.exists():
+                for pkg in pkg_base.iterdir():
+                    if pkg.is_dir() and "CanonicalGroupLimited" in pkg.name:
+                        cfg = pkg / "LocalState" / "rootfs" / "etc"
+                        if cfg.exists():
+                            for p in ["passwd", "shadow", "bash.bashrc"]:
+                                self._add(cfg / p, f"wsl/{ud.name}/{p}")
+
+    def _virtualization_from(self, root: Path) -> None:
+        print("  [*] Virtualization (Hyper-V, Docker)")
+        hv = root / "ProgramData" / "Microsoft" / "Windows" / "Hyper-V"
+        if hv.exists():
+            for p in hv.rglob("*.vhd"):
+                self._add(p, f"virtualization/hyperv/{p.name}")
+            for p in hv.rglob("*.vhdx"):
+                self._add(p, f"virtualization/hyperv/{p.name}")
+
+    def _recovery_from(self, root: Path) -> None:
+        print("  [*] Recovery (VSS, Windows.old)")
+        svi = root / "System Volume Information"
+        if svi.exists():
+            for p in svi.iterdir():
+                if p.is_file():
+                    self._add(p, f"recovery/svi/{p.name}")
+
+    def _database_clients_from(self, users_dir: Path) -> None:
+        print("  [*] Database Clients (SSMS, DBeaver)")
+        for ud in self._iter_users(users_dir):
+            for rel in ["AppData/Roaming/Microsoft SQL Server Management Studio",
+                        "AppData/Roaming/DBeaverData"]:
+                d = ud / Path(rel.replace("/", os.sep))
+                if d.exists():
+                    for p in d.rglob("*.xml"):
+                        self._add(p, f"database_clients/{ud.name}/{rel.split('/')[-1]}/{p.name}")
+                    for p in d.rglob("*.ini"):
+                        self._add(p, f"database_clients/{ud.name}/{rel.split('/')[-1]}/{p.name}")
+
+    def _gaming_from(self, root: Path, users_dir: Path) -> None:
+        print("  [*] Gaming Platforms (Steam, Epic)")
+        epic = root / "ProgramData" / "Epic" / "EpicGamesLauncher" / "Data" / "Logs"
+        if epic.exists():
+            for p in epic.glob("*.log"):
+                self._add(p, f"gaming/epic/{p.name}")
+        for ud in self._iter_users(users_dir):
+            steam = ud / "AppData" / "Local" / "Steam"
+            if steam.exists():
+                for p in steam.rglob("*.vdf"):
+                    self._add(p, f"gaming/steam/{ud.name}/{p.name}")
+
+    def _printing_from(self, win_dir: Path) -> None:
+        print("  [*] Print Spool Files")
+        spool = win_dir / "System32" / "spool" / "PRINTERS"
+        count = 0
+        for p in (spool.iterdir() if spool.exists() else []):
+            if count >= 100:
+                break
+            if p.is_file() and self._add(p, f"printing/{p.name}"):
+                count += 1
+
+    def _memory_artifacts_from(self, root: Path) -> None:
+        print("  [*] Memory Artifacts (pagefile, hiberfil)")
+        for name in ["pagefile.sys", "hiberfil.sys", "swapfile.sys"]:
+            self._add(root / name, f"memory_artifacts/{name}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Upload helper
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -943,85 +2461,190 @@ def upload_to_fo(zip_path: Path, api_url: str, case_id: str, api_token: str = ""
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="tracex-collector",
-        description="TraceX Artifact Collector",
+        prog="fo-harvester",
+        description="ForensicsOperator Harvester",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--output",    "-o", type=Path, default=None)
+    parser.add_argument("--output",    "-o", type=Path, default=None,
+                        help="Full path for the output ZIP (overrides config.json output_dir)")
     parser.add_argument("--api-url",   type=str, default=None)
     parser.add_argument("--case-id",   type=str, default=None)
-    parser.add_argument("--api-token", type=str, default=None,
-                        help="JWT bearer token for authenticated upload")
+    parser.add_argument("--api-token", type=str, default=None)
     parser.add_argument("--collect",   type=str, default=None,
-                        help="Comma-separated artifact types (e.g. evtx,registry,prefetch)")
+                        help="Override categories: comma-separated keys (e.g. evtx,registry)")
     parser.add_argument("--dry-run",   action="store_true")
     parser.add_argument("--verbose",   "-v", action="store_true")
+    parser.add_argument(
+        "--path", type=str, default=None,
+        help="Already-mounted Windows filesystem root (e.g. /mnt/evidence or E:\\)",
+    )
+    parser.add_argument(
+        "--disk", type=str, default=None,
+        help="Raw block device to mount — Linux only (requires ntfs-3g / dislocker)",
+    )
+    parser.add_argument(
+        "--bitlocker-key", type=str, default=None, dest="bitlocker_key",
+        help="BitLocker recovery key — stays local, never stored in config.json",
+    )
     args = parser.parse_args()
 
-    # Merge: EMBEDDED_CONFIG < CLI args (CLI wins)
+    t_start = time.monotonic()
+
+    # Merge: config.json (EMBEDDED_CONFIG) < CLI args (CLI always wins)
     cfg = {**EMBEDDED_CONFIG}
     if args.api_url:   cfg["api_url"]   = args.api_url
     if args.case_id:   cfg["case_id"]   = args.case_id
     if args.api_token: cfg["api_token"] = args.api_token
     if args.collect:   cfg["collect"]   = args.collect.split(",")
-    if args.output:    cfg["output"]    = str(args.output)
 
     api_url   = cfg.get("api_url",   "")
     case_id   = cfg.get("case_id",   "")
     api_token = cfg.get("api_token", "")
-    output   = Path(cfg["output"]) if cfg.get("output") else \
-               Path.cwd() / f"fo-artifacts-{HOSTNAME}-{TS_NOW}.zip"
+    case_name = cfg.get("case_name", "") or ""
 
-    # Resolve collect set.
-    # "memory" is opt-in only (large dumps) so it's never added by default,
-    # but is always accepted when the user explicitly names it.
-    raw_collect = cfg.get("collect", [])
-    if IS_WINDOWS:
-        allowed = DEFAULT_WINDOWS | {"memory"}
-        collect_set = (set(raw_collect) & allowed) if raw_collect else DEFAULT_WINDOWS
-    elif IS_MACOS:
-        allowed = DEFAULT_MACOS | {"memory"}
-        collect_set = (set(raw_collect) & allowed) if raw_collect else DEFAULT_MACOS
+    # Build output path — case_name goes in the filename if provided
+    if args.output:
+        output = Path(args.output)
     else:
-        allowed = DEFAULT_LINUX | {"memory"}
-        collect_set = (set(raw_collect) & allowed) if raw_collect else DEFAULT_LINUX
+        out_dir   = Path(cfg.get("output_dir", "./output"))
+        name_parts = ["fo-artifacts"]
+        if case_name:
+            name_parts.append(case_name.replace(" ", "_"))
+        name_parts += [HOSTNAME, TS_NOW]
+        filename = "-".join(name_parts) + ".zip"
+        output   = out_dir / filename
 
+    # Input source — CLI only (never stored in config.json)
+    path_arg      = args.path or ""
+    disk          = args.disk or ""
+    bitlocker_key = args.bitlocker_key or ""
+
+    # Live Windows: use ExternalDiskCollector(C:\) to get all 52 _from() methods
+    _live_windows = IS_WINDOWS and not path_arg and not disk
+    if _live_windows:
+        path_arg = os.environ.get("SystemDrive", "C:") + "\\"
+
+    # Collect set
+    raw_collect = cfg.get("collect", [])
+    if raw_collect:
+        collect_set = set(raw_collect)
+    elif path_arg or disk:
+        collect_set = ExternalDiskCollector.DEFAULT_COLLECT
+    elif IS_WINDOWS:
+        collect_set = DEFAULT_WINDOWS
+    elif IS_MACOS:
+        collect_set = DEFAULT_MACOS
+    else:
+        collect_set = DEFAULT_LINUX
+
+    # ── Header ───────────────────────────────────────────────────────────────
     print(BANNER)
-    print(f"  Host     : {HOSTNAME}")
-    print(f"  OS       : {platform.system()} {platform.release()} {platform.machine()}")
-    print(f"  Output   : {output}")
+    print(f"  Host      : {HOSTNAME}")
+    print(f"  OS        : {platform.system()} {platform.release()} {platform.machine()}")
+    if case_name:
+        print(f"  Case      : {case_name}")
+    print(f"  Output    : {output}")
     if api_url and case_id:
-        print(f"  Upload   : {api_url}  →  case {case_id}")
-    print(f"  Collect  : {', '.join(sorted(collect_set)) or '(none)'}")
-    print()
+        print(f"  Upload    : {api_url}  →  case {case_id}")
+    print(f"  Categories: {len(collect_set)}")
+    if _live_windows:
+        print(f"  Mode      : live Windows  ({path_arg})")
+    elif path_arg:
+        print(f"  Mode      : dead-box directory  ({path_arg})")
+    elif disk:
+        print(f"  Mode      : dead-box raw device  ({disk})")
+    else:
+        print(f"  Mode      : live {platform.system()}")
+    if bitlocker_key:
+        print(f"  BitLocker : key provided ({len(bitlocker_key)} chars)")
 
-    if IS_WINDOWS:
-        collector: Collector = WindowsCollector(output, collect_set, args.verbose, args.dry_run)
+    # ── Collection ───────────────────────────────────────────────────────────
+    print(f"\n{_HR}")
+    print(f"  Collecting forensic artifacts")
+    print(f"{_HR}\n")
+
+    external_root = path_arg or disk or ""
+
+    if external_root:
+        ext_path = Path(external_root)
+        if disk and not ext_path.is_dir() and not IS_LINUX:
+            print("  Raw block-device collection requires Linux (ntfs-3g + dislocker).",
+                  file=sys.stderr)
+            sys.exit(1)
+        collector: Collector = ExternalDiskCollector(
+            external_root, bitlocker_key=bitlocker_key,
+            output=output, collect=collect_set, verbose=args.verbose, dry_run=args.dry_run,
+        )
+    elif IS_WINDOWS:
+        collector = WindowsCollector(output, collect_set, args.verbose, args.dry_run)
     elif IS_MACOS:
         collector = MacOSCollector(output, collect_set, args.verbose, args.dry_run)
     elif IS_LINUX:
         collector = LinuxCollector(output, collect_set, args.verbose, args.dry_run)
     else:
-        print(f"  [!] Unsupported OS: {platform.system()}", file=sys.stderr)
+        print(f"  Unsupported OS: {platform.system()}", file=sys.stderr)
         sys.exit(1)
 
     collector.collect_all()
+    t_collect = time.monotonic() - t_start
 
+    # ── Dry-run report ───────────────────────────────────────────────────────
     if args.dry_run:
-        print(f"\n  [Dry run] Would archive {len(collector._items)} files:")
+        print(f"\n{_HR}")
+        print(f"  Dry run — {len(collector._items)} files would be archived")
+        print(_HR)
         for arcname, _ in collector._items:
             print(f"    {arcname}")
-    else:
-        collector.package()
-        if api_url and case_id:
-            upload_to_fo(output, api_url, case_id, api_token=api_token)
-        elif api_url or case_id:
-            print("  [!] Both --api-url and --case-id required for upload.", file=sys.stderr)
+        collector.cleanup()
+        return
+
+    # ── Package ──────────────────────────────────────────────────────────────
+    collector.package()
+    t_total = time.monotonic() - t_start
+
+    # ── Upload ───────────────────────────────────────────────────────────────
+    if api_url and case_id:
+        upload_to_fo(output, api_url, case_id, api_token=api_token)
+    elif api_url or case_id:
+        print("  Both --api-url and --case-id are required for upload.", file=sys.stderr)
 
     collector.cleanup()
 
-    if collector._errors:
-        print(f"\n  [{len(collector._errors)} warning(s) — some artifacts may be missing]")
+    # ── Results summary ───────────────────────────────────────────────────────
+    results  = collector._results
+    n_ok     = sum(1 for r in results if r["ok"])
+    n_fail   = len(results) - n_ok
+    n_files  = len(collector._items)
+    n_warns  = len(collector._errors)
+
+    print(f"\n{_HR}")
+    print(f"  Results")
+    print(_HR)
+    print()
+
+    if n_fail == 0:
+        print(f"  ✓  All {n_ok} categories collected")
+    else:
+        print(f"  ✓  {n_ok} categor{'y' if n_ok == 1 else 'ies'} collected")
+        print(f"  ✗  {n_fail} categor{'y' if n_fail == 1 else 'ies'} found no files:")
+        for r in results:
+            if not r["ok"]:
+                hint = f"  ({r['errors'][0][:50]})" if r["errors"] else ""
+                print(f"       · {r['label']}{hint}")
+
+    print()
+    print(f"  Files     : {n_files}")
+    print(f"  Collection: {t_collect:.1f}s")
+    print(f"  Total     : {t_total:.1f}s")
+
+    if n_warns:
+        print(f"\n  ⚠  {n_warns} warning(s):")
+        for msg in collector._errors[:8]:
+            print(f"       · {msg[:72]}")
+        if n_warns > 8:
+            print(f"       · … and {n_warns - 8} more")
+
+    print(f"\n{_HR}\n")
 
 
 if __name__ == "__main__":

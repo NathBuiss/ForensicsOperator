@@ -43,15 +43,17 @@ import redis as _redis_lib
 
 _redis_pool = _redis_lib.ConnectionPool.from_url(
     settings.REDIS_URL,
-    max_connections=30,
+    max_connections=100,   # raised from 30 — ingest workers + UI polling can saturate a smaller pool
     decode_responses=True,
+    socket_timeout=10,
+    socket_connect_timeout=5,
 )
 
 # A separate pool with tight socket timeouts for health probes and metrics
 # collection — these must never block for more than a few seconds.
 _redis_timeout_pool = _redis_lib.ConnectionPool.from_url(
     settings.REDIS_URL,
-    max_connections=10,
+    max_connections=20,
     decode_responses=True,
     socket_timeout=3,
     socket_connect_timeout=3,

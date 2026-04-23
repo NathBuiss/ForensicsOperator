@@ -21,7 +21,7 @@ from routers import (
     cases, ingest, jobs, search, plugins, health,
     saved_searches, notes, alert_rules, export, global_alert_rules,
     modules, collector, editor, llm_config, s3_integration, metrics,
-    cti, yara_rules, sigma_sync, case_files,
+    cti, yara_rules, sigma_sync, case_files, harvest, admin_utils,
 )
 from routers import auth as auth_router
 from auth.dependencies import get_current_user, require_admin, require_analyst_or_admin
@@ -89,6 +89,19 @@ async def _unhandled_exception(request: Request, exc: Exception) -> JSONResponse
         content={"detail": f"Internal server error: {type(exc).__name__}: {exc}"},
     )
 
+
+async def _redis_unavailable(request: Request, exc: Exception) -> JSONResponse:
+    logger.warning("Redis unavailable on %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Service temporarily unavailable — Redis is unreachable"},
+    )
+
+
+import redis as _redis_lib  # noqa: E402
+app.add_exception_handler(_redis_lib.exceptions.ConnectionError, _redis_unavailable)
+app.add_exception_handler(_redis_lib.exceptions.TimeoutError, _redis_unavailable)
+
 # ── Middleware ─────────────────────────────────────────────────────────────────
 
 @app.middleware("http")
@@ -133,6 +146,11 @@ async def _on_startup():
     _bootstrap_admin()
     asyncio.create_task(cti.start_cti_scheduler())
     asyncio.create_task(_metrics_background_loop())
+    try:
+        from services.elasticsearch import ensure_artifacts_index
+        ensure_artifacts_index()
+    except Exception as _startup_exc:
+        logger.warning("Could not ensure fo-artifacts index at startup: %s", _startup_exc)
 
 
 # ── Auth dependencies for route protection ────────────────────────────────────
@@ -164,6 +182,7 @@ app.include_router(editor.router,             prefix="/api/v1", dependencies=_an
 app.include_router(cti.router,               prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(yara_rules.router,        prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(case_files.router,        prefix="/api/v1", dependencies=_analyst_or_admin)
+app.include_router(harvest.router,           prefix="/api/v1", dependencies=_analyst_or_admin)
 
 # Protected — analyst or admin (alert rules used by analysts too)
 app.include_router(global_alert_rules.router, prefix="/api/v1", dependencies=_analyst_or_admin)
@@ -173,5 +192,6 @@ app.include_router(global_alert_rules.router, prefix="/api/v1", dependencies=_an
 # The /admin/llm-config CRUD routes carry their own require_admin dependency.
 app.include_router(llm_config.router,         prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(s3_integration.router,     prefix="/api/v1", dependencies=_admin_only)
+app.include_router(admin_utils.router,        prefix="/api/v1", dependencies=_admin_only)
 app.include_router(metrics.router,            prefix="/api/v1", dependencies=_analyst_or_admin)
 app.include_router(sigma_sync.router,         prefix="/api/v1", dependencies=_admin_only)

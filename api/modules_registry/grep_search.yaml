@@ -1,9 +1,12 @@
 id: grep_search
 name: Pattern Search (grep)
-description: "Search files for regex patterns — IOCs, keywords, base64 strings, encoded commands."
+description: >-
+  Search files for regex patterns — IOCs, IP addresses, hashes, keywords, and
+  encoded commands. Runs built-in IOC patterns by default; custom patterns can
+  be supplied via the Saved Presets or the freeform pattern editor.
 input_extensions:
   - "*"
 available: true
 run_on_files: true
-config_keys:
-  - patterns
+category: Search
+tags: [grep, regex, ioc, keyword, pattern, search]

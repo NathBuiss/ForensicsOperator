@@ -18,6 +18,8 @@ def get_timeline(
     artifact_type: Optional[str] = None,
     from_ts: Optional[str] = Query(None, alias="from"),
     to_ts: Optional[str] = Query(None, alias="to"),
+    sort_field: str = "timestamp",
+    sort_order: str = "asc",
     page: int = 0,
     size: int = Query(100, le=1000),
 ):
@@ -35,8 +37,8 @@ def get_timeline(
         to_ts=to_ts,
         page=page,
         size=size,
-        sort_field="timestamp",
-        sort_order="asc",
+        sort_field=sort_field,
+        sort_order=sort_order,
     )
 
     hits = result.get("hits", {})
@@ -66,6 +68,9 @@ def search(
     channel: Optional[str] = None,
     flagged: Optional[bool] = None,
     tags: Optional[List[str]] = Query(None),
+    regexp: bool = False,
+    sort_field: str = "timestamp",
+    sort_order: str = "asc",
     page: int = 0,
     size: int = Query(50, le=1000),
 ):
@@ -96,6 +101,9 @@ def search(
         extra_filters=extra_filters,
         page=page,
         size=size,
+        regexp=regexp,
+        sort_field=sort_field,
+        sort_order=sort_order,
     )
 
     hits = result.get("hits", {})

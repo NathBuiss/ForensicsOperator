@@ -57,6 +57,77 @@ _CHUNK        = 1024 * 1024      # 1 MB read chunks
 _SKIP_NAMES   = frozenset([".", "..", "$OrphanFiles"])
 
 
+# ── S3RangeReader ─────────────────────────────────────────────────────────────
+
+class S3RangeReader:
+    """Seekable, file-like wrapper around an S3 object.
+
+    Translates seek()/read() calls into HTTP Range-GET requests so that
+    pytsk3 / libewf can parse disk images directly from S3 without a
+    full download to disk or MinIO.
+
+    Usage::
+        client = Minio(endpoint, access_key=..., secret_key=..., secure=True)
+        reader = S3RangeReader(client, "my-bucket", "evidence/disk.dd")
+        img    = pytsk3.Img_Info(url="", fileobj=reader)
+
+    Transfer cost: one Range-GET per read() call.  For a full filesystem
+    index pass on a 500 GB image, pytsk3 typically issues < 50 MB of reads
+    (MBR/GPT + superblocks + inode tables only).  Individual file extraction
+    is a single range fetch for exactly the file's byte range.
+    """
+
+    def __init__(self, client: "_MinioClient", bucket: str, key: str) -> None:
+        self._client = client
+        self._bucket = bucket
+        self._key    = key
+        self._pos    = 0
+        stat         = client.stat_object(bucket, key)
+        self._size   = stat.size
+
+    # ── io protocol ──────────────────────────────────────────────────────────
+
+    def read(self, n: int = -1) -> bytes:
+        if self._pos >= self._size:
+            return b""
+        length = (self._size - self._pos) if n < 0 else min(n, self._size - self._pos)
+        resp = None
+        try:
+            resp = self._client.get_object(
+                self._bucket, self._key,
+                offset=self._pos,
+                length=length,
+            )
+            data = resp.read()
+        finally:
+            if resp is not None:
+                try:
+                    resp.close()
+                    resp.release_conn()
+                except Exception:
+                    pass
+        self._pos += len(data)
+        return data
+
+    def seek(self, pos: int, whence: int = 0) -> int:
+        if whence == 0:
+            self._pos = pos
+        elif whence == 1:
+            self._pos += pos
+        elif whence == 2:
+            self._pos = self._size + pos
+        self._pos = max(0, min(self._pos, self._size))
+        return self._pos
+
+    def tell(self) -> int:
+        return self._pos
+
+    def readable(self)  -> bool: return True
+    def seekable(self)  -> bool: return True
+    def writable(self)  -> bool: return False
+    def __len__(self)   -> int:  return self._size
+
+
 # ── low-level helpers ─────────────────────────────────────────────────────────
 
 def _minio() -> "_MinioClient":
@@ -298,7 +369,7 @@ class DDImagePlugin(BasePlugin):
             self._listed += 1
             yield {
                 "artifact_type":  "dd_file",
-                "timestamp":      mtime or crtime or atime or "",
+                "timestamp":      mtime or crtime or atime or None,
                 "timestamp_desc": "Modified",
                 "message": (
                     f"[{part_label}] {filepath}  ({size:,} bytes)"
@@ -442,7 +513,7 @@ class DDImagePlugin(BasePlugin):
 
             yield {
                 "artifact_type":  "dd_carved",
-                "timestamp":      "",
+                "timestamp":      None,
                 "timestamp_desc": "Carved",
                 "message":        f"[carved] {fname}  ({size:,} bytes)",
                 "dd": {

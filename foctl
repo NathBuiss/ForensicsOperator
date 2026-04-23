@@ -283,9 +283,12 @@ cmd_status() {
       step "Kubernetes — services"
       kubectl get svc     -n "${K8S_NS}"          2>/dev/null || true
       echo
-      step "Kubernetes — ingress + HPA"
+      step "Kubernetes — ingress + HPA + VPA"
       kubectl get ingress -n "${K8S_NS}"          2>/dev/null || true
       kubectl get hpa     -n "${K8S_NS}"          2>/dev/null || true
+      echo
+      kubectl get vpa     -n "${K8S_NS}"          2>/dev/null \
+        || info "VPA: not installed (VPA controller CRDs missing)"
       ;;
     *)
       die "No active deployment detected.\n  Pass 'docker' or 'k8s' explicitly: ./foctl status docker"

@@ -377,22 +377,21 @@ def _build_prompt(run: dict) -> str:
     else:
         preview = preview_raw or []
 
-    # Build a concise representation of the top hits
+    # Serialize each hit as full JSON — include every field so the LLM has
+    # complete visibility. Long string fields are capped at 800 chars to
+    # stay within token budgets while preserving all structure.
     hits_text = ""
     for i, hit in enumerate(preview[:50], 1):
-        lvl   = hit.get("level", "informational").upper()
-        title = hit.get("rule_title", "")
-        ts    = hit.get("timestamp", "")
-        host  = hit.get("computer", "")
-        details = hit.get("details_raw", "")[:200]
-        hits_text += f"{i}. [{lvl}] {title}"
-        if host:
-            hits_text += f" | host:{host}"
-        if ts:
-            hits_text += f" | {ts}"
-        if details:
-            hits_text += f"\n   {details}"
-        hits_text += "\n"
+        compact = {
+            k: (v[:800] if isinstance(v, str) and len(v) > 800 else v)
+            for k, v in hit.items()
+            if v or v == 0
+        }
+        try:
+            hit_json = json.dumps(compact, ensure_ascii=False, default=str)
+        except Exception:
+            hit_json = str(compact)
+        hits_text += f"{i}. {hit_json}\n"
 
     level_summary = ", ".join(f"{k}:{v}" for k, v in sorted(hits_by_level.items()))
     if not level_summary:
@@ -405,8 +404,9 @@ def _build_prompt(run: dict) -> str:
         f"Module: {module_id}\n"
         f"{context_line}"
         f"Total findings: {total_hits}  ({level_summary})\n\n"
-        f"Findings (up to 50 shown):\n"
+        f"Findings (up to 50 shown, full JSON — analyze all fields):\n"
         f"{hits_text or '(none)'}\n\n"
+        "Analyze all fields in every JSON object above. "
         "Describe what these findings show about the system or user activity, and respond with the JSON structure as instructed."
     )
 
@@ -415,9 +415,16 @@ def _build_alert_prompt(rule_name: str, rule_query: str, match_count: int, sampl
     """Build a prompt for LLM analysis of alert rule results."""
     events_text = ""
     for i, ev in enumerate(sample_events[:30], 1):
-        ts  = ev.get("timestamp", "")
-        msg = ev.get("message", "")[:300]
-        events_text += f"{i}. [{ts}] {msg}\n"
+        compact = {
+            k: (v[:800] if isinstance(v, str) and len(v) > 800 else v)
+            for k, v in ev.items()
+            if v or v == 0
+        }
+        try:
+            ev_json = json.dumps(compact, ensure_ascii=False, default=str)
+        except Exception:
+            ev_json = str(compact)
+        events_text += f"{i}. {ev_json}\n"
 
     return (
         f"Alert Rule: {rule_name}\n"
@@ -737,21 +744,166 @@ def explain_events(req: EventExplainRequest) -> Any:
 
 # ── Search AI assistant ────────────────────────────────────────────────────────
 
-_SEARCH_ASSIST_PROMPT = """You are an expert Elasticsearch query builder for a digital forensics SIEM.
-The index contains forensic events with these common fields:
-- timestamp (ISO 8601 date)
-- message (text description of the event)
-- artifact_type (evtx, prefetch, mft, registry, access_log, lnk, hayabusa, ...)
-- fo_source_file (original evidence filename)
-- host.hostname, user.name, user.domain
-- evtx.event_id, evtx.channel, evtx.provider_name
-- access_log.status, access_log.method, access_log.uri, access_log.ip
-- hayabusa.level (critical, high, medium, low, informational)
-- hayabusa.rule_title
+_SEARCH_ASSIST_PROMPT = """You are an expert Elasticsearch query builder for ForensicsOperator, a digital forensics SIEM/timeline platform.
 
-Convert the user's natural language request into an Elasticsearch query_string query.
+## Index schema — all searchable fields
+
+### Core fields (present on every event)
+- timestamp          ISO 8601 event time
+- message            Full-text event description — PRIMARY search target for bare terms
+- artifact_type      Ingester: evtx, prefetch, mft, registry, lnk, syslog, hayabusa, browser, plaso, amcache, wlan-profile, windows-task, wer, etw, suricata, zeek, plist, csv, strings, generic
+- fo_id              Unique event ID
+- ingest_job_id      Job that produced the event
+- ingested_at        When the file was ingested (not the event time)
+- is_flagged         boolean — analyst-flagged event
+- tags               keyword array — analyst-applied tags
+- analyst_note       free-text analyst annotation
+
+### Host & identity
+- host.hostname, host.domain, host.ip, host.os
+- user.name, user.domain, user.sid
+
+### Process
+- process.name, process.cmdline, process.args, process.pid, process.path, process.parent_name, process.parent_pid
+
+### Network
+- network.src_ip, network.dst_ip, network.dst_port, network.protocol
+
+### Windows Event Log (EVTX / Hayabusa)
+- evtx.event_id, evtx.channel, evtx.provider_name
+- hayabusa.level (critical|high|medium|low|informational), hayabusa.rule_title, hayabusa.tags
+
+### Registry (NTUSER.DAT, Amcache.hve, SYSTEM, SOFTWARE)
+- registry.key_path, registry.value_name, registry.value_data
+
+### Prefetch (.pf files)
+- prefetch.executable, prefetch.run_count, prefetch.last_run, prefetch.volumes
+
+### LNK (Windows shortcut files)
+- lnk.target_path, lnk.machine_id, lnk.volume_label
+
+### MFT ($MFT filesystem timeline)
+- mft.filename, mft.path, mft.size, mft.is_deleted, mft.created, mft.modified, mft.mft_modified, mft.accessed
+
+### Web / access logs
+- access_log.status, access_log.method, access_log.uri, access_log.ip, access_log.user_agent
+
+### Browser history (Hindsight / browser module)
+- browser.url, browser.title, browser.visit_count, browser.profile
+
+### Syslog / text logs (CBS.log, DISM.log, AnyDesk .trace, Windows Update log)
+- (parsed into message; use bare terms or message:* wildcards)
+
+### Plaso (log2timeline super-timeline)
+- plaso.source, plaso.source_long, plaso.pe_type
+
+### Additional artifact types (newer ingesters)
+- artifact_type:syslog — Windows text logs (CBS.log, DISM.log, WindowsUpdate.log, AnyDesk/TeamViewer traces, setup logs)
+- artifact_type:wlan-profile — Wi-Fi profile XML (SSID, authentication, key management)
+- artifact_type:windows-task — Scheduled Task XML from System32/SysWOW64 (persistence evidence)
+- artifact_type:wer — Windows Error Reporting crash records
+- artifact_type:amcache — Amcache.hve execution evidence (SHA1, PE metadata, install/link times)
+- artifact_type:suricata — Suricata IDS EVE JSON alerts (network.src_ip, network.dst_ip, message contains alert signature)
+- artifact_type:zeek — Zeek network log events (conn.log, dns.log, http.log, ssl.log)
+- artifact_type:plist — macOS preference/property list values
+- artifact_type:browser — Browser history from Chrome, Edge, Firefox, Brave, Opera; also OneDrive/cloud sync SQLite metadata (browser.url, browser.title, browser.visit_count, browser.profile)
+
+## How queries work
+Normal mode (default): query_string searching message, host.hostname, user.name, process.name, process.cmdline, process.args.
+Regexp mode (.*toggle): ES regexp on message.keyword (full raw string). Supports . .* [a-z] (a|b) a+ a? a{n,m} — does NOT support \\d \\w \\s — use [0-9] [a-zA-Z] [ \\t] instead.
+
+## query_string syntax
+- bare term: searches message + key fields: failed logon
+- field=value: evtx.event_id:4624
+- phrase: message:"lateral movement"
+- wildcard: process.name:cmd*
+- boolean AND: evtx.event_id:4625 AND host.hostname:DC*
+- OR group: evtx.event_id:(4625 OR 4771 OR 4776)
+- range: evtx.event_id:[4624 TO 4634]
+- NOT: NOT evtx.event_id:4672
+- is_flagged:true — only analyst-flagged events
+- tags:lateral-movement — events with a specific tag
+
+## Common forensics investigation patterns
+
+### Authentication & account activity
+- Failed logins: evtx.event_id:4625
+- Successful logins: evtx.event_id:4624
+- Kerberos TGT request: evtx.event_id:4768
+- Kerberos TGS request: evtx.event_id:4769
+- Pass-the-hash / NTLM: evtx.event_id:4776
+- Account created: evtx.event_id:4720
+- Account locked: evtx.event_id:4740
+- Privilege use: evtx.event_id:(4672 OR 4673)
+
+### Process & execution
+- Process creation (Security): evtx.event_id:4688
+- Process creation (Sysmon): evtx.event_id:1 AND evtx.channel:Microsoft-Windows-Sysmon/Operational
+- PowerShell script block: evtx.event_id:4104 AND evtx.channel:*PowerShell*
+- PowerShell general: process.name:powershell* OR message:*powershell*
+- Encoded command: message:*-EncodedCommand* OR message:*-enc*
+- Prefetch evidence: artifact_type:prefetch AND prefetch.executable:*
+
+### Lateral movement
+- Remote logins: evtx.event_id:4624 AND evtx.channel:Security AND message:*Network*
+- Anonymous / pass-the-hash: evtx.event_id:4624 AND user.name:ANONYMOUS*
+- RDP connection: evtx.event_id:(4624 OR 4778) AND message:*RemoteInteractive*
+- SMB/admin share: message:(*IPC$* OR *ADMIN$* OR *C$*)
+
+### Persistence
+- Scheduled task created: evtx.event_id:(4698 OR 4702)
+- Service installed: evtx.event_id:7045 AND evtx.channel:System
+- Registry run keys: registry.key_path:*Run*
+- Autorun (Amcache): artifact_type:amcache AND message:*
+
+### Credential dumping
+- LSASS access: message:(*lsass* OR *mimikatz* OR *sekurlsa* OR *WCE*)
+- SAM dump: message:(*reg save* AND *SAM*)
+
+### File system (MFT)
+- Deleted files: artifact_type:mft AND mft.is_deleted:true
+- Recently created: artifact_type:mft AND mft.filename:*
+- Specific file: artifact_type:mft AND mft.filename:cmd.exe
+
+### Event log tampering
+- Log cleared (Security): evtx.event_id:1102
+- Log cleared (System): evtx.event_id:104
+- Audit policy changed: evtx.event_id:4719
+
+### Network / web
+- 404 errors: access_log.status:404
+- POST requests: access_log.method:POST
+- Suspicious user agent: access_log.user_agent:*curl* OR access_log.user_agent:*python*
+
+### Hayabusa threat levels
+- Critical findings: artifact_type:hayabusa AND hayabusa.level:critical
+- High severity: artifact_type:hayabusa AND hayabusa.level:high
+- All alerts: artifact_type:hayabusa AND hayabusa.level:(critical OR high OR medium)
+
+### Newer artifact types
+- Scheduled task persistence: artifact_type:windows-task
+- Wi-Fi connection history: artifact_type:wlan-profile
+- Windows text/setup logs: artifact_type:syslog
+- Suricata IDS alerts: artifact_type:suricata
+- Zeek network logs: artifact_type:zeek
+- macOS plists: artifact_type:plist
+- Browser / cloud sync history: artifact_type:browser AND browser.url:*
+- Amcache execution: artifact_type:amcache
+
+## UI features the analyst has access to
+- **Normal mode** (default): query_string against message + host/user/process fields. Best for field-level queries.
+- **Regexp mode** (.*): ES regexp on full message.keyword. Suggest this when the user wants to match a pattern like cmd\.exe, 4[6-9][0-9]{2}, or (mimikatz|sekurlsa).
+- **Facet filters**: Host, User, Event ID, Channel can be filtered via sidebar chips (separate from the query). Do NOT include these in the query string unless the user explicitly targets a field.
+- **Date range**: Applied separately via date pickers — do NOT add timestamp range to the query.
+- **Studio — Rule Playground**: Alert rules can be tested against a live case using the "Test Query" button in the Studio editor. The generated query is run and the first 10 matching events are shown inline.
+- **Studio — YARA Tester**: YARA rules written in Studio can be tested against a specific source file from a case using the "Test YARA" button — no separate tool needed.
+- **Studio — Module Run**: Custom analysis modules written in Studio can be dispatched directly from the editor with the "Run" button — pick a case and source files, click Run, and a live log panel streams output.
+
+## Output instructions
+Convert the user's natural language request into a query_string expression (or regexp if appropriate).
 Return ONLY a JSON object with exactly these keys:
-{"query": "the query_string expression", "explanation": "one-sentence description of what the query finds"}
+{"query": "the expression", "explanation": "one-sentence description of what the query finds", "regexp": false}
+Set "regexp" to true only when the pattern requires ES regexp semantics (special chars, character classes, quantifiers).
 No markdown, no extra text — raw JSON only."""
 
 
@@ -774,6 +926,14 @@ def ai_search_assist(req: SearchAssistRequest) -> Any:
     user_msg = f"Search request: {req.query}"
     if req.case_id:
         user_msg += f"\nCase ID: {req.case_id}"
+        # Enrich with case artifact types so the AI can tailor suggestions
+        try:
+            from services.elasticsearch import list_artifact_types
+            types = list_artifact_types(req.case_id)
+            if types:
+                user_msg += f"\nArtifact types in this case: {', '.join(types)}"
+        except Exception:
+            pass
 
     try:
         raw = _call_llm_with_system(cfg, _SEARCH_ASSIST_PROMPT, user_msg)

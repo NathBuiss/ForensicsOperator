@@ -245,6 +245,17 @@ def _update(r: redis.Redis, run_id: str, **fields) -> None:
     r.expire(key, MODULE_RUN_TTL)
 
 
+_LOG_TTL = 86400  # 24 h — only needed while the UI is watching
+
+
+def _push_log(r: redis.Redis, run_id: str, text: str) -> None:
+    """Append a log line to the SSE list and logger simultaneously."""
+    key = f"fo:module_log:{run_id}"
+    r.rpush(key, text)
+    r.expire(key, _LOG_TTL)
+    logger.info("[%s] %s", run_id, text)
+
+
 # ── Celery task ────────────────────────────────────────────────────────────────
 
 @app.task(bind=True, name="module.run", queue="modules")
@@ -270,6 +281,7 @@ def run_module(
         _update(r, run_id,
                 status="RUNNING",
                 started_at=datetime.now(timezone.utc).isoformat())
+        _push_log(r, run_id, f"Module '{module_id}' started — {len(source_files)} source file(s)")
 
         # ── 1. Download source files ──────────────────────────────────────────
         minio = get_minio()
@@ -278,11 +290,11 @@ def run_module(
 
         for sf in source_files:
             dest = sources_dir / sf["filename"]
-            logger.info("[%s] Downloading %s", run_id, sf["minio_key"])
+            _push_log(r, run_id, f"Downloading {sf['filename']} …")
             _minio_op(lambda d=dest, k=sf["minio_key"]: minio.fget_object(MINIO_BUCKET, k, str(d)))
+            _push_log(r, run_id, f"Downloaded {sf['filename']} ({dest.stat().st_size:,} bytes)")
 
-        logger.info("[%s] Sources: %s", run_id,
-                    [p.name for p in sorted(sources_dir.iterdir()) if p.is_file()])
+        _push_log(r, run_id, f"Running module '{module_id}' …")
 
         # ── 2. Run module ─────────────────────────────────────────────────────
         # tool_meta captures subprocess output for display in the UI
@@ -324,7 +336,34 @@ def run_module(
                 run_id, case_id, module_id, work_dir, source_files, params, tool_meta
             )
 
-        # ── 3a. For Hayabusa: also index into Elasticsearch so hits appear in Timeline ──
+        # ── 3a. Upload module output artifacts (e.g. de4dot deobfuscated binaries) ────
+        artifact_key_map: dict[str, str] = {}
+        for spec in tool_meta.get("output_uploads", []):
+            fpath = Path(spec.get("path", ""))
+            if not fpath.is_file():
+                continue
+            art_key = f"cases/{case_id}/modules/{run_id}/artifacts/{spec['filename']}"
+            try:
+                _minio_op(lambda k=art_key, p=fpath: minio.fput_object(MINIO_BUCKET, k, str(p)))
+                artifact_key_map[spec["filename"]] = art_key
+                logger.info("[%s] Uploaded artifact: %s", run_id, spec["filename"])
+            except Exception as _art_exc:
+                logger.warning("[%s] Artifact upload failed for %s: %s", run_id, spec["filename"], _art_exc)
+
+        # Patch results with download_key so the frontend can offer download
+        if artifact_key_map:
+            for hit in results:
+                try:
+                    det = json.loads(hit.get("details_raw", "{}"))
+                    deob = det.get("deobfuscated")
+                    if deob and deob in artifact_key_map:
+                        det["download_key"]  = artifact_key_map[deob]
+                        det["download_name"] = deob
+                        hit["details_raw"]   = json.dumps(det)
+                except Exception:
+                    pass
+
+        # ── 3c. For Hayabusa: also index into Elasticsearch so hits appear in Timeline ──
         if module_id == "hayabusa" and results:
             ingested_at = datetime.now(timezone.utc).isoformat()
             try:
@@ -366,11 +405,13 @@ def run_module(
                 tool_log=tool_meta.get("log",    "")[:8000],
                 completed_at=datetime.now(timezone.utc).isoformat())
 
+        _push_log(r, run_id, f"Completed — {len(results)} hit(s) found")
         logger.info("[%s] Module run complete: %d hits", run_id, len(results))
         return {"status": "COMPLETED", "total_hits": len(results)}
 
     except Exception as exc:
         logger.exception("[%s] Module run failed: %s", run_id, exc)
+        _push_log(r, run_id, f"ERROR: {exc}")
         _update(r, run_id,
                 status="FAILED",
                 error=str(exc),
@@ -1493,8 +1534,13 @@ def _parse_lnk_triage(file_path: Path) -> list[dict]:
     string_data = data.get("string_data", {}) or {}
 
     ts = header.get("creation_time") or header.get("write_time") or ""
-    if ts and not ts.endswith("Z"):
-        ts = ts.replace(" ", "T") + "Z"
+    # LnkParse3 may return datetime.datetime objects instead of strings
+    if isinstance(ts, datetime):
+        ts = ts.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+    elif ts:
+        ts = str(ts)
+        if not ts.endswith("Z"):
+            ts = ts.replace(" ", "T") + "Z"
 
     target_path = (
         link_info.get("local_base_path")
@@ -1883,7 +1929,6 @@ rule DataStaging_Exfil {
         $z1 = "7z.exe"        ascii nocase
         $z2 = "WinRAR"        ascii nocase
         $z3 = ".7z"           ascii nocase
-        $n1 = "\\\\\\\\*"     ascii
         $f1 = "passwords"     ascii nocase
         $f2 = "credentials"   ascii nocase
         $f3 = "sensitive"     ascii nocase
@@ -3495,10 +3540,25 @@ def _run_de4dot(
     elif mono_bin and Path(de4dot_exe).exists():
         cmd_prefix = [mono_bin, de4dot_exe]
     else:
-        raise RuntimeError(
-            "de4dot binary not found. Install de4dot (Linux build) or Mono + de4dot.exe. "
-            "See the Studio docs for setup instructions."
+        # Binary not available — return an informational hit instead of failing the run.
+        # The file is still stored and available for other analysis.
+        msg = (
+            "de4dot is not installed on this server. "
+            "To enable .NET deobfuscation, place the Linux build of de4dot on PATH "
+            "(e.g. /usr/local/bin/de4dot), or install Mono and de4dot.exe at "
+            "/usr/local/bin/de4dot.exe."
         )
+        tool_meta["stderr"] += msg + "\n"
+        return [{
+            "id":          str(uuid.uuid4()),
+            "timestamp":   "",
+            "level":       "informational",
+            "level_int":   LEVEL_INT.get("informational", 0),
+            "rule_title":  "de4dot not installed",
+            "computer":    "server",
+            "details_raw": "{}",
+            "message":     msg,
+        }]
 
     results: list[dict] = []
 
@@ -3551,6 +3611,10 @@ def _run_de4dot(
 
             if success:
                 tool_meta["stdout"] += f"  → Deobfuscated output: {out_path.name}\n"
+                # Queue for upload by the main task (work_dir still exists there)
+                tool_meta.setdefault("output_uploads", []).append(
+                    {"path": str(out_path), "filename": out_path.name}
+                )
             else:
                 tool_meta["stderr"] += f"  Deobfuscation may have failed (exit {proc.returncode})\n"
 

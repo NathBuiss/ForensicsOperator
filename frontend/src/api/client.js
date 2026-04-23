@@ -38,7 +38,12 @@ async function request(method, path, body, options = {}) {
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(err.detail || `HTTP ${res.status}`)
+    const detail = err.detail
+    // Pydantic v2 validation errors return detail as an array of {msg, loc, ...}
+    const msg = Array.isArray(detail)
+      ? detail.map(d => d.msg || JSON.stringify(d)).join('; ')
+      : (typeof detail === 'string' ? detail : `HTTP ${res.status}`)
+    throw new Error(msg || `HTTP ${res.status}`)
   }
   if (res.status === 204) return null
   return res.json()
@@ -59,7 +64,8 @@ export const api = {
     listJobs: (caseId)           => request('GET',  `/cases/${caseId}/jobs`),
     getJob:    (jobId)            => request('GET',  `/jobs/${jobId}`),
     batchJobs: (jobIds)          => request('POST', '/jobs/batch', { job_ids: jobIds }),
-    retryJob:  (jobId)           => request('POST', `/jobs/${jobId}/retry`),
+    retryJob:  (jobId)           => request('POST',   `/jobs/${jobId}/retry`),
+    deleteJob: (jobId)           => request('DELETE', `/jobs/${jobId}`),
   },
 
   search: {
@@ -130,6 +136,7 @@ export const api = {
     importSigma:     (data)           => request('POST',   '/alert-rules/library/sigma', data),
     getLibraryRule:  (id)             => request('GET',    `/alert-rules/library/${id}`),
     generateRule:    (data)           => request('POST',   '/alert-rules/generate', data),
+    generateSigmaRule: (data)         => request('POST',   '/alert-rules/generate-sigma', data),
     analyzeResult:   (data)           => request('POST',   '/alert-rules/analyze', data),
     parseSigma:      (data)           => request('POST',   '/alert-rules/sigma/parse', data),
   },
@@ -138,21 +145,29 @@ export const api = {
     csv: (caseId, params = {}) => {
       const q     = new URLSearchParams(params).toString()
       const token = getToken()
-      // Append token as query param since this opens in a new tab (no headers)
-      const auth  = token ? `&_token=${encodeURIComponent(token)}` : ''
-      return `/api/v1/cases/${caseId}/export/csv${q ? '?' + q : ''}${auth}`
+      const auth  = token ? `_token=${encodeURIComponent(token)}` : ''
+      // Build query string: params first, then token — always uses ? before first param
+      const qs    = [q, auth].filter(Boolean).join('&')
+      return `/api/v1/cases/${caseId}/export/csv${qs ? '?' + qs : ''}`
     },
   },
 
   modules: {
-    list:         ()             => request('GET',  '/modules'),
-    listSources:  (caseId)       => request('GET',  `/cases/${caseId}/sources`),
-    createRun:    (caseId, data) => request('POST', `/cases/${caseId}/module-runs`, data),
-    listRuns:     (caseId)       => request('GET',  `/cases/${caseId}/module-runs`),
-    getRun:       (runId)        => request('GET',  `/module-runs/${runId}`),
-    validateYara: (rules)        => request('POST', '/modules/yara/validate', { rules }),
-    analyze:      (runId)        => request('POST', `/module-runs/${runId}/analyze`),
-    retryRun:     (runId)        => request('POST', `/module-runs/${runId}/retry`),
+    list:             ()                        => request('GET',  '/modules'),
+    listSources:      (caseId)                  => request('GET',  `/cases/${caseId}/sources`),
+    createRun:        (caseId, data)            => request('POST', `/cases/${caseId}/module-runs`, data),
+    listRuns:         (caseId)                  => request('GET',  `/cases/${caseId}/module-runs`),
+    getRun:           (runId)                   => request('GET',  `/module-runs/${runId}`),
+    validateYara:     (rules)                   => request('POST', '/modules/yara/validate', { rules }),
+    analyze:          (runId)                   => request('POST', `/module-runs/${runId}/analyze`),
+    retryRun:         (runId)                   => request('POST', `/module-runs/${runId}/retry`),
+    reingestArtifact: (caseId, runId, filename) => request('POST', `/cases/${caseId}/modules/${runId}/artifacts/${encodeURIComponent(filename)}/reingest`),
+    logStreamUrl:     (runId)                   => `${BASE}/module-runs/${runId}/log-stream`,
+  },
+
+  studio: {
+    queryTest: (caseId, query) => request('POST', '/studio/query-test', { case_id: caseId, query }),
+    yaraTest:  (caseId, jobId, rules) => request('POST', '/studio/yara-test', { case_id: caseId, job_id: jobId, rules }),
   },
 
   llm: {
@@ -196,6 +211,7 @@ export const api = {
     testConfig:   ()             => request('POST',   '/admin/s3-config/test'),
     browse:       (prefix = '', delimiter = '/') => request('GET', `/s3/browse?prefix=${encodeURIComponent(prefix)}&delimiter=${encodeURIComponent(delimiter)}`),
     importToCase: (caseId, data) => request('POST',   `/cases/${caseId}/s3-import`, data),
+    importBatch:  (caseId, keys) => request('POST',   `/cases/${caseId}/s3-import-batch`, { keys }),
   },
 
   s3Triage: {
@@ -205,7 +221,13 @@ export const api = {
     testConfig:   ()             => request('POST',   '/admin/s3-triage-config/test'),
     browse:       (prefix = '', delimiter = '/') => request('GET', `/s3-triage/browse?prefix=${encodeURIComponent(prefix)}&delimiter=${encodeURIComponent(delimiter)}`),
     pullToCase:   (caseId, data) => request('POST',   `/cases/${caseId}/s3-triage-pull`, data),
+    importBatch:  (caseId, keys) => request('POST',   `/cases/${caseId}/s3-triage-pull-batch`, { keys }),
     scwRegions:   ()             => request('GET',    '/s3/scaleway-regions'),
+  },
+
+  admin: {
+    purgeOrphaned: () => request('POST', '/admin/purge-orphaned-data'),
+    wipeAll:       () => request('POST', '/admin/wipe-all-data', { confirm: 'WIPE' }),
   },
 
   metrics: {
@@ -264,22 +286,49 @@ export const api = {
     diskImages:  (caseId)         => request('GET',  `/cases/${caseId}/disk-images`),
     browse:      (caseId, jobId, path = '/') =>
       request('GET', `/cases/${caseId}/disk-images/${jobId}/browse?path=${encodeURIComponent(path)}`),
+    // Returns a URL suitable for window.open() — token in query param since
+    // browser-initiated downloads cannot set Authorization headers.
+    downloadUrl: (caseId, jobId) => {
+      const token = getToken()
+      return `/api/v1/cases/${caseId}/files/${jobId}/download${token ? `?_token=${encodeURIComponent(token)}` : ''}`
+    },
+  },
+
+  harvest: {
+    listCategories: ()                         => request('GET',  '/harvest/categories'),
+    listLevels:     ()                         => request('GET',  '/harvest/levels'),
+    startRun:       (caseId, data)             => request('POST', `/cases/${caseId}/harvest`, data),
+    getRun:         (runId)                    => request('GET',  `/harvest/runs/${runId}`),
+    cancelRun:      (runId)                    => request('DELETE', `/harvest/runs/${runId}`),
   },
 
   collector: {
+    // Legacy: single-file collect.py with embedded config (still available)
     downloadUrl: ({ platform = 'py', caseId, apiUrl, collect } = {}) => {
       const params = new URLSearchParams({ platform })
       if (caseId)  params.set('case_id',  caseId)
       if (apiUrl)  params.set('api_url',  apiUrl)
       if (collect && collect.length > 0) params.set('collect', collect.join(','))
-      // _token  → authenticates the download request (read by auth dependency)
-      // api_token → embedded in the script so it can upload artifacts without prompting
       const token = getToken()
-      if (token) {
-        params.set('_token',    token)
-        params.set('api_token', token)
-      }
+      if (token) { params.set('_token', token); params.set('api_token', token) }
       return `/api/v1/collector/download?${params.toString()}`
+    },
+    // New: fo-harvester ZIP — config.json has true/false per artifact category.
+    // Input source (--path/--disk) and BitLocker key are CLI args on the target.
+    packageUrl: ({ categories = [], caseName } = {}) => {
+      const params = new URLSearchParams()
+      if (categories.length > 0) params.set('categories', categories.join(','))
+      if (caseName)              params.set('case_name', caseName)
+      const token = getToken()
+      if (token) params.set('_token', token)
+      const qs = params.toString()
+      return `/api/v1/collector/package${qs ? '?' + qs : ''}`
+    },
+    // Admin-only: returns fo-uploader.zip with S3 triage credentials injected.
+    // Uses _token query param so browser-initiated downloads can carry the JWT.
+    uploaderUrl: () => {
+      const token = getToken()
+      return `/api/v1/collector/uploader${token ? `?_token=${encodeURIComponent(token)}` : ''}`
     },
     networkInterfaces: () => request('GET',    '/network/interfaces'),
     createIngress:     () => request('POST',   '/collector/ingress'),

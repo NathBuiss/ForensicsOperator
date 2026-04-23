@@ -1,10 +1,9 @@
 import { useState } from 'react'
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useSearchParams } from 'react-router-dom'
 
 import Layout         from './components/layout/Layout'
 import Dashboard      from './pages/Dashboard'
 import CaseTimeline   from './pages/CaseTimeline'
-import Search         from './pages/Search'
 import AlertLibrary   from './pages/AlertLibrary'
 import YaraLibrary    from './pages/YaraLibrary'
 import Ingesters      from './pages/Ingesters'
@@ -29,6 +28,14 @@ function ProtectedRoute({ children }) {
     return <Navigate to="/login" state={{ from: location }} replace />
   }
   return children
+}
+
+// Redirect /cases/:id/search → /cases/:id, preserving ?q= or state.pivotQuery as state
+function SearchRedirect() {
+  const [searchParams] = useSearchParams()
+  const location = useLocation()
+  const q = location.state?.pivotQuery || searchParams.get('q') || ''
+  return <Navigate to=".." replace state={q ? { pivotQuery: q } : undefined} />
 }
 
 export default function App() {
@@ -70,7 +77,7 @@ export default function App() {
             <Route index                            element={<Dashboard />} />
             <Route path="cases"                     element={<Cases />} />
             <Route path="cases/:caseId"             element={<CaseTimeline />} />
-            <Route path="cases/:caseId/search"      element={<Search />} />
+            <Route path="cases/:caseId/search"      element={<SearchRedirect />} />
             <Route path="alert-rules"               element={<AlertLibrary />} />
             <Route path="yara-rules"                element={<YaraLibrary />} />
             <Route path="ingesters"                 element={<Ingesters />} />

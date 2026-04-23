@@ -188,8 +188,9 @@ def _extract_and_dispatch_bg(
     with zf:
         for zip_entry, entry_name, job_id, minio_key in entries:
             tmp_path = None
+            base_name = entry_name.split("/")[-1]  # safe basename for temp file suffix
             try:
-                tmp_fd, tmp_path = tempfile.mkstemp(prefix="fo_zip_", suffix=f"_{entry_name}")
+                tmp_fd, tmp_path = tempfile.mkstemp(prefix="fo_zip_", suffix=f"_{base_name}")
                 os.close(tmp_fd)
                 with zf.open(zip_entry) as src, open(tmp_path, "wb") as dst:
                     shutil.copyfileobj(src, dst)
@@ -203,6 +204,8 @@ def _extract_and_dispatch_bg(
                 job_svc.update_job(job_id, minio_object_key=minio_key, status="PENDING")
 
                 try:
+                    # Pass the full relative path (entry_name) as original_filename so
+                    # process_artifact() gets directory context for plugin routing.
                     _dispatch_celery_task(job_id, case_id, minio_key, entry_name)
                 except Exception as exc:
                     logger.error("Celery dispatch failed for '%s': %s", entry_name, exc)
@@ -259,14 +262,17 @@ def _handle_zip_async(
     with zf:
         for info in zf.infolist():
             entry = info.filename
-            entry_name = os.path.basename(entry)
-            if not entry_name or entry.endswith("/") or entry_name.startswith("."):
+            # Preserve the full relative path (e.g. "persistence/tasks/System32/SilentCleanup")
+            # so downstream plugin routing can use directory context to identify artifact types.
+            entry_name = entry.replace("\\", "/").rstrip("/")  # normalize, drop trailing slash
+            base_name  = entry_name.split("/")[-1]             # basename for skip checks only
+            if not base_name or entry.endswith("/") or base_name.startswith("."):
                 continue
-            if entry_name.lower().endswith(".zip"):
-                logger.info("Skipping nested zip '%s' inside '%s'", entry_name, zip_name)
+            if base_name.lower().endswith(".zip"):
+                logger.info("Skipping nested zip '%s' inside '%s'", base_name, zip_name)
                 continue
-            if _is_auxiliary(entry_name):
-                logger.debug("Skipping auxiliary file '%s' in '%s'", entry_name, zip_name)
+            if _is_auxiliary(base_name):
+                logger.debug("Skipping auxiliary file '%s' in '%s'", base_name, zip_name)
                 continue
 
             # Use the compressed size as a placeholder so the UI shows something
@@ -274,6 +280,7 @@ def _handle_zip_async(
             placeholder_size = info.file_size or info.compress_size or 1
 
             job_id    = uuid.uuid4().hex
+            # MinIO key includes the full relative path so the object is addressable by path
             minio_key = f"cases/{case_id}/{job_id}/{entry_name}"
 
             job_svc.create_job(job_id, case_id, entry_name, "", source_zip=zip_name)

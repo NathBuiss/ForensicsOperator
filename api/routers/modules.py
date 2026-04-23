@@ -24,7 +24,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+import asyncio
+import json as _json
+
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 try:
@@ -33,7 +37,7 @@ try:
 except ImportError:
     _YAML_AVAILABLE = False
 
-from services.jobs import list_case_jobs
+from services.jobs import list_case_job_ids_recent, get_job
 from services.cases import get_case
 from services import module_runs as run_svc, storage
 from services.module_runs import MALWARE_CASE_ID, get_redis
@@ -125,10 +129,17 @@ def _get_modules_by_id() -> dict[str, dict]:
 
 # ── Request models ────────────────────────────────────────────────────────────
 
+class SourceFileRef(BaseModel):
+    job_id:    str
+    filename:  str = ""
+    minio_key: str = ""
+
+
 class CreateModuleRunRequest(BaseModel):
-    module_id: str
-    job_ids: list[str]
-    params: dict[str, Any] = {}   # module-specific parameters (e.g. custom YARA rules)
+    module_id:    str
+    job_ids:      list[str] = []            # legacy: bare IDs resolved via Redis
+    source_files: list[SourceFileRef] = []  # preferred: pre-resolved metadata
+    params: dict[str, Any] = {}
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -177,27 +188,73 @@ def list_modules():
     return {"modules": _get_modules() + _get_custom_modules()}
 
 
+_SOURCES_CHUNK  = 2_000   # pipeline batch size for Redis fallback
+_SOURCES_MAX    = 5_000   # cap for Redis fallback path
+
 @router.get("/cases/{case_id}/sources")
 def list_case_sources(case_id: str):
     """Return completed ingest jobs for a case (usable as module inputs)."""
+    from config import get_redis
+    from services.elasticsearch import list_case_artifacts
+
     case = get_case(case_id)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    jobs = list_case_jobs(case_id)
-    sources = [
-        {
-            "job_id":            j["job_id"],
-            "original_filename": j.get("original_filename", ""),
-            "plugin_used":       j.get("plugin_used", ""),
-            "events_indexed":    j.get("events_indexed", 0),
-            "minio_object_key":  j.get("minio_object_key", ""),
-            "skipped":           j.get("status") == "SKIPPED",
-        }
-        for j in jobs
-        if j.get("status") in ("COMPLETED", "SKIPPED")
-    ]
-    return {"sources": sources}
+    # ── Fast path: query the fo-artifacts ES index ────────────────────────────
+    artifacts = list_case_artifacts(case_id)
+    if artifacts:
+        sources = [
+            {
+                "job_id":            a["job_id"],
+                "original_filename": a.get("filename", ""),
+                "plugin_used":       a.get("plugin_used", ""),
+                "events_indexed":    a.get("events_indexed", 0),
+                "minio_object_key":  a.get("minio_key", ""),
+                "skipped":           bool(a.get("skipped", False)),
+            }
+            for a in artifacts
+        ]
+        sources.sort(key=lambda s: s["original_filename"])
+        return {"sources": sources}
+
+    # ── Fallback: Redis sorted set + chunked pipeline ─────────────────────────
+    job_ids = list_case_job_ids_recent(case_id)
+    if not job_ids:
+        return {"sources": []}
+
+    r = get_redis()
+    _fields = ("job_id", "status", "original_filename", "plugin_used",
+               "events_indexed", "minio_object_key")
+
+    sources = []
+    for chunk_start in range(0, len(job_ids), _SOURCES_CHUNK):
+        chunk = job_ids[chunk_start: chunk_start + _SOURCES_CHUNK]
+        pipe = r.pipeline(transaction=False)
+        for jid in chunk:
+            pipe.hmget(f"job:{jid}", *_fields)
+        rows = pipe.execute()
+        for jid, vals in zip(chunk, rows):
+            status = vals[1]
+            if status not in ("COMPLETED", "SKIPPED"):
+                continue
+            try:
+                events_indexed = int(vals[4] or 0)
+            except (ValueError, TypeError):
+                events_indexed = 0
+            sources.append({
+                "job_id":            vals[0] or jid,
+                "original_filename": vals[2] or "",
+                "plugin_used":       vals[3] or "",
+                "events_indexed":    events_indexed,
+                "minio_object_key":  vals[5] or "",
+                "skipped":           status == "SKIPPED",
+            })
+        if len(sources) >= _SOURCES_MAX:
+            break
+
+    sources.sort(key=lambda s: s["original_filename"])
+    return {"sources": sources, "truncated": len(job_ids) > _SOURCES_MAX}
 
 
 @router.post("/cases/{case_id}/module-runs", status_code=201)
@@ -216,25 +273,35 @@ def create_module_run(case_id: str, req: CreateModuleRunRequest):
     if not module.get("available"):
         reason = module.get("unavailable_reason", "Module unavailable")
         raise HTTPException(status_code=400, detail=reason)
-    if not req.job_ids:
+    if not req.source_files and not req.job_ids:
         raise HTTPException(status_code=400, detail="At least one source job is required")
 
-    all_jobs = {j["job_id"]: j for j in list_case_jobs(case_id)}
     source_files: list[dict] = []
-    for job_id in req.job_ids:
-        job = all_jobs.get(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
-        if job.get("status") not in ("COMPLETED", "SKIPPED"):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Job '{job_id}' has not completed yet (status: {job.get('status')})",
-            )
-        source_files.append({
-            "job_id":    job_id,
-            "filename":  job.get("original_filename", ""),
-            "minio_key": job.get("minio_object_key", ""),
-        })
+
+    # Preferred path: caller already resolved filename + minio_key (no Redis needed)
+    if req.source_files:
+        for sf in req.source_files:
+            source_files.append({
+                "job_id":    sf.job_id,
+                "filename":  sf.filename,
+                "minio_key": sf.minio_key,
+            })
+    else:
+        # Legacy path: bare job_ids — look up Redis. Fails if TTL expired.
+        for job_id in req.job_ids:
+            job = get_job(job_id)
+            if not job:
+                raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+            if job.get("status") not in ("COMPLETED", "SKIPPED"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Job '{job_id}' has not completed yet (status: {job.get('status')})",
+                )
+            source_files.append({
+                "job_id":    job_id,
+                "filename":  job.get("original_filename", ""),
+                "minio_key": job.get("minio_object_key", ""),
+            })
 
     run_id = uuid.uuid4().hex
     run_svc.create_module_run(run_id, case_id, req.module_id, source_files)
@@ -479,3 +546,186 @@ def clear_malwoverview_config():
     get_redis().delete(_MALWOVERVIEW_CONFIG_KEY)
     env_key = os.getenv("VT_API_KEY", "")
     return {"cleared": True, "env_fallback": bool(env_key)}
+
+
+# ── Live log streaming (SSE) ──────────────────────────────────────────────────
+
+@router.get("/module-runs/{run_id}/log-stream")
+async def stream_module_log(run_id: str):
+    """
+    Server-Sent Events stream of log lines for a running module.
+
+    Pushes one JSON object per line: {text: str} during the run,
+    then {done: true, status: str} when the run reaches a terminal state.
+
+    Log lines are written to the fo:module_log:{run_id} Redis list by
+    the module task at key milestones. The SSE endpoint drains the list
+    incrementally and closes when status is COMPLETED or FAILED.
+    """
+    run = run_svc.get_module_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Module run not found")
+
+    async def event_generator():
+        r = get_redis()
+        cursor = 0
+        idle_ticks = 0
+        max_idle_ticks = 120  # 120 × 1s = 2 min max wait with no progress
+
+        while idle_ticks < max_idle_ticks:
+            entries = r.lrange(f"fo:module_log:{run_id}", cursor, -1)
+            if entries:
+                idle_ticks = 0
+                for entry in entries:
+                    cursor += 1
+                    yield f"data: {_json.dumps({'text': entry})}\n\n"
+
+            status = r.hget(f"fo:module_run:{run_id}", "status")
+            if status in ("COMPLETED", "FAILED") and not entries:
+                # Also send any remaining tool_log lines from the run hash
+                tool_log = r.hget(f"fo:module_run:{run_id}", "tool_log") or ""
+                if tool_log:
+                    yield f"data: {_json.dumps({'text': tool_log, 'type': 'summary'})}\n\n"
+                yield f"data: {_json.dumps({'done': True, 'status': status})}\n\n"
+                return
+
+            idle_ticks += 1
+            await asyncio.sleep(1)
+
+        yield f"data: {_json.dumps({'done': True, 'status': 'TIMEOUT'})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ── Studio utility endpoints ──────────────────────────────────────────────────
+
+class QueryTestRequest(BaseModel):
+    case_id: str
+    query: str
+
+
+@router.post("/studio/query-test")
+def studio_query_test(req: QueryTestRequest):
+    """
+    Rule playground: run a Lucene query against a case and return the first 10 matching events.
+    Used by the Studio alert-rule editor to preview query results without leaving the editor.
+    """
+    from services.elasticsearch import search_events_for_rule
+    if not req.query.strip():
+        return {"hits": [], "error": "Empty query"}
+    try:
+        hits = search_events_for_rule(req.case_id, req.query, size=10)
+        return {"hits": hits}
+    except Exception as exc:
+        return {"hits": [], "error": str(exc)}
+
+
+class YaraTestRequest(BaseModel):
+    case_id: str
+    job_id: str
+    rules: str
+
+
+@router.post("/studio/yara-test")
+def studio_yara_test(req: YaraTestRequest):
+    """
+    YARA playground: compile rules and scan a source file from a case, returning matches.
+    Downloads up to 10 MB of the file into memory inside the API pod.
+    """
+    import io
+    try:
+        import yara  # type: ignore
+    except ImportError:
+        return {"matches": [], "error": "yara-python is not installed in this container"}
+
+    # Compile rules
+    try:
+        compiled = yara.compile(source=req.rules)
+    except Exception as exc:
+        return {"matches": [], "error": f"Rule compile error: {exc}"}
+
+    # Resolve minio_key for the job
+    job = get_job(req.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    minio_key = job.get("minio_object_key", "")
+    if not minio_key:
+        return {"matches": [], "error": "Job has no associated file"}
+
+    # Download up to 10 MB
+    _MAX_YARA_BYTES = 10 * 1024 * 1024
+    try:
+        data = storage.download_fileobj(minio_key)[:_MAX_YARA_BYTES]
+    except Exception as exc:
+        return {"matches": [], "error": f"File download failed: {exc}"}
+
+    # Scan
+    try:
+        raw_matches = compiled.match(data=data)
+        matches = [
+            {
+                "rule":    m.rule,
+                "tags":    list(m.tags),
+                "strings": [
+                    {"identifier": s.identifier, "offset": s.instances[0].offset if s.instances else 0}
+                    for s in m.strings
+                ][:20],
+            }
+            for m in raw_matches
+        ]
+        return {"matches": matches, "scanned_bytes": len(data)}
+    except Exception as exc:
+        return {"matches": [], "error": f"Scan error: {exc}"}
+
+
+# ── Module artifact download & re-ingest ─────────────────────────────────────
+
+from fastapi.responses import RedirectResponse  # noqa: E402
+
+@router.get("/cases/{case_id}/modules/{run_id}/artifacts/{filename}")
+def download_module_artifact(case_id: str, run_id: str, filename: str):
+    """
+    Return a short-lived presigned download URL for a module output artifact
+    (e.g. a de4dot-deobfuscated .NET binary).
+    The client is redirected directly to MinIO so no large binary passes through
+    the API server.
+    """
+    key = f"cases/{case_id}/modules/{run_id}/artifacts/{filename}"
+    try:
+        url = storage.get_presigned_url(key, expires_seconds=3600)
+        return RedirectResponse(url, status_code=302)
+    except Exception as exc:
+        logger.warning("Artifact download failed (%s): %s", key, exc)
+        raise HTTPException(status_code=404, detail="Artifact not found or expired")
+
+
+@router.post("/cases/{case_id}/modules/{run_id}/artifacts/{filename}/reingest")
+def reingest_module_artifact(case_id: str, run_id: str, filename: str):
+    """
+    Re-ingest a module output artifact (e.g. a de4dot-deobfuscated binary) back
+    into the case timeline as a new ingest job.
+
+    The artifact already lives in MinIO so we skip the upload stage entirely —
+    just create a job record pointing at the existing key and dispatch Celery.
+    """
+    from services import jobs as job_svc
+    from services.celery_dispatch import dispatch_ingest
+
+    case = get_case(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    minio_key = f"cases/{case_id}/modules/{run_id}/artifacts/{filename}"
+    job_id    = uuid.uuid4().hex
+
+    job_svc.create_job(job_id, case_id, filename, "")
+    job_svc.update_job(job_id, minio_object_key=minio_key, status="PENDING")
+
+    try:
+        dispatch_ingest(job_id, case_id, minio_key, filename)
+    except Exception as exc:
+        job_svc.update_job(job_id, status="FAILED", error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Failed to dispatch ingest: {exc}")
+
+    return {"job_id": job_id, "filename": filename, "status": "PENDING"}

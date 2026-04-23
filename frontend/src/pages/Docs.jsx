@@ -125,6 +125,7 @@ const SECTIONS = [
   { id: 'modules',      label: 'Custom Modules',      icon: <Cpu size={13} /> },
   { id: 'alert-rules',  label: 'Alert Rules',         icon: <Bell size={13} /> },
   { id: 'query-syntax', label: 'Query Syntax',        icon: <Terminal size={13} /> },
+  { id: 'search',       label: 'Investigation UI',    icon: <GitBranch size={13} /> },
   { id: 'api',          label: 'API Reference',       icon: <Code2 size={13} /> },
 ]
 
@@ -240,31 +241,35 @@ export default function Docs() {
             </InfoBox>
 
             <H3>Minimal example</H3>
-            <CodeBlock code={`from base_plugin import BasePlugin, PluginContext, ParsedEvent
+            <CodeBlock code={`from plugins.base_plugin import BasePlugin, PluginContext, PluginFatalError
 
 class ApacheAccessIngester(BasePlugin):
     PLUGIN_NAME          = "apache-access"
     SUPPORTED_EXTENSIONS = [".log"]
     HANDLED_FILENAMES    = ["access.log", "access_log"]
 
-    def parse(self, file_path: str, context: PluginContext):
+    def setup(self) -> None:
+        if not self.ctx.source_file_path.exists():
+            raise PluginFatalError("File not found")
+
+    def parse(self):
         import re
         COMBINED = re.compile(
             r'(?P<host>\\S+) \\S+ \\S+ \\[(?P<time>[^\\]]+)\\] '
             r'"(?P<request>[^"]*)" (?P<status>\\d+) \\S+'
         )
-        with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
+        with open(self.ctx.source_file_path, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 m = COMBINED.match(line.strip())
                 if not m:
                     continue
-                yield ParsedEvent(
-                    timestamp = self._parse_apache_time(m["time"]),
-                    message   = m["request"],
-                    artifact_type = self.PLUGIN_NAME,
-                    host      = {"hostname": m["host"]},
-                    extra     = {"status": int(m["status"])},
-                )
+                yield {
+                    "timestamp":     self._parse_apache_time(m["time"]),
+                    "message":       m["request"],
+                    "artifact_type": self.PLUGIN_NAME,
+                    "host":          {"hostname": m["host"]},
+                    "extra":         {"status": int(m["status"])},
+                }
 
     def _parse_apache_time(self, s: str) -> str:
         from datetime import datetime
@@ -292,17 +297,31 @@ class ApacheAccessIngester(BasePlugin):
               </div>
             </div>
 
-            <H3>ParsedEvent fields</H3>
+            <H3>Event dict fields</H3>
+            <P>
+              Each <code>yield</code> produces a plain Python dict. Required keys:
+            </P>
             <div className="border border-gray-200 rounded-xl overflow-hidden">
               <div className="px-4">
-                <Field name="timestamp" type="str" required>ISO-8601 datetime string, e.g. <code>2024-01-15T09:30:00Z</code>.</Field>
+                <Field name="timestamp" type="str" required>ISO-8601 UTC datetime, e.g. <code>2024-01-15T09:30:00Z</code>.</Field>
                 <Field name="message" type="str" required>Human-readable description of the event.</Field>
-                <Field name="artifact_type" type="str">Defaults to <code>PLUGIN_NAME</code>. Override to sub-categorise events.</Field>
+                <Field name="artifact_type" type="str">Defaults to <code>PLUGIN_NAME</code>. Override to sub-categorise.</Field>
+                <Field name="timestamp_desc" type="str">Label for what the timestamp represents, e.g. <code>"Last Modified"</code>.</Field>
                 <Field name="host" type="dict">Host fields — <code>{"{"}"hostname": "...", "ip": "..."{"}"}. </code>Indexed under <code>host.*</code>.</Field>
                 <Field name="user" type="dict">User fields — <code>{"{"}"name": "...", "domain": "..."{"}"}. </code>Indexed under <code>user.*</code>.</Field>
                 <Field name="process" type="dict">Process fields — <code>{"{"}"name": "...", "pid": 123, "cmdline": "..."{"}"}.</code></Field>
-                <Field name="network" type="dict">Network fields — <code>{"{"}"src_ip": "...", "dest_ip": "...", "dest_port": 443{"}"}.</code></Field>
+                <Field name="network" type="dict">Network fields — <code>{"{"}"src_ip": "...", "dst_ip": "...", "dst_port": 443{"}"}.</code></Field>
                 <Field name="extra" type="dict">Any additional fields. Stored under their own keys in Elasticsearch.</Field>
+              </div>
+            </div>
+
+            <H3>Plugin lifecycle methods</H3>
+            <div className="border border-gray-200 rounded-xl overflow-hidden">
+              <div className="px-4">
+                <Field name="setup()" type="method">Called once before parsing. Open file handles or validate format here. Raise <code>PluginFatalError</code> to skip the file entirely.</Field>
+                <Field name="parse()" type="method">Generator — yield one dict per event. Access the file via <code>self.ctx.source_file_path</code>.</Field>
+                <Field name="teardown()" type="method">Called after parsing (always, even on error). Close file handles here.</Field>
+                <Field name="get_stats()" type="method">Return a dict of plugin-specific stats shown in the job summary.</Field>
               </div>
             </div>
 
@@ -472,22 +491,50 @@ evtx.event_id:4688 AND (message:*winword* OR message:*excel*)`} />
           {/* ── Query Syntax ──────────────────────────────────────────────── */}
           <Section id="query-syntax" title="Query Syntax" icon={<Terminal size={14} className="text-brand-accent" />}>
             <P>
-              The Search page and Alert Rules both use Elasticsearch
-              <strong> Lucene query_string</strong> syntax.
+              The Timeline and Alert Rules use Elasticsearch <strong>Lucene query_string</strong> syntax.
+              The search bar targets <code>message</code>, <code>host.hostname</code>, <code>user.name</code>,
+              <code>process.name</code>, <code>process.cmdline</code>, and <code>process.args</code> by default.
+              Prefix a term with a field name to search elsewhere.
             </P>
 
             <H3>Common patterns</H3>
             <div className="space-y-2">
               {[
                 { q: 'evtx.event_id:4625',             desc: 'Field equals value' },
-                { q: 'evtx.event_id:4625 OR evtx.event_id:4648', desc: 'Boolean OR' },
-                { q: 'evtx.event_id:4688 AND message:*powershell*', desc: 'Boolean AND with wildcard' },
+                { q: 'evtx.event_id:(4625 OR 4771)',   desc: 'OR group — failed auth' },
+                { q: 'evtx.event_id:4688 AND message:*powershell*', desc: 'AND with wildcard' },
                 { q: 'message:*encoded*',              desc: 'Wildcard (*) — any characters' },
                 { q: 'NOT evtx.event_id:4672',         desc: 'NOT operator' },
                 { q: 'evtx.event_id:[4600 TO 4700]',   desc: 'Range query' },
-                { q: 'artifact_type:suricata',         desc: 'Filter by ingester type' },
+                { q: 'artifact_type:prefetch',         desc: 'Filter by ingester type' },
                 { q: 'host.hostname:DESKTOP-*',        desc: 'Prefix match with wildcard' },
-                { q: 'fo_id:abc123',                   desc: 'Exact event lookup by ID' },
+                { q: 'is_flagged:true',                desc: 'Only analyst-flagged events' },
+                { q: 'tags:lateral-movement',          desc: 'Events with a specific tag' },
+              ].map(r => (
+                <div key={r.q} className="flex gap-3 items-start text-xs py-1.5 border-b border-gray-100 last:border-0">
+                  <code className="font-mono text-brand-accent bg-brand-accentlight px-2 py-0.5 rounded text-[11px] flex-shrink-0">
+                    {r.q}
+                  </code>
+                  <span className="text-gray-500 pt-0.5">{r.desc}</span>
+                </div>
+              ))}
+            </div>
+
+            <H3>Regexp mode</H3>
+            <P>
+              Enable the <strong>.*</strong> toggle in the search bar to match full event messages using
+              Elasticsearch regexp syntax. This runs against the raw unanalyzed <code>message</code> field.
+            </P>
+            <InfoBox type="warning">
+              ES regexp supports <code>. .* [a-z] (a|b) a+ a? a&#123;n,m&#125;</code> but <strong>NOT</strong>{' '}
+              <code>\d \w \s</code>. Use <code>[0-9]</code>, <code>[a-zA-Z_]</code>, <code>[ \t]</code> instead.
+            </InfoBox>
+            <div className="space-y-2">
+              {[
+                { q: 'lateral.*movement',    desc: 'Any chars between words' },
+                { q: 'cmd\\.exe',            desc: 'Escape literal dot' },
+                { q: '4[6-9][0-9]{2}',       desc: 'Event ID range 4600-4999' },
+                { q: '(mimikatz|sekurlsa)',   desc: 'Either word' },
               ].map(r => (
                 <div key={r.q} className="flex gap-3 items-start text-xs py-1.5 border-b border-gray-100 last:border-0">
                   <code className="font-mono text-brand-accent bg-brand-accentlight px-2 py-0.5 rounded text-[11px] flex-shrink-0">
@@ -501,20 +548,137 @@ evtx.event_id:4688 AND (message:*winword* OR message:*excel*)`} />
             <H3>Indexed fields</H3>
             <Ul>
               <Li><code className="text-gray-600">timestamp</code> — ISO-8601 event time</Li>
-              <Li><code className="text-gray-600">message</code> — human-readable description (full-text)</Li>
-              <Li><code className="text-gray-600">artifact_type</code> — ingester that produced the event</Li>
+              <Li><code className="text-gray-600">message</code> — human-readable description (full-text + keyword)</Li>
+              <Li><code className="text-gray-600">artifact_type</code> — ingester that produced the event (evtx, prefetch, mft, registry, lnk, syslog, hayabusa, …)</Li>
               <Li><code className="text-gray-600">fo_id</code> — unique event ID</Li>
               <Li><code className="text-gray-600">host.*</code> — hostname, ip, os</Li>
               <Li><code className="text-gray-600">user.*</code> — name, domain, sid</Li>
-              <Li><code className="text-gray-600">process.*</code> — name, pid, cmdline, path</Li>
-              <Li><code className="text-gray-600">network.*</code> — src_ip, dest_ip, src_port, dest_port, proto</Li>
-              <Li><code className="text-gray-600">evtx.*</code> — event_id, channel, event_data.* (EVTX events)</Li>
-              <Li><code className="text-gray-600">suricata.*</code> — event_type, alert.signature, alert.severity (Suricata events)</Li>
+              <Li><code className="text-gray-600">process.*</code> — name, pid, cmdline, args, path</Li>
+              <Li><code className="text-gray-600">network.*</code> — src_ip, dst_ip, dst_port, protocol</Li>
+              <Li><code className="text-gray-600">evtx.*</code> — event_id, channel, provider_name</Li>
+              <Li><code className="text-gray-600">registry.*</code> — key_path, value_name, value_data</Li>
+              <Li><code className="text-gray-600">prefetch.*</code> — executable, run_count, last_run</Li>
+              <Li><code className="text-gray-600">lnk.*</code> — target_path, machine_id</Li>
+              <Li><code className="text-gray-600">hayabusa.*</code> — level, rule_title</Li>
+              <Li><code className="text-gray-600">is_flagged</code>, <code className="text-gray-600">tags</code>, <code className="text-gray-600">analyst_note</code> — analyst annotations</Li>
             </Ul>
 
             <InfoBox type="tip">
-              Fields from the <code>extra</code> dict in custom ingesters are stored at the top
-              level — search them directly by their key name.
+              Fields from the <code>extra</code> dict in custom ingesters are stored at the top level —
+              search them directly by their key name. Use AI Search Assist (✦ button) to generate queries
+              from plain English.
+            </InfoBox>
+          </Section>
+
+          {/* ── Investigation UI ──────────────────────────────────────────── */}
+          <Section id="search" title="Investigation UI" icon={<GitBranch size={14} className="text-brand-accent" />}>
+            <P>
+              The <strong>Timeline</strong> tab is the unified investigation workspace. It combines
+              chronological event browsing, full-text search, facet filtering, saved searches, date
+              range navigation, and AI-assisted query generation in a single view.
+            </P>
+
+            <H3>Search bar</H3>
+            <Ul>
+              <Li>Press <kbd className="px-1 bg-gray-100 rounded text-[10px] font-mono">/</kbd> to focus the search bar from anywhere on the page</Li>
+              <Li>Press <strong>Enter</strong> or click <strong>Search</strong> to apply the query</Li>
+              <Li>Toggle <strong>.*</strong> to switch to ES regexp mode — matches against the full raw message string. Use this for patterns like <code>cmd\.exe</code> or <code>4[6-9][0-9]&#123;2&#125;</code></Li>
+              <Li>Click <strong>✦</strong> (Sparkles) to open AI Search Assist — describe what you want to find in plain English and the AI generates the query</Li>
+            </Ul>
+
+            <InfoBox type="tip">
+              Use normal query_string mode for field-level queries (<code>evtx.event_id:4625</code>) and bare-term searches.
+              Switch to regexp mode only when you need to match a pattern across the full message text — it is slower on large datasets.
+            </InfoBox>
+
+            <H3>Date range & histogram</H3>
+            <Ul>
+              <Li>Use the <strong>From / To</strong> date pickers in the left sidebar to restrict events to a time window</Li>
+              <Li>Click a <strong>date preset</strong> (Last 24h, 7d, 30d, 90d) for quick ranges</Li>
+              <Li>The <strong>event histogram</strong> shows event count per day for the current filter — click a bar to jump to that date</Li>
+            </Ul>
+
+            <H3>Facet filter chips</H3>
+            <P>
+              The left sidebar shows <strong>Host</strong>, <strong>User</strong>, <strong>Event ID</strong>, and <strong>Channel</strong>
+              facet chips auto-computed from the current result set. Click a chip to add it as an exclusive filter —
+              click again to remove. Multiple facets can be active simultaneously.
+              Active filters appear as dismissible badges below the search bar alongside a <strong>Clear all</strong> button.
+            </P>
+
+            <H3>Saved searches</H3>
+            <P>
+              When a query or facet filter is active, click <strong>+ Save</strong> in the sidebar to
+              name and persist the search for the current case. Saved searches restore both the query
+              text and any active facet filters. Hover a saved search and click the trash icon to delete it.
+            </P>
+
+            <H3>Column picker</H3>
+            <P>
+              Click the <strong>Columns</strong> button (top-right of the results table) to toggle which
+              fields are shown: Timestamp, Type, Host, User, Process, Message, Source, Tags, Note.
+              Column visibility is saved to localStorage per browser session.
+            </P>
+
+            <H3>Sorting</H3>
+            <P>
+              Click any sortable column header (Timestamp, Type, Host, User) to sort by that field.
+              An arrow indicator shows the active sort direction. Click again to reverse. Default is
+              timestamp ascending (oldest first) so the attack chain reads chronologically.
+            </P>
+
+            <H3>Event detail panel</H3>
+            <P>
+              Click any row to open the full event detail panel on the right. From there you can:
+            </P>
+            <Ul>
+              <Li><strong>Flag</strong> the event for follow-up (bookmark icon) — flagged events are searchable with <code>is_flagged:true</code></Li>
+              <Li><strong>Tag</strong> the event with investigator labels (e.g. <code>lateral-movement</code>, <code>c2</code>)</Li>
+              <Li><strong>Add a note</strong> — free-text analyst annotation stored alongside the event</Li>
+              <Li><strong>AI Explain</strong> — sends the event to the configured LLM for a forensic significance summary</Li>
+              <Li>Click any field value to add it as an inline query filter (<code>AND field:"value"</code>)</Li>
+            </Ul>
+
+            <H3>Keyboard shortcuts</H3>
+            <div className="space-y-1 mt-2">
+              {[
+                { key: '/',          desc: 'Focus search bar' },
+                { key: '?',          desc: 'Toggle keyboard shortcut help overlay' },
+                { key: '↑ / ↓',      desc: 'Navigate rows (when search bar is not focused)' },
+                { key: 'Enter',      desc: 'Open detail panel for the selected row' },
+                { key: 'Escape',     desc: 'Close detail panel / blur search bar' },
+              ].map(r => (
+                <div key={r.key} className="flex gap-3 items-center text-xs py-1 border-b border-gray-100 last:border-0">
+                  <kbd className="font-mono bg-gray-100 text-gray-700 px-2 py-0.5 rounded text-[11px] flex-shrink-0 min-w-[60px] text-center">{r.key}</kbd>
+                  <span className="text-gray-500">{r.desc}</span>
+                </div>
+              ))}
+            </div>
+
+            <H3>Event deduplication</H3>
+            <P>
+              Events with identical timestamp, message, artifact type, host, and user are automatically
+              deduplicated client-side. This prevents the same log entry from appearing twice when an
+              artifact was ingested from multiple sources (e.g. raw EVTX + a Plaso super-timeline of
+              the same disk image).
+            </P>
+
+            <H3>AI Search Assist</H3>
+            <P>
+              The <strong>✦</strong> button next to the search bar opens an input where you describe what
+              you want to find in plain English. The configured LLM (Settings → AI Analysis) translates it
+              into an Elasticsearch query_string aware of the full field schema — EVTX event IDs, registry
+              paths, prefetch fields, Hayabusa rule levels, MFT attributes, and common attack patterns
+              (lateral movement, credential dumping, persistence, log tampering, …).
+            </P>
+            <P>
+              The AI also knows when to suggest regexp mode — for example, if you ask for
+              "events matching the pattern 4[6-9]xx" it will set regexp mode automatically.
+            </P>
+            <InfoBox type="info">
+              AI Assist requires an LLM configured in Settings → AI Analysis. The generated query is
+              pre-filled in the search bar and editable before you execute — always review before
+              running against large datasets.
             </InfoBox>
           </Section>
 
@@ -544,10 +708,24 @@ GET /cases/{id}/search/facets           field facets for filters`} />
             <H3>Modules</H3>
             <CodeBlock language="http" code={`GET    /modules                          list all modules (built-in + custom)
 GET    /cases/{id}/sources               source files available for a case
+                                           fast path: queries fo-artifacts ES index
+                                           fallback: Redis sorted-set scan (5 000 cap)
 POST   /cases/{id}/module-runs           launch a module run  {module_id, job_ids[]}
 GET    /cases/{id}/module-runs           list runs for a case
 GET    /module-runs/{run_id}             get run with full results_preview
+GET    /module-runs/{run_id}/log-stream  SSE stream of live log lines (text/event-stream)
+                                           each event: {text: str}  final: {done: true, status}
 POST   /modules/yara/validate            validate YARA rule syntax  {rules}`} />
+
+            <H3>Studio (rule playground &amp; testers)</H3>
+            <CodeBlock language="http" code={`POST /studio/query-test   {case_id, query}
+  → {hits: [...]}  — first 10 events matching the Lucene query
+    use in Studio → alert-rule editor → "Test Query" button
+
+POST /studio/yara-test    {case_id, job_id, rules}
+  → {matches: [{rule, tags, strings[{identifier, offset}]}], scanned_bytes}
+    scans up to 10 MB of the selected source file
+    use in Studio → YARA editor → "Test YARA" button`} />
 
             <H3>Alert Rules</H3>
             <CodeBlock language="http" code={`GET    /alert-rules/library              list global rule library

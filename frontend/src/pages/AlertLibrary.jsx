@@ -101,7 +101,7 @@ function SigmaRuleModal({ rule = null, onClose, onSaved }) {
     setAiLoading(true)
     setAiError('')
     try {
-      const res = await api.alertRules.generateRule({ description: aiDesc, context: aiCtx })
+      const res = await api.alertRules.generateSigmaRule({ description: aiDesc, context: aiCtx })
       setYamlText(res.yaml || '')
       setShowAI(false)
       setAiDesc('')
@@ -384,7 +384,7 @@ function RunOnCaseModal({ rule, cases, onClose }) {
 
   function goToSearch(q) {
     onClose()
-    navigate(`/cases/${selectedCase}/search`, { state: { pivotQuery: q } })
+    navigate(`/cases/${selectedCase}`, { state: { pivotQuery: q } })
   }
 
   return (

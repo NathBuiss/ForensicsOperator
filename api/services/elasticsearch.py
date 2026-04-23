@@ -21,6 +21,7 @@ INDEX_TEMPLATE = {
             "number_of_replicas": 0,
             "refresh_interval": "5s",
             "index.mapping.total_fields.limit": 2000,
+            "codec": "best_compression",
         },
         "mappings": {
             "dynamic": "true",
@@ -107,6 +108,12 @@ def count_case_events(case_id: str) -> int:
         return 0
 
 
+_SEARCH_FIELDS = [
+    "message", "host.hostname", "user.name",
+    "process.name", "process.cmdline", "process.args",
+]
+
+
 def search_events(
     case_id: str,
     query: str = "",
@@ -118,6 +125,7 @@ def search_events(
     size: int = 100,
     sort_field: str = "timestamp",
     sort_order: str = "asc",
+    regexp: bool = False,
 ) -> dict[str, Any]:
     """
     Search events in a case with full-text query and field filters.
@@ -129,7 +137,11 @@ def search_events(
     filter_clauses: list[dict] = []
 
     if query:
-        must_clauses.append({"query_string": {"query": query, "default_operator": "AND"}})
+        if regexp:
+            # ES regexp on the unanalyzed full-text field — supports ., .*, [a-z], (a|b) but NOT \d \w \s
+            must_clauses.append({"regexp": {"message.keyword": {"value": query, "case_insensitive": True, "flags": "ALL"}}})
+        else:
+            must_clauses.append({"query_string": {"query": query, "default_operator": "AND", "fields": _SEARCH_FIELDS}})
 
     if from_ts or to_ts:
         range_filter: dict = {"range": {"timestamp": {}}}
@@ -163,7 +175,7 @@ def search_events(
         result = _request("POST", f"/{index}/_search", body)
         return result
     except urllib.error.HTTPError as exc:
-        if exc.code == 404:
+        if exc.code in (400, 404):
             return {"hits": {"total": {"value": 0}, "hits": []}}
         raise
 
@@ -176,7 +188,7 @@ def get_search_facets(
     """Return aggregation buckets for the facet panel."""
     index = f"fo-case-{case_id}-{artifact_type}" if artifact_type else f"fo-case-{case_id}-*"
 
-    must = [{"query_string": {"query": query}}] if query else [{"match_all": {}}]
+    must = [{"query_string": {"query": query, "fields": _SEARCH_FIELDS}}] if query else [{"match_all": {}}]
 
     body = {
         "query": {"bool": {"must": must}},
@@ -227,6 +239,75 @@ def update_event(case_id: str, index: str, doc_id: str, partial: dict) -> bool:
         return True
     except Exception:
         return False
+
+
+_ARTIFACTS_INDEX = "fo-artifacts"
+
+_ARTIFACTS_MAPPING = {
+    "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+    "mappings": {
+        "properties": {
+            "case_id":        {"type": "keyword"},
+            "job_id":         {"type": "keyword"},
+            "filename":       {"type": "keyword"},
+            "plugin_used":    {"type": "keyword"},
+            "mime_type":      {"type": "keyword"},
+            "events_indexed": {"type": "integer"},
+            "skipped":        {"type": "boolean"},
+            "minio_key":      {"type": "keyword", "index": False},
+            "completed_at":   {"type": "date"},
+        }
+    },
+}
+
+
+def ensure_artifacts_index() -> None:
+    try:
+        _request("GET", f"/{_ARTIFACTS_INDEX}")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            try:
+                _request("PUT", f"/{_ARTIFACTS_INDEX}", _ARTIFACTS_MAPPING)
+                logger.info("Created %s index", _ARTIFACTS_INDEX)
+            except Exception as create_exc:
+                logger.warning("Could not create artifacts index: %s", create_exc)
+
+
+def index_artifact(doc: dict) -> None:
+    job_id = doc.get("job_id", "unknown")
+    try:
+        _request("PUT", f"/{_ARTIFACTS_INDEX}/_doc/{job_id}", doc)
+    except Exception as exc:
+        logger.warning("Failed to index artifact %s: %s", job_id, exc)
+
+
+def list_case_artifacts(case_id: str, size: int = 5000) -> list[dict]:
+    body = {
+        "query": {"term": {"case_id": case_id}},
+        "size": size,
+        "sort": [{"completed_at": {"order": "desc"}}],
+    }
+    try:
+        result = _request("POST", f"/{_ARTIFACTS_INDEX}/_search", body)
+        return [h["_source"] for h in result.get("hits", {}).get("hits", [])]
+    except Exception:
+        return []
+
+
+def search_events_for_rule(case_id: str, query: str, size: int = 10) -> list[dict]:
+    """Run a Lucene query against a case and return the first N hits (for Studio rule playground)."""
+    index = f"fo-case-{case_id}-*"
+    body = {
+        "query": {"query_string": {"query": query, "default_operator": "AND", "fields": _SEARCH_FIELDS}},
+        "size": size,
+        "sort": [{"timestamp": {"order": "asc"}}],
+        "_source": {"excludes": ["raw"]},
+    }
+    try:
+        result = _request("POST", f"/{index}/_search", body)
+        return [h["_source"] for h in result.get("hits", {}).get("hits", [])]
+    except Exception:
+        return []
 
 
 def delete_case_indices(case_id: str) -> None:

@@ -15,65 +15,89 @@ import {
   Code2, Plus, Save, Trash2, CheckCircle, AlertCircle,
   RefreshCw, FileCode2, X, ChevronRight, Cpu, Puzzle,
   Play, BookOpen, Copy, Check, Lock, Shield, Bell,
+  Terminal, Zap, Database,
 } from 'lucide-react'
-import { api } from '../api/client'
+import { api, getToken } from '../api/client'
 
 // ── Templates ─────────────────────────────────────────────────────────────────
 
-const INGESTER_TEMPLATE = (name = 'my_format') => `"""
+const INGESTER_TEMPLATE = (name = 'my_format') => {
+  const cls = name.replace(/(^|_)([a-z])/g, (_, _p, c) => c.toUpperCase())
+  return `"""
 ${name}_ingester.py — custom ingester for ${name.replace(/_/g, ' ')} artifacts.
 
-Naming rules
+Naming rules:
   • File must end with _ingester.py
-  • PLUGIN_NAME must be unique (used as artifact_type and ES index suffix)
+  • PLUGIN_NAME must be unique across all plugins
 
-Docs: /docs  →  "Creating a Custom Ingester"
+Plugin lifecycle:
+  1. can_handle(path, mime) → True / False
+  2. setup()    — validate / open the file
+  3. parse()    — yield one dict per event
+  4. teardown() — release resources (always called)
 """
-from base_plugin import BasePlugin, PluginContext, ParsedEvent
+from plugins.base_plugin import BasePlugin, PluginContext, PluginFatalError
 
 
-class ${name.replace(/(^|_)([a-z])/g, (_, _p, c) => c.toUpperCase())}Ingester(BasePlugin):
-    # Unique artifact type — used as the ES index name suffix
+class ${cls}Ingester(BasePlugin):
     PLUGIN_NAME = "${name.replace(/_/g, '-')}"
 
-    # File extensions this ingester handles (lower-case, with leading dot)
+    # Lower-case extensions with leading dot
     SUPPORTED_EXTENSIONS = [".log", ".txt"]
 
-    # Exact filenames to match (useful for system files without extensions)
+    # Exact filenames matched case-insensitively (no extension needed)
     HANDLED_FILENAMES = []  # e.g. ["$MFT", "NTUSER.DAT"]
 
-    def parse(self, file_path: str, context: PluginContext):
-        """
-        Generator — yield one ParsedEvent per record found in the file.
+    def setup(self) -> None:
+        """Validate the file. Raise PluginFatalError to skip this file."""
+        if not self.ctx.source_file_path.exists():
+            raise PluginFatalError(f"File not found: {self.ctx.source_file_path}")
 
-        ParsedEvent fields
-          timestamp     str   ISO-8601 (required)
-          message       str   human-readable description (required)
-          artifact_type str   defaults to PLUGIN_NAME
-          host          dict  e.g. {"hostname": "DESKTOP-1"}
-          user          dict  e.g. {"name": "alice", "domain": "CORP"}
-          extra         dict  any additional fields stored under their own key
+    def parse(self):
         """
-        with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
-            for line_no, line in enumerate(fh, 1):
-                line = line.rstrip("\\n")
-                if not line:
-                    continue
-                yield ParsedEvent(
-                    timestamp=self._extract_timestamp(line),
-                    message=line,
-                    artifact_type=self.PLUGIN_NAME,
-                    # host={"hostname": ""},
-                    # user={"name": ""},
-                    # extra={"line_no": line_no},
-                )
+        Generator — yield one dict per event.
+
+        Required keys:
+            timestamp  str   ISO-8601 UTC, e.g. "2024-01-15T10:23:45Z"
+            message    str   human-readable summary
+
+        Optional keys:
+            artifact_type  str   overrides PLUGIN_NAME
+            timestamp_desc str   label for what the timestamp represents
+            host           dict  {"hostname": "DESKTOP-01"}
+            user           dict  {"name": "alice", "domain": "CORP"}
+            process        dict  {"name": "cmd.exe", "pid": 1234}
+            extra          dict  any additional fields
+        """
+        src = self.ctx.source_file_path
+        try:
+            with open(src, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.rstrip("\\n")
+                    if not line:
+                        continue
+                    yield {
+                        "timestamp":     self._extract_timestamp(line),
+                        "message":       line,
+                        "artifact_type": self.PLUGIN_NAME,
+                        # "host":    {"hostname": ""},
+                        # "user":    {"name": ""},
+                        # "extra":   {"key": "value"},
+                    }
+        except OSError as exc:
+            raise PluginFatalError(f"Cannot read {src}: {exc}") from exc
 
     def _extract_timestamp(self, line: str) -> str:
-        """Return ISO-8601 timestamp from line, or a fallback."""
-        # TODO: implement real timestamp extraction
-        from datetime import datetime
-        return datetime.utcnow().isoformat() + "Z"
+        """Return ISO-8601 UTC timestamp parsed from line, or now() as fallback."""
+        import re
+        from datetime import datetime, timezone
+        # TODO: adapt this regex to your actual log timestamp format
+        m = re.match(r"(\\d{4}-\\d{2}-\\d{2}[T ]\\d{2}:\\d{2}:\\d{2})", line)
+        if m:
+            return m.group(1).replace(" ", "T") + "Z"
+        return datetime.now(timezone.utc).isoformat()
 `
+}
 
 const MODULE_TEMPLATE = (name = 'my_analysis') => `"""
 ${name}_module.py — custom analysis module: ${name.replace(/_/g, ' ')}.
@@ -558,6 +582,70 @@ export default function Studio() {
   const [filterText, setFilterText] = useState('')
   useEffect(() => { setFilterText('') }, [sidebarTab])
 
+  // Case list for playground / YARA tester / module run pickers
+  const [caseList, setCaseList] = useState([])
+  useEffect(() => {
+    api.cases.list().then(r => setCaseList(r.cases || [])).catch(() => {})
+  }, [])
+
+  // Rule playground (alert rules)
+  const [playground, setPlayground] = useState({
+    show: false, caseId: '', query: '', results: null, error: null, loading: false,
+  })
+
+  // YARA tester
+  const [yaraTest, setYaraTest] = useState({
+    show: false, caseId: '', sources: [], jobId: '', results: null, error: null, loading: false,
+  })
+  useEffect(() => {
+    if (!yaraTest.show || !yaraTest.caseId) return
+    api.modules.listSources(yaraTest.caseId)
+      .then(r => setYaraTest(p => ({ ...p, sources: r.sources || [], jobId: '' })))
+      .catch(() => {})
+  }, [yaraTest.show, yaraTest.caseId])
+
+  // Module run-from-Studio
+  const [modRun, setModRun] = useState({
+    show: false, caseId: '', sources: [], selectedJobs: [], running: false, runId: null,
+  })
+  useEffect(() => {
+    if (!modRun.show || !modRun.caseId) return
+    api.modules.listSources(modRun.caseId)
+      .then(r => setModRun(p => ({ ...p, sources: r.sources || [], selectedJobs: [] })))
+      .catch(() => {})
+  }, [modRun.show, modRun.caseId])
+
+  // Live log panel (SSE)
+  const [logPanel, setLogPanel] = useState({ show: false, lines: [], done: false, runId: null })
+  const esRef = useRef(null)
+
+  function openLogStream(runId) {
+    if (esRef.current) esRef.current.close()
+    setLogPanel({ show: true, lines: [], done: false, runId })
+    const url = api.modules.logStreamUrl(runId)
+    const token = getToken()
+    // Pass token via query param (EventSource doesn't support custom headers)
+    const es = new EventSource(`${url}?_token=${encodeURIComponent(token || '')}`)
+    esRef.current = es
+    es.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data)
+        if (msg.done) {
+          setLogPanel(p => ({ ...p, done: true }))
+          es.close()
+          return
+        }
+        if (msg.text) {
+          setLogPanel(p => ({ ...p, lines: [...p.lines, msg.text] }))
+        }
+      } catch (_) {}
+    }
+    es.onerror = () => {
+      setLogPanel(p => ({ ...p, done: true }))
+      es.close()
+    }
+  }
+
   // Derived
   const activeTab = openTabs.find(t => fileId(t.type, t.name) === activeTabKey) || null
   const isDirty   = activeTab ? activeTab.code !== activeTab.originalCode : false
@@ -583,7 +671,7 @@ export default function Studio() {
         api.alertRules.listLibrary().catch(() => ({ rules: [] })),
       ])
       setIngFiles([...(ingBuiltin.files || []), ...(ing.files || [])])
-      setModFiles(mod.files || [])
+      setModFiles([...(modBuiltin.files || []), ...(mod.files || [])])
       setRefModFiles(modBuiltin.files || [])
       setYaraRules([...(yara.rules || [])].sort((a, b) => a.name.localeCompare(b.name)))
       setAlertRuleList([...(alertLib.rules || [])].sort((a, b) => a.name.localeCompare(b.name)))
@@ -625,7 +713,7 @@ export default function Studio() {
       return
     }
 
-    const readOnly = builtin && type === 'module'
+    const readOnly = false
 
     const newTab = {
       type, name, label: name, ruleId: (type === 'yara' || type === 'alertrule') ? name : null,
@@ -941,6 +1029,53 @@ export default function Studio() {
     setTimeout(() => updateTab(type, name, { copied: false }), 2000)
   }
 
+  // ── Rule playground ────────────────────────────────────────────────────────
+
+  async function runPlayground() {
+    if (!playground.caseId || !playground.query.trim()) return
+    setPlayground(p => ({ ...p, loading: true, results: null, error: null }))
+    try {
+      const r = await api.studio.queryTest(playground.caseId, playground.query)
+      setPlayground(p => ({ ...p, loading: false, results: r.hits || [], error: r.error || null }))
+    } catch (err) {
+      setPlayground(p => ({ ...p, loading: false, error: err.message }))
+    }
+  }
+
+  // ── YARA tester ────────────────────────────────────────────────────────────
+
+  async function runYaraTest() {
+    if (!yaraTest.caseId || !yaraTest.jobId || !activeTab?.code) return
+    setYaraTest(p => ({ ...p, loading: true, results: null, error: null }))
+    try {
+      const r = await api.studio.yaraTest(yaraTest.caseId, yaraTest.jobId, activeTab.code)
+      setYaraTest(p => ({ ...p, loading: false, results: r.matches || [], error: r.error || null }))
+    } catch (err) {
+      setYaraTest(p => ({ ...p, loading: false, error: err.message }))
+    }
+  }
+
+  // ── Run module from Studio ──────────────────────────────────────────────────
+
+  async function runModuleFromStudio() {
+    if (!activeTab || !modRun.caseId || !modRun.selectedJobs.length) return
+    const moduleId = activeTab.name.replace(/_module\.py$/, '')
+    setModRun(p => ({ ...p, running: true, runId: null }))
+    try {
+      const r = await api.modules.createRun(modRun.caseId, {
+        module_id:    moduleId,
+        source_files: modRun.sources
+          .filter(s => modRun.selectedJobs.includes(s.job_id))
+          .map(s => ({ job_id: s.job_id, filename: s.original_filename, minio_key: s.minio_object_key })),
+      })
+      setModRun(p => ({ ...p, running: false, runId: r.run_id, show: false }))
+      openLogStream(r.run_id)
+    } catch (err) {
+      setModRun(p => ({ ...p, running: false }))
+      alert('Dispatch failed: ' + err.message)
+    }
+  }
+
   // ── Sidebar helpers ────────────────────────────────────────────────────────
 
   const sidebarFiles    = sidebarTab === 'ingesters' ? ingesterFiles : moduleFiles
@@ -999,13 +1134,10 @@ export default function Studio() {
           className={`w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors ${
             isActive ? 'bg-brand-accentlight text-brand-accent'
             : isOpen  ? 'bg-blue-50/50 text-gray-700 hover:bg-blue-50'
-            : f.builtin ? 'text-gray-400 hover:bg-gray-50 hover:text-gray-600'
             : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
           }`}
         >
-          {f.builtin
-            ? <Lock size={11} className="flex-shrink-0 opacity-50" />
-            : <FileCode2 size={13} className="flex-shrink-0 opacity-60" />}
+          <FileCode2 size={13} className="flex-shrink-0 opacity-60" />
           <span className="text-[11px] font-mono truncate flex-1">{f.name}</span>
           {isDirtyTab && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0" />}
           {isActive && !isDirtyTab && <ChevronRight size={10} className="flex-shrink-0 opacity-50" />}
@@ -1233,6 +1365,44 @@ export default function Studio() {
               </div>
 
               <div className="flex items-center gap-1.5 flex-shrink-0">
+                {/* Module: Run button */}
+                {activeTab.type === 'module' && !activeTab.builtin && (
+                  <button
+                    onClick={() => setModRun(p => ({ ...p, show: true }))}
+                    className="btn-outline text-xs py-1 px-2 text-purple-700 border-purple-200 hover:bg-purple-50"
+                  >
+                    <Play size={12} /> Run
+                  </button>
+                )}
+                {/* Alert rule: Rule playground button */}
+                {activeTab.type === 'alertrule' && (
+                  <button
+                    onClick={() => setPlayground(p => ({ ...p, show: !p.show }))}
+                    className={`btn-outline text-xs py-1 px-2 ${playground.show ? 'bg-orange-50 border-orange-300 text-orange-700' : 'text-orange-600 border-orange-200 hover:bg-orange-50'}`}
+                  >
+                    <Database size={12} /> {playground.show ? 'Hide Test' : 'Test Query'}
+                  </button>
+                )}
+                {/* YARA: Test button */}
+                {activeTab.type === 'yara' && (
+                  <button
+                    onClick={() => setYaraTest(p => ({ ...p, show: !p.show }))}
+                    className={`btn-outline text-xs py-1 px-2 ${yaraTest.show ? 'bg-green-50 border-green-300 text-green-700' : 'text-green-600 border-green-200 hover:bg-green-50'}`}
+                  >
+                    <Zap size={12} /> {yaraTest.show ? 'Hide Test' : 'Test YARA'}
+                  </button>
+                )}
+                {/* Log panel toggle */}
+                {logPanel.runId && (
+                  <button
+                    onClick={() => setLogPanel(p => ({ ...p, show: !p.show }))}
+                    className={`btn-outline text-xs py-1 px-2 flex items-center gap-1 ${logPanel.show ? 'bg-gray-100' : ''}`}
+                  >
+                    <Terminal size={12} />
+                    Log
+                    {!logPanel.done && <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />}
+                  </button>
+                )}
                 {/* Validation result — click to open full modal */}
                 {activeTab.validation && (
                   activeTab.validation.valid
@@ -1330,19 +1500,170 @@ export default function Studio() {
               </button>
             )}
 
-            {/* Code editor */}
-            <div className="flex-1 overflow-hidden">
-              {activeTab.loading ? (
-                <div className="h-full bg-gray-950 flex items-center justify-center">
-                  <RefreshCw size={20} className="animate-spin text-gray-500" />
+            {/* Code editor + bottom panels */}
+            <div className="flex-1 flex flex-col overflow-hidden min-h-0">
+              <div className="flex-1 overflow-hidden min-h-0">
+                {activeTab.loading ? (
+                  <div className="h-full bg-gray-950 flex items-center justify-center">
+                    <RefreshCw size={20} className="animate-spin text-gray-500" />
+                  </div>
+                ) : (
+                  <CodeEditor
+                    key={activeTabKey}
+                    value={activeTab.code}
+                    onChange={v => !activeTab.readOnly && updateTab(activeTab.type, activeTab.name, { code: v })}
+                    readOnly={activeTab.readOnly}
+                  />
+                )}
+              </div>
+
+              {/* ── Rule Playground panel ─────────────────────────────────── */}
+              {activeTab.type === 'alertrule' && playground.show && (
+                <div className="border-t border-orange-200 bg-orange-50/40 flex-shrink-0 max-h-64 overflow-y-auto">
+                  <div className="flex items-center gap-2 px-4 py-2 border-b border-orange-200">
+                    <Database size={12} className="text-orange-500" />
+                    <span className="text-xs font-semibold text-orange-700">Rule Playground</span>
+                    <div className="flex items-center gap-2 ml-auto">
+                      <select
+                        className="input text-xs py-0.5 px-1.5"
+                        value={playground.caseId}
+                        onChange={e => setPlayground(p => ({ ...p, caseId: e.target.value }))}
+                      >
+                        <option value="">Pick a case…</option>
+                        {caseList.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                      </select>
+                      <input
+                        className="input text-xs py-0.5 px-2 w-56 font-mono"
+                        placeholder="Lucene query to test…"
+                        value={playground.query}
+                        onChange={e => setPlayground(p => ({ ...p, query: e.target.value }))}
+                        onKeyDown={e => e.key === 'Enter' && runPlayground()}
+                      />
+                      <button
+                        className="btn-primary text-xs py-0.5 px-2"
+                        onClick={runPlayground}
+                        disabled={playground.loading || !playground.caseId}
+                      >
+                        {playground.loading ? <RefreshCw size={11} className="animate-spin" /> : <Play size={11} />}
+                        Test
+                      </button>
+                    </div>
+                  </div>
+                  {playground.error && (
+                    <p className="px-4 py-2 text-xs text-red-600 font-mono">{playground.error}</p>
+                  )}
+                  {playground.results !== null && !playground.error && (
+                    playground.results.length === 0
+                      ? <p className="px-4 py-2 text-xs text-gray-500 italic">No matching events.</p>
+                      : <table className="w-full text-[10px]">
+                          <thead><tr className="border-b border-orange-200">
+                            <th className="px-4 py-1 text-left text-gray-500 font-medium">Timestamp</th>
+                            <th className="px-4 py-1 text-left text-gray-500 font-medium">Type</th>
+                            <th className="px-4 py-1 text-left text-gray-500 font-medium">Message</th>
+                          </tr></thead>
+                          <tbody>
+                            {playground.results.map((h, i) => (
+                              <tr key={i} className="border-b border-orange-100 hover:bg-orange-50">
+                                <td className="px-4 py-1 font-mono text-gray-500 whitespace-nowrap">{(h.timestamp || '').slice(0, 19).replace('T', ' ')}</td>
+                                <td className="px-4 py-1 text-gray-500">{h.artifact_type || ''}</td>
+                                <td className="px-4 py-1 text-gray-700 truncate max-w-xs">{h.message || ''}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                  )}
                 </div>
-              ) : (
-                <CodeEditor
-                  key={activeTabKey}
-                  value={activeTab.code}
-                  onChange={v => !activeTab.readOnly && updateTab(activeTab.type, activeTab.name, { code: v })}
-                  readOnly={activeTab.readOnly}
-                />
+              )}
+
+              {/* ── YARA Test panel ───────────────────────────────────────── */}
+              {activeTab.type === 'yara' && yaraTest.show && (
+                <div className="border-t border-green-200 bg-green-50/40 flex-shrink-0 max-h-64 overflow-y-auto">
+                  <div className="flex items-center gap-2 px-4 py-2 border-b border-green-200">
+                    <Zap size={12} className="text-green-600" />
+                    <span className="text-xs font-semibold text-green-700">YARA Test</span>
+                    <div className="flex items-center gap-2 ml-auto">
+                      <select
+                        className="input text-xs py-0.5 px-1.5"
+                        value={yaraTest.caseId}
+                        onChange={e => setYaraTest(p => ({ ...p, caseId: e.target.value, jobId: '', sources: [] }))}
+                      >
+                        <option value="">Pick a case…</option>
+                        {caseList.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                      </select>
+                      <select
+                        className="input text-xs py-0.5 px-1.5 max-w-[180px]"
+                        value={yaraTest.jobId}
+                        onChange={e => setYaraTest(p => ({ ...p, jobId: e.target.value }))}
+                        disabled={!yaraTest.sources.length}
+                      >
+                        <option value="">Pick a file…</option>
+                        {yaraTest.sources.map(s => (
+                          <option key={s.job_id} value={s.job_id}>{s.original_filename}</option>
+                        ))}
+                      </select>
+                      <button
+                        className="btn-primary text-xs py-0.5 px-2"
+                        onClick={runYaraTest}
+                        disabled={yaraTest.loading || !yaraTest.caseId || !yaraTest.jobId}
+                      >
+                        {yaraTest.loading ? <RefreshCw size={11} className="animate-spin" /> : <Zap size={11} />}
+                        Scan
+                      </button>
+                    </div>
+                  </div>
+                  {yaraTest.error && (
+                    <p className="px-4 py-2 text-xs text-red-600 font-mono">{yaraTest.error}</p>
+                  )}
+                  {yaraTest.results !== null && !yaraTest.error && (
+                    yaraTest.results.length === 0
+                      ? <p className="px-4 py-2 text-xs text-gray-500 italic">No YARA matches.</p>
+                      : <div className="px-4 py-2 space-y-2">
+                          {yaraTest.results.map((m, i) => (
+                            <div key={i} className="text-xs bg-white border border-green-200 rounded px-3 py-2">
+                              <p className="font-semibold text-green-700">{m.rule}</p>
+                              {m.tags?.length > 0 && (
+                                <p className="text-gray-500 text-[10px]">Tags: {m.tags.join(', ')}</p>
+                              )}
+                              {m.strings?.length > 0 && (
+                                <p className="text-gray-500 text-[10px] font-mono">
+                                  {m.strings.map(s => `${s.identifier}@${s.offset}`).join('  ')}
+                                </p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── Log panel ─────────────────────────────────────────────── */}
+              {logPanel.show && logPanel.runId && (
+                <div className="border-t border-gray-700 bg-gray-950 flex-shrink-0 max-h-48 flex flex-col">
+                  <div className="flex items-center gap-2 px-4 py-1.5 border-b border-gray-800 flex-shrink-0">
+                    <Terminal size={12} className="text-gray-400" />
+                    <span className="text-[10px] font-mono text-gray-400">
+                      run:{logPanel.runId.slice(0, 8)}
+                    </span>
+                    {!logPanel.done && (
+                      <span className="text-[10px] text-green-400 flex items-center gap-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse inline-block" />
+                        live
+                      </span>
+                    )}
+                    {logPanel.done && <span className="text-[10px] text-gray-500">done</span>}
+                    <button className="ml-auto icon-btn" onClick={() => setLogPanel(p => ({ ...p, show: false }))}>
+                      <X size={10} className="text-gray-500" />
+                    </button>
+                  </div>
+                  <div className="flex-1 overflow-y-auto px-4 py-2 space-y-0.5">
+                    {logPanel.lines.map((line, i) => (
+                      <p key={i} className="text-[10px] font-mono text-gray-300 leading-relaxed">{line}</p>
+                    ))}
+                    {!logPanel.done && (
+                      <p className="text-[10px] font-mono text-gray-500 animate-pulse">…</p>
+                    )}
+                  </div>
+                </div>
               )}
             </div>
           </>
@@ -1387,6 +1708,81 @@ export default function Studio() {
           validation={activeTab.validation}
           onClose={() => setShowValidateModal(false)}
         />
+      )}
+
+      {/* ── Module Run modal ──────────────────────────────────────────────── */}
+      {modRun.show && activeTab?.type === 'module' && (
+        <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setModRun(p => ({ ...p, show: false }))}>
+          <div className="modal-box max-w-lg">
+            <div className="modal-header">
+              <div className="flex items-center gap-2">
+                <Play size={14} className="text-purple-500" />
+                <span className="text-sm font-semibold">Run module: {activeTab.label || activeTab.name}</span>
+              </div>
+              <button className="icon-btn" onClick={() => setModRun(p => ({ ...p, show: false }))}><X size={14} /></button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1.5">Case</label>
+                <select
+                  className="input w-full"
+                  value={modRun.caseId}
+                  onChange={e => setModRun(p => ({ ...p, caseId: e.target.value, sources: [], selectedJobs: [] }))}
+                >
+                  <option value="">Select a case…</option>
+                  {caseList.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+
+              {modRun.sources.length > 0 && (
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1.5">
+                    Source files <span className="text-gray-400">({modRun.selectedJobs.length} selected)</span>
+                  </label>
+                  <div className="border border-gray-200 rounded-lg max-h-48 overflow-y-auto">
+                    {modRun.sources.map(s => (
+                      <label
+                        key={s.job_id}
+                        className="flex items-center gap-2.5 px-3 py-2 hover:bg-gray-50 cursor-pointer border-b border-gray-100 last:border-0"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={modRun.selectedJobs.includes(s.job_id)}
+                          onChange={e => setModRun(p => ({
+                            ...p,
+                            selectedJobs: e.target.checked
+                              ? [...p.selectedJobs, s.job_id]
+                              : p.selectedJobs.filter(id => id !== s.job_id),
+                          }))}
+                        />
+                        <span className="text-xs font-mono text-gray-700 truncate flex-1">{s.original_filename}</span>
+                        {s.plugin_used && (
+                          <span className="text-[10px] text-gray-400">{s.plugin_used}</span>
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {modRun.caseId && modRun.sources.length === 0 && (
+                <p className="text-xs text-gray-400 italic">Loading sources…</p>
+              )}
+
+              <div className="flex justify-end gap-2">
+                <button className="btn-ghost text-sm" onClick={() => setModRun(p => ({ ...p, show: false }))}>Cancel</button>
+                <button
+                  className="btn-primary text-sm"
+                  disabled={modRun.running || !modRun.caseId || !modRun.selectedJobs.length}
+                  onClick={runModuleFromStudio}
+                >
+                  {modRun.running ? <RefreshCw size={12} className="animate-spin" /> : <Play size={12} />}
+                  {modRun.running ? 'Dispatching…' : 'Run'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

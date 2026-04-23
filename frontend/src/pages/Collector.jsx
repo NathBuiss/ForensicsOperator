@@ -1,51 +1,132 @@
 /**
- * Collector page — standalone artifact collector generator.
+ * Collector page — artifact collection script wizard.
  *
- * Provides the same 3-step wizard as CollectorModal but as a full page,
- * accessible from the sidebar nav without being inside a specific case.
- * Optionally linked to a case via a case-selector dropdown.
+ * Generates a pre-configured Python script for live systems,
+ * mounted directories (--path), or external drives (--disk).
+ * Server-side harvest is available inside the ingestion panel of each case.
  */
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import {
   Monitor, Terminal, FileCode, Download, Check,
-  ChevronRight, ChevronLeft, Wifi, RefreshCw,
-  PackageOpen, AlertTriangle, Globe, Loader2, Trash2,
-  Info, Copy, ExternalLink,
+  ChevronRight, ChevronLeft,
+  PackageOpen, AlertTriangle, Upload,
 } from 'lucide-react'
 import { api } from '../api/client'
 
-// ── Artifact definitions ──────────────────────────────────────────────────────
+function _currentUser() {
+  try { return JSON.parse(localStorage.getItem('fo_user')) } catch { return null }
+}
+
+// ── Artifact definitions (script mode) ───────────────────────────────────────
 
 const WINDOWS_ARTIFACTS = [
-  { key: 'evtx',     label: 'Event Logs (EVTX)',          desc: 'Security, System, Application, PowerShell, Sysmon and more' },
-  { key: 'registry', label: 'Registry Hives',              desc: 'SYSTEM, SOFTWARE, SAM, SECURITY, NTUSER.DAT, UsrClass.dat' },
-  { key: 'prefetch', label: 'Prefetch Files',               desc: 'Program execution evidence (up to 500 .pf files)' },
-  { key: 'lnk',      label: 'LNK / Recent Items',          desc: 'Shell link files from all user Recent folders' },
-  { key: 'browser',  label: 'Browser Artifacts',           desc: 'Chrome, Edge, Firefox — history, cookies, login data' },
-  { key: 'tasks',    label: 'Scheduled Tasks',             desc: 'Windows Task Scheduler XML from System32\\Tasks' },
-  { key: 'triage',   label: 'Live System Triage',          desc: 'systeminfo, netstat, tasklist, services, installed software' },
-  { key: 'memory',   label: 'Memory Dump',                 desc: 'Physical memory acquisition via WinPmem — 4–64 GB, requires winpmem_mini_x64_rc2.exe beside the script', warn: true },
+  // ── Core ────────────────────────────────────────────────────────────────────
+  { key: 'evtx',              label: 'Event Logs (EVTX)',               desc: 'Security, System, Application, PowerShell, Sysmon and more' },
+  { key: 'registry',          label: 'Registry Hives',                  desc: 'SYSTEM, SOFTWARE, SAM, SECURITY, NTUSER.DAT, UsrClass.dat' },
+  { key: 'prefetch',          label: 'Prefetch Files',                  desc: 'Program execution evidence (up to 500 .pf files)' },
+  { key: 'mft',               label: 'Master File Table ($MFT)',        desc: 'Raw NTFS MFT — requires Administrator or dead-box access' },
+  { key: 'execution',         label: 'Execution Evidence',              desc: 'SRUM database, Amcache.hve, Prefetch — comprehensive execution history' },
+  { key: 'persistence',       label: 'Persistence (Tasks + WMI)',       desc: 'Scheduled Tasks XML from System32/SysWOW64, WMI repository (OBJECTS.DATA)' },
+  { key: 'filesystem',        label: 'NTFS Metadata',                   desc: '$MFT, $LogFile, $Boot — full NTFS journal and boot sector' },
+  // ── Network & USB ────────────────────────────────────────────────────────────
+  { key: 'network_cfg',       label: 'Network Config',                  desc: 'Hosts file, WLAN profiles (.xml), Windows Firewall logs (pfirewall.log)' },
+  { key: 'usb_devices',       label: 'USB Device History',              desc: 'setupapi.dev.log / setupapi.setup.log — device plug-in timeline' },
+  // ── Credentials & Security ───────────────────────────────────────────────────
+  { key: 'credentials',       label: 'Credentials (DPAPI)',             desc: 'SAM, SECURITY hives, Credential Manager stores, DPAPI Protect folders' },
+  { key: 'antivirus',         label: 'Windows Defender',                desc: 'Quarantine, support logs — detection history and threat actions' },
+  { key: 'wer_crashes',       label: 'WER Crash Dumps',                 desc: 'Windows Error Reporting crash dumps and report archives' },
+  { key: 'win_logs',          label: 'Windows Logs',                    desc: 'CBS.log, DISM, WindowsUpdate.log, Panther setup logs' },
+  { key: 'boot_uefi',         label: 'Boot Config (BCD / EFI)',         desc: 'BCD store, bootstat.dat — boot persistence indicators' },
+  { key: 'encryption',        label: 'Encryption Metadata',             desc: 'BitLocker FVE recovery info, EFS metadata' },
+  { key: 'etw_diagnostics',   label: 'ETW Diagnostic Traces',           desc: 'Windows/System32/LogFiles/WMI — .etl trace files' },
+  // ── Browsers ─────────────────────────────────────────────────────────────────
+  { key: 'browser',           label: 'All Browsers',                    desc: 'Chrome, Edge, Firefox, Brave, Opera, Vivaldi — history, cookies, logins' },
+  { key: 'browser_chrome',    label: 'Chrome',                          desc: 'History, Cookies, Login Data, Bookmarks, Web Data for all users' },
+  { key: 'browser_edge',      label: 'Microsoft Edge',                  desc: 'History, Cookies, Login Data, Web Data for all users' },
+  { key: 'browser_ie',        label: 'Internet Explorer',               desc: 'WebCacheV01.dat / WebCacheV24.dat — legacy IE cache database' },
+  // ── Email ────────────────────────────────────────────────────────────────────
+  { key: 'email_outlook',     label: 'Outlook Email',                   desc: '.pst / .ost mailbox databases from Documents/Outlook Files and AppData', warn: true },
+  { key: 'email_thunderbird', label: 'Thunderbird Email',               desc: 'Thunderbird profile SQLite databases and .msf index files' },
+  // ── Messaging ────────────────────────────────────────────────────────────────
+  { key: 'teams',             label: 'Microsoft Teams',                 desc: 'Teams logs.txt, IndexedDB, Local Storage — chat history traces' },
+  { key: 'slack',             label: 'Slack',                           desc: 'Slack AppData/Roaming/Slack/logs — workspace activity logs' },
+  { key: 'discord',           label: 'Discord',                         desc: 'Discord Local Storage — message and user data artifacts' },
+  { key: 'signal',            label: 'Signal Desktop',                  desc: 'Signal databases/db.sqlite — encrypted message store' },
+  { key: 'whatsapp',          label: 'WhatsApp Desktop',                desc: 'WhatsApp Desktop UWP package databases' },
+  { key: 'telegram',          label: 'Telegram Desktop',                desc: 'Telegram tdata folder — session and message cache' },
+  // ── Cloud ─────────────────────────────────────────────────────────────────────
+  { key: 'cloud_onedrive',    label: 'OneDrive',                        desc: 'OneDrive sync databases and activity logs' },
+  { key: 'cloud_google_drive',label: 'Google Drive',                    desc: 'Google DriveFS sync databases' },
+  { key: 'cloud_dropbox',     label: 'Dropbox',                         desc: 'Dropbox sync metadata and activity JSON' },
+  // ── Remote access ────────────────────────────────────────────────────────────
+  { key: 'remote_access',     label: 'Remote Access Tools',             desc: 'AnyDesk traces/config, TeamViewer logs — lateral movement indicators' },
+  { key: 'rdp',               label: 'RDP / Terminal Services',         desc: 'Terminal Server Client cache — bitmap tiles from past RDP sessions' },
+  { key: 'ssh_ftp',           label: 'SSH / FTP Clients',               desc: 'known_hosts, PuTTY sessions, WinSCP.ini — remote connection history' },
+  // ── Applications & user data ─────────────────────────────────────────────────
+  { key: 'lnk',               label: 'LNK / Recent Items',              desc: 'Shell link files from all user Recent folders' },
+  { key: 'tasks',             label: 'Scheduled Tasks (legacy key)',     desc: 'Alias for persistence — kept for backwards compatibility' },
+  { key: 'office',            label: 'Office MRU',                      desc: 'Office Recent Documents list and trusted document registry' },
+  { key: 'dev_tools',         label: 'Dev Tools',                       desc: '.gitconfig, .git-credentials, PowerShell history, .aws/credentials, .azure tokens' },
+  { key: 'password_managers', label: 'Password Managers',               desc: 'KeePass .kdbx databases found in user directories' },
+  { key: 'database_clients',  label: 'Database Clients',                desc: 'SSMS connection configs, DBeaver workspace files' },
+  { key: 'gaming',            label: 'Gaming Platforms',                desc: 'Steam .vdf files, Epic Games Launcher logs' },
+  { key: 'windows_apps',      label: 'Windows Apps (UWP)',              desc: 'Sticky Notes, Cortana — UWP package SQLite stores' },
+  { key: 'wsl',               label: 'WSL',                             desc: 'Ubuntu/Debian WSL rootfs /etc — passwd, shadow, bashrc' },
+  // ── Infrastructure ───────────────────────────────────────────────────────────
+  { key: 'vpn',               label: 'VPN Config',                      desc: 'OpenVPN .ovpn profiles, WireGuard .conf files from ProgramData' },
+  { key: 'iis_web',           label: 'IIS Web Server',                  desc: 'inetpub/logs .log files, applicationHost.config — web server forensics' },
+  { key: 'active_directory',  label: 'Active Directory',                desc: 'Windows/NTDS/ntds.dit + edb.log — full AD database', warn: true },
+  { key: 'virtualization',    label: 'Virtualization',                  desc: 'Hyper-V .vhd / .vhdx inventory from ProgramData' },
+  { key: 'recovery',          label: 'Recovery / VSS',                  desc: 'System Volume Information — VSS snapshot metadata' },
+  { key: 'printing',          label: 'Print Spool',                     desc: 'Windows/System32/spool/PRINTERS — spooled print jobs' },
+  // ── Live-only ────────────────────────────────────────────────────────────────
+  { key: 'triage',            label: 'Live System Triage',              desc: 'systeminfo, netstat, tasklist, services, installed software — live OS only' },
+  // ── Heavy / opt-in ───────────────────────────────────────────────────────────
+  { key: 'pe',                label: 'PE / Executable Binaries',        desc: 'EXE/DLL/PS1 from Temp, Downloads, AppData — feeds PE Analysis, YARA, strings', warn: true },
+  { key: 'documents',         label: 'Office Documents & PDFs',         desc: 'DOCX, XLSX, PPTX, PDF from Documents/Downloads/Desktop — feeds OLE analysis', warn: true },
+  { key: 'memory',            label: 'Live Memory Dump',                desc: 'Physical memory via WinPmem — 4–64 GB, requires winpmem_mini_x64_rc2.exe beside the script', warn: true },
+  { key: 'memory_artifacts',  label: 'Memory Artifacts (dead-box)',     desc: 'pagefile.sys, hiberfil.sys, swapfile.sys — from mounted/external volume', warn: true },
 ]
 
 const LINUX_ARTIFACTS = [
-  { key: 'logs',    label: 'System Logs',                   desc: '/var/log — auth.log, syslog, audit, journalctl export' },
-  { key: 'history', label: 'Shell Histories',               desc: '.bash_history, .zsh_history for root and all users' },
-  { key: 'config',  label: 'System Configuration',          desc: '/etc/passwd, sudoers, hosts, ssh/sshd_config and more' },
-  { key: 'cron',    label: 'Cron Jobs',                     desc: 'cron.d, cron.daily, crontabs, systemd timers' },
-  { key: 'ssh',     label: 'SSH Artifacts',                 desc: 'known_hosts, authorized_keys, config (no private keys)' },
-  { key: 'network', label: 'Network Captures',              desc: 'PCAP/tcpdump snapshots (5 min, 500 MB cap)' },
-  { key: 'triage',  label: 'Live System Triage',            desc: 'ps, ss, ip, last, lsmod, services, installed packages' },
-  { key: 'memory',  label: 'Memory Dump',                   desc: 'Physical memory via avml or /dev/fmem — 4–64 GB, requires root + avml in PATH', warn: true },
+  { key: 'logs',      label: 'System Logs',          desc: '/var/log — auth.log, syslog, kern.log, audit, journalctl export' },
+  { key: 'history',   label: 'Shell Histories',      desc: '.bash_history, .zsh_history for root and all users' },
+  { key: 'config',    label: 'System Configuration', desc: '/etc/passwd, shadow, sudoers, hosts, ssh/sshd_config' },
+  { key: 'cron',      label: 'Cron Jobs',            desc: 'cron.d, cron.daily, crontabs, systemd timers' },
+  { key: 'ssh',       label: 'SSH Artifacts',        desc: 'known_hosts, authorized_keys, config (no private keys)' },
+  { key: 'services',  label: 'System Services',      desc: 'Systemd units (/lib/systemd/system/, /etc/systemd/system/) and init.d scripts' },
+  { key: 'network',   label: 'Network Captures',     desc: 'PCAP/PCAPNG from /var/log, /tmp — live tcpdump if none found' },
+  { key: 'suricata',  label: 'Suricata IDS Logs',    desc: 'EVE JSON alerts from /var/log/suricata' },
+  { key: 'edr',       label: 'EDR / AV Logs',        desc: 'auditd, Falco, osquery, CrowdStrike Falcon, SentinelOne, Wazuh alerts' },
+  { key: 'triage',    label: 'Live System Triage',   desc: 'ps, ss, ip, last, lsmod, installed packages' },
+  { key: 'pe',        label: 'ELF / Binaries',       desc: 'Suspicious binaries from /tmp, /var/tmp, ~/Downloads — feeds PE Analysis, YARA', warn: true },
+  { key: 'documents', label: 'Office Documents & PDFs', desc: 'DOCX, XLSX, PPTX, PDF from home directories — feeds OLE analysis', warn: true },
+  { key: 'memory',    label: 'Memory Dump',          desc: 'Physical memory via avml or /dev/fmem — 4–64 GB, requires root + avml in PATH', warn: true },
 ]
 
-// Domain Controller adds AD-specific artifacts on top of Windows
+const MACOS_ARTIFACTS = [
+  { key: 'logs',      label: 'System Logs',          desc: '/var/log, ASL, Unified Logging export, system.log' },
+  { key: 'history',   label: 'Shell Histories',      desc: '.bash_history, .zsh_history, fish_history for root and all users' },
+  { key: 'config',    label: 'System Configuration', desc: '/etc/hosts, sudoers, ssh/sshd_config, /etc/passwd' },
+  { key: 'cron',      label: 'Cron / launchd',       desc: 'User crontabs, /etc/cron.d, launchd timer plists' },
+  { key: 'ssh',       label: 'SSH Artifacts',        desc: 'known_hosts, authorized_keys, config (no private keys)' },
+  { key: 'plist',     label: 'Preference Plists',    desc: '/Library/Preferences, ~/Library/Preferences — app prefs and hidden settings' },
+  { key: 'services',  label: 'LaunchAgents/Daemons', desc: '/Library/LaunchAgents, /Library/LaunchDaemons, ~/Library/LaunchAgents — persistence' },
+  { key: 'network',   label: 'Network Captures',     desc: 'PCAP/PCAPNG from /var/log, /tmp — live tcpdump if none found' },
+  { key: 'browser',   label: 'Browsers',             desc: 'Safari History.db, Cookies, Bookmarks.plist; Chrome/Firefox if installed' },
+  { key: 'edr',       label: 'EDR / AV Logs',        desc: 'CrowdStrike Falcon for Mac, Carbon Black, Jamf, Kandji, osquery' },
+  { key: 'triage',    label: 'Live System Triage',   desc: 'ps, netstat, launchctl list, system_profiler, sw_vers' },
+  { key: 'pe',        label: 'Mach-O Binaries',      desc: 'Suspicious binaries from /tmp, ~/Downloads — feeds YARA, strings', warn: true },
+  { key: 'documents', label: 'Office Documents & PDFs', desc: 'DOCX, XLSX, PPTX, PDF from home directories', warn: true },
+  { key: 'memory',    label: 'Memory Dump',          desc: 'Physical memory via osxpmem — requires root + osxpmem in PATH', warn: true },
+]
+
 const DC_EXTRA_ARTIFACTS = [
   { key: 'evtx',    label: 'Event Logs (EVTX)',             desc: 'Security, ADDS replication, Kerberos, NTDS audit events' },
   { key: 'registry',label: 'Registry Hives',               desc: 'SYSTEM, SOFTWARE, SAM, SECURITY, Group Policy state' },
   { key: 'triage',  label: 'Live AD Triage',               desc: 'nltest, netdom, Get-ADUser/Group/GPO snapshots, trust enumeration' },
 ]
 
-// Proxy / Firewall artifact sets (Linux-based)
 const PROXY_ARTIFACTS = [
   { key: 'logs',    label: 'Proxy / Access Logs',           desc: '/var/log/squid, /var/log/nginx, /var/log/haproxy, /var/log/apache2' },
   { key: 'config',  label: 'Proxy / Firewall Config',      desc: '/etc/squid, /etc/nginx, /etc/haproxy, /etc/iptables, nftables rules' },
@@ -54,13 +135,14 @@ const PROXY_ARTIFACTS = [
   { key: 'ssh',     label: 'SSH Artifacts',                desc: 'known_hosts, authorized_keys, sshd_config' },
 ]
 
-// DNS Nameserver artifacts
 const NS_ARTIFACTS = [
   { key: 'logs',    label: 'DNS Query Logs',               desc: '/var/log/named, /var/log/bind, /var/log/unbound, journalctl' },
   { key: 'config',  label: 'DNS Configuration',            desc: '/etc/named.conf, /etc/bind, zone files, resolv.conf' },
   { key: 'triage',  label: 'Live System Triage',           desc: 'Running processes, open ports, installed packages' },
   { key: 'ssh',     label: 'SSH Artifacts',                desc: 'known_hosts, authorized_keys, sshd_config' },
 ]
+
+// ── Platform definitions ──────────────────────────────────────────────────────
 
 const PLATFORMS = [
   {
@@ -73,13 +155,13 @@ const PLATFORMS = [
     border: 'border-blue-200',
     selectedBorder: 'border-blue-500',
     selectedBg: 'bg-blue-50',
-    desc: 'Workstation or server — run as Administrator',
+    desc: 'Live system, mounted directory (--path), or external disk (--disk)',
     tip: 'Requires Python 3.8+ on target. Build a zero-dependency EXE with build.bat.',
     artifacts: WINDOWS_ARTIFACTS,
   },
   {
     id: 'linux',
-    label: 'Linux / macOS',
+    label: 'Linux',
     group: 'Endpoint',
     Icon: Terminal,
     color: 'text-emerald-600',
@@ -90,6 +172,20 @@ const PLATFORMS = [
     desc: 'Workstation or server — run as root',
     tip: 'Requires Python 3.8+ on target. Build a zero-dependency binary with ./build.sh.',
     artifacts: LINUX_ARTIFACTS,
+  },
+  {
+    id: 'macos',
+    label: 'macOS',
+    group: 'Endpoint',
+    Icon: Terminal,
+    color: 'text-sky-600',
+    bg: 'bg-sky-50',
+    border: 'border-sky-200',
+    selectedBorder: 'border-sky-500',
+    selectedBg: 'bg-sky-50',
+    desc: 'Workstation or laptop — run as root or with sudo',
+    tip: 'Requires Python 3.8+ on target. SIP must allow /var/log access for full coverage.',
+    artifacts: MACOS_ARTIFACTS,
   },
   {
     id: 'win',
@@ -148,47 +244,65 @@ const PLATFORMS = [
     selectedBg: 'bg-violet-50',
     desc: 'Auto-detects OS at runtime — Windows + Linux + macOS',
     tip: 'Best when the target already has Python 3.8+. Manually select artifacts below.',
-    artifacts: [...WINDOWS_ARTIFACTS, ...LINUX_ARTIFACTS].filter(
+    artifacts: [...WINDOWS_ARTIFACTS, ...LINUX_ARTIFACTS, ...MACOS_ARTIFACTS].filter(
       (a, i, arr) => arr.findIndex(b => b.key === a.key) === i
     ),
   },
 ]
 
-// Group platforms by role for Step 1 UI
 const PLATFORM_GROUPS = ['Endpoint', 'Network', 'Other']
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function Collector() {
-  const [step, setStep]               = useState(1)
-  const [platIdx, setPlatIdx]         = useState(null)   // index into PLATFORMS array
-  const [selected, setSelected]       = useState(new Set())
-  const [caseId, setCaseId]           = useState('')
-  const [apiUrl, setApiUrl]           = useState('')
-  const [cases, setCases]             = useState([])
-  const [netIps, setNetIps]           = useState([])
-  const [inK8s, setInK8s]             = useState(false)
-  const [netLoading, setNetLoading]   = useState(false)
-  const [ipHint, setIpHint]           = useState(null)
-  const [ingress, setIngress]         = useState(null)
-  const [ingressBusy, setIngressBusy] = useState(false)
+  const [step, setStep]           = useState(1)
+  const [platIdx, setPlatIdx]     = useState(null)
+  const [selected, setSelected]   = useState(new Set())
+  const [caseName, setCaseName]   = useState('')
   const [downloading, setDownloading] = useState(false)
   const [downloaded, setDownloaded]   = useState(false)
+
+  // Case list for context selector
+  const [cases, setCases]                   = useState([])
+  const [selectedCaseId, setSelectedCaseId] = useState('')
+
+  // S3 uploader — shown in quick-tools bar when S3 triage is configured AND user is admin
+  const [s3TriageConfigured,      setS3TriageConfigured]      = useState(false)
+  const [downloadingUploader,     setDownloadingUploader]     = useState(false)
+  const [downloadedUploader,      setDownloadedUploader]      = useState(false)
+  const isAdmin = _currentUser()?.role === 'admin'
+
+  useEffect(() => {
+    api.cases.list()
+      .then(r => setCases(r.cases || []))
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    if (!isAdmin) return
+    api.s3Triage.getConfig()
+      .then(cfg => setS3TriageConfigured(!!(cfg?.endpoint)))
+      .catch(() => {})
+  }, [isAdmin])
+
+  // Auto-fill case name when a case is selected from the dropdown
+  useEffect(() => {
+    if (!selectedCaseId) return
+    const c = cases.find(c => c.case_id === selectedCaseId)
+    if (c) setCaseName(c.name)
+  }, [selectedCaseId, cases])
 
   const platformDef = platIdx !== null ? PLATFORMS[platIdx] : null
   const artifacts   = platformDef?.artifacts || []
 
-  useEffect(() => {
-    api.cases.list().then(r => setCases(r.cases || [])).catch(() => {})
-  }, [])
-
-  // Pre-select artifacts when platform chosen; respect defaultCollect if defined
+  // Pre-select artifacts when platform chosen; warn=true items default OFF
   useEffect(() => {
     if (!platformDef) return
     const defaults = platformDef.defaultCollect
       ? new Set(platformDef.defaultCollect)
-      : new Set(platformDef.artifacts.map(a => a.key))
+      : new Set(platformDef.artifacts.filter(a => !a.warn).map(a => a.key))
     setSelected(defaults)
+    setStep(1)
   }, [platIdx])
 
   function toggleArtifact(key) {
@@ -207,111 +321,102 @@ export default function Collector() {
     )
   }
 
-  function detectIps() {
-    setNetLoading(true)
-    api.collector.networkInterfaces()
-      .then(r => {
-        const candidates = r.candidates || []
-        setNetIps(candidates)
-        setInK8s(r.in_kubernetes || false)
-        setIpHint(r.public_url_hint || null)
-        // Auto-fill best candidate
-        const lbEntry = candidates.find(c => c.k8s && c.label?.includes('LoadBalancer'))
-        const lanEntry = candidates.find(c => c.label === 'LAN' || c.label === 'host machine (Docker Desktop)')
-        const best     = lbEntry || lanEntry
-        if (best && !apiUrl) setApiUrl(best.url)
-      })
-      .catch(() => {})
-      .finally(() => setNetLoading(false))
-  }
-
-  async function createIngress() {
-    setIngressBusy(true)
-    try {
-      const r = await api.collector.createIngress()
-      setIngress(r)
-      if (r.external_url) setApiUrl(r.external_url)
-    } catch (e) {
-      setIngress({ status: 'error', error: e.message })
-    } finally {
-      setIngressBusy(false)
-    }
-  }
-
-  async function pollIngress() {
-    setIngressBusy(true)
-    try {
-      const r = await api.collector.getIngress()
-      setIngress(r)
-      if (r.external_url) setApiUrl(r.external_url)
-    } catch {
-      /* ignore */
-    } finally {
-      setIngressBusy(false)
-    }
-  }
-
-  async function removeIngress() {
-    setIngressBusy(true)
-    try {
-      await api.collector.deleteIngress()
-      setIngress(null)
-    } catch {
-      /* ignore */
-    } finally {
-      setIngressBusy(false)
-    }
-  }
-
-  function handleCaseSelect(id) {
-    setCaseId(id)
-    // Auto-detect IPs whenever case selection changes (or even when cleared)
-    if (!apiUrl) detectIps()
-  }
-
   function handleDownload() {
     setDownloading(true)
     setDownloaded(false)
-    // Embed apiUrl whenever it is filled in, regardless of whether a case is selected.
-    // Without caseId the script still runs and saves a local ZIP; with both it auto-uploads.
-    const url = api.collector.downloadUrl({
-      platform: platformDef?.id,
-      caseId:  caseId   || undefined,
-      apiUrl:  apiUrl   || undefined,
-      collect: selected.size > 0 ? [...selected] : undefined,
+    const url = api.collector.packageUrl({
+      categories: [...selected],
+      caseName:   caseName.trim() || undefined,
     })
     const a = document.createElement('a')
     a.href = url
-    a.download = 'fo-collector.py'
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
     setTimeout(() => { setDownloading(false); setDownloaded(true) }, 1200)
   }
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  function handleDownloadUploader() {
+    setDownloadingUploader(true)
+    setDownloadedUploader(false)
+    const a = document.createElement('a')
+    a.href = api.collector.uploaderUrl()
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => { setDownloadingUploader(false); setDownloadedUploader(true) }, 1200)
+  }
 
+  const stepLabels = ['Platform', 'Artifacts', 'Download']
+
+  // ── render ────────────────────────────────────────────────────────────────
   return (
     <div className="h-full overflow-y-auto bg-gray-50">
       <div className="max-w-3xl mx-auto px-6 py-8">
 
         {/* Page header */}
-        <div className="flex items-center gap-3 mb-6">
+        <div className="flex items-start gap-3 mb-4">
           <div className="w-10 h-10 rounded-xl bg-brand-accentlight border border-brand-accent/20
-                          flex items-center justify-center">
+                          flex items-center justify-center flex-shrink-0">
             <PackageOpen size={18} className="text-brand-accent" />
           </div>
-          <div>
+          <div className="flex-1 min-w-0">
             <h1 className="text-lg font-bold text-brand-text">Artifact Collector</h1>
             <p className="text-xs text-gray-500">
-              Generate a pre-configured script to collect forensic artifacts from any live system
+              Generate a pre-configured collection script for live systems, mounted directories, or external drives
             </p>
           </div>
+          {/* Case context selector */}
+          {cases.length > 0 && (
+            <div className="flex-shrink-0">
+              <label className="block text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1">
+                Case context
+              </label>
+              <select
+                value={selectedCaseId}
+                onChange={e => setSelectedCaseId(e.target.value)}
+                className="text-sm border border-gray-200 rounded-lg px-2 py-1.5 bg-white text-brand-text
+                           focus:outline-none focus:ring-2 focus:ring-brand-accent/30 focus:border-brand-accent
+                           max-w-[220px] truncate"
+              >
+                <option value="">— no case —</option>
+                {cases.map(c => (
+                  <option key={c.case_id} value={c.case_id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
+
+        {/* Quick tools — S3 uploader (admin + S3 configured), always visible */}
+        {isAdmin && s3TriageConfigured && (
+          <div className="mb-5 flex items-center gap-3 p-3 bg-white border border-gray-200 rounded-xl shadow-sm">
+            <Upload size={15} className="text-brand-accent flex-shrink-0" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-brand-text leading-tight">fo-uploader.zip</p>
+              <p className="text-xs text-gray-500 truncate">
+                S3 evidence uploader — pre-configured with your triage credentials.{' '}
+                <span className="text-amber-600">Contains S3 secret key — do not share.</span>
+              </p>
+            </div>
+            <button
+              onClick={handleDownloadUploader}
+              disabled={downloadingUploader}
+              className={`btn-outline flex-shrink-0 text-xs py-1.5 ${downloadedUploader ? '!border-green-500 !text-green-700' : ''}`}
+            >
+              {downloadingUploader
+                ? 'Preparing…'
+                : downloadedUploader
+                ? <><Check size={12} /> Downloaded</>
+                : <><Download size={12} /> Download</>
+              }
+            </button>
+          </div>
+        )}
 
         {/* Step indicator */}
         <div className="flex items-center gap-0 mb-6 bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
-          {['Platform', 'Artifacts', 'Configure & Download'].map((label, i) => {
+          {stepLabels.map((label, i) => {
             const num    = i + 1
             const active = step === num
             const done   = step > num
@@ -342,7 +447,7 @@ export default function Collector() {
           })}
         </div>
 
-        {/* ── Step 1: Platform ─────────────────────────────────────────────── */}
+        {/* ── Step 1: Platform ─────────────────────────────────────────── */}
         {step === 1 && (
           <div className="space-y-5">
             {PLATFORM_GROUPS.map(group => {
@@ -357,7 +462,7 @@ export default function Collector() {
                       return (
                         <button
                           key={_idx}
-                          onClick={() => setPlatIdx(_idx)}
+                          onClick={() => { setPlatIdx(_idx); setStep(1) }}
                           className={`card flex flex-col items-start gap-2.5 p-4 text-left cursor-pointer
                                       border-2 transition-all hover:shadow-md ${
                             active ? `${selectedBorder} ${selectedBg}` : `border-transparent`
@@ -384,7 +489,7 @@ export default function Collector() {
           </div>
         )}
 
-        {/* ── Step 2: Artifacts ─────────────────────────────────────────────── */}
+        {/* ── Step 2: Artifacts ─────────────────────────────────────── */}
         {step === 2 && platformDef && (
           <div className="card p-5">
             <div className="flex items-center justify-between mb-4">
@@ -435,15 +540,14 @@ export default function Collector() {
                 <AlertTriangle size={13} className="flex-shrink-0 mt-0.5 text-amber-500" />
                 <div>
                   <strong>Memory dumps are 4–64 GB and take 15–60 minutes.</strong>{' '}
-                  Upload will be large — ensure storage is sufficient and upload timeouts are generous.
-                  The script will continue to package and upload other artifacts regardless.
+                  Ensure storage is sufficient and upload timeouts are generous.
                 </div>
               </div>
             )}
           </div>
         )}
 
-        {/* ── Step 3: Configure & Download ─────────────────────────────────── */}
+        {/* ── Step 3: Configure & Download ─────────────────────────── */}
         {step === 3 && (
           <div className="space-y-4">
 
@@ -452,275 +556,91 @@ export default function Collector() {
               <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
                 Configuration summary
               </h3>
-              <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+              <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm mb-4">
                 <SummaryRow label="Platform"  value={platformDef?.label} />
                 <SummaryRow label="Artifacts" value={`${selected.size} types`} />
+                {caseName.trim() && <SummaryRow label="Case name" value={caseName.trim()} mono />}
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">
+                  Case name <span className="text-gray-400 font-normal">(optional — used in output ZIP filename)</span>
+                </label>
+                <input
+                  type="text"
+                  value={caseName}
+                  onChange={e => setCaseName(e.target.value)}
+                  placeholder="e.g. ACME-2024-IR01"
+                  className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2
+                             focus:outline-none focus:ring-2 focus:ring-brand-accent/30 focus:border-brand-accent
+                             placeholder:text-gray-300"
+                />
               </div>
             </div>
 
-            {/* Case selector (optional) */}
+            {/* Download package */}
             <div className="card p-4">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
-                Upload target <span className="text-gray-300 normal-case font-normal">— optional</span>
+              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
+                Download Package
               </h3>
-              <p className="text-xs text-gray-500 mb-3">
-                Link the collector to a case so artifacts upload automatically when it runs.
-                Leave blank to save the ZIP locally and upload manually.
+              <p className="text-xs text-gray-500 mb-4 leading-relaxed">
+                Downloads <code className="text-[10px] bg-gray-100 px-1 py-0.5 rounded">fo-harvester.zip</code> — a self-contained collector
+                with your pre-selected artifact categories baked into <code className="text-[10px] bg-gray-100 px-1 py-0.5 rounded">config.json</code>. Requires{' '}
+                <strong className="text-gray-500">Python 3.8+</strong> on the target — no extra packages needed.
               </p>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {/* Case selector */}
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">
-                    Case
-                  </label>
-                  <select
-                    className="input text-sm"
-                    value={caseId}
-                    onChange={e => handleCaseSelect(e.target.value)}
-                  >
-                    <option value="">— No case (save locally) —</option>
-                    {cases.map(c => (
-                      <option key={c.case_id} value={c.case_id}>{c.name}</option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* API URL */}
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="text-xs font-medium text-gray-600">API URL</label>
-                    <button
-                      className="btn-ghost text-xs py-0.5 gap-1"
-                      onClick={detectIps}
-                    >
-                      {netLoading
-                        ? <RefreshCw size={10} className="animate-spin" />
-                        : <Wifi size={10} />}
-                      Detect
-                    </button>
-                  </div>
-                  <input
-                    type="text"
-                    className="input text-xs font-mono"
-                    value={apiUrl}
-                    onChange={e => setApiUrl(e.target.value)}
-                    placeholder="http://192.168.1.x:8000/api/v1"
-                  />
-                </div>
-              </div>
-
-              {/* FO_PUBLIC_URL hint — shown when only Docker-internal IPs detected */}
-              {ipHint && (
-                <div className="mt-3 flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
-                  <AlertTriangle size={13} className="flex-shrink-0 mt-0.5 text-amber-500" />
-                  <div>
-                    <strong>Only Docker-internal IPs detected.</strong>{' '}
-                    Remote collectors cannot reach the API via these addresses.
-                    Add the following to your <code className="bg-amber-100 px-1 rounded">docker-compose.yml</code>{' '}
-                    under the <code className="bg-amber-100 px-1 rounded">api:</code> environment section,
-                    replacing the IP with your machine's LAN address:
-                    <pre className="mt-1.5 bg-white border border-amber-200 rounded px-2 py-1.5 text-[10px] leading-relaxed overflow-x-auto font-mono">
-{`api:
-  environment:
-    - FO_PUBLIC_URL=http://192.168.x.x:8000`}
-                    </pre>
-                    <p className="mt-1 text-amber-700">
-                      Then enter the URL manually in the field above, or click Detect again after restarting.
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              {/* Detected IP suggestions */}
-              {netIps.length > 0 && (
-                <div className="mt-3">
-                  <p className="text-[11px] text-gray-400 mb-2 flex items-center gap-1">
-                    <Wifi size={10} /> Detected addresses — click to use
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    {netIps.map(c => {
-                      // Visual hint: Docker bridge IPs are likely not reachable from target
-                      const isInternal = c.ip.startsWith('172.') || c.label === 'docker bridge'
-                      return (
-                        <button
-                          key={c.url}
-                          onClick={() => setApiUrl(c.url)}
-                          title={`Interface: ${c.iface}${isInternal ? ' — Docker-internal, may not be reachable externally' : ''}`}
-                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border
-                                      text-xs font-mono transition-all ${
-                            apiUrl === c.url
-                              ? 'border-brand-accent bg-brand-accentlight text-brand-accent'
-                              : isInternal
-                              ? 'border-gray-200 bg-gray-50 text-gray-400 hover:border-amber-300'
-                              : 'border-gray-200 bg-white text-gray-600 hover:border-brand-accent/50'
-                          }`}
-                        >
-                          {c.k8s
-                            ? <Globe size={10} />
-                            : isInternal
-                            ? <AlertTriangle size={10} className="text-amber-400" />
-                            : <Wifi size={10} />}
-                          <span>{c.ip}</span>
-                          {c.label && (
-                            <span className="text-gray-400 font-sans text-[10px]">({c.label})</span>
-                          )}
-                        </button>
-                      )
-                    })}
-                  </div>
-                  <p className="text-[11px] text-gray-400 mt-1.5 flex items-center gap-1">
-                    <Info size={10} />
-                    <span>
-                      IPs marked <AlertTriangle size={9} className="inline text-amber-400" /> are Docker-internal and may not be reachable from the target machine.
-                      Prefer a LAN IP or set <code className="bg-gray-100 px-0.5 rounded">FO_PUBLIC_URL</code> in docker-compose.yml.
-                    </span>
-                  </p>
-                </div>
-              )}
-
-              {/* ── Kubernetes LoadBalancer ingress ──────────────────────── */}
-              {inK8s && (
-                <div className="mt-4 pt-4 border-t border-gray-100">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-1.5">
-                      <Globe size={12} className="text-brand-accent" />
-                      <span className="text-xs font-medium text-gray-600">
-                        Kubernetes LoadBalancer
-                      </span>
-                      {ingress?.status === 'ready' && (
-                        <span className="badge bg-green-100 text-green-700 border border-green-200 text-[10px]">ready</span>
-                      )}
-                      {ingress?.status === 'pending' && (
-                        <span className="badge bg-amber-100 text-amber-700 border border-amber-200 text-[10px]">pending IP…</span>
-                      )}
-                    </div>
-                    <div className="flex gap-1.5">
-                      {ingress ? (
-                        <>
-                          <button className="btn-ghost text-xs py-0.5 gap-1" onClick={pollIngress} disabled={ingressBusy}>
-                            {ingressBusy ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />}
-                            Refresh
-                          </button>
-                          <button className="btn-ghost text-xs py-0.5 gap-1 text-red-500 hover:text-red-600"
-                                  onClick={removeIngress} disabled={ingressBusy}>
-                            <Trash2 size={10} /> Delete
-                          </button>
-                        </>
-                      ) : (
-                        <button className="btn-primary text-xs py-0.5 gap-1" onClick={createIngress} disabled={ingressBusy || !caseId}>
-                          {ingressBusy ? <Loader2 size={10} className="animate-spin" /> : <Globe size={10} />}
-                          Create LoadBalancer
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                  <p className="text-[11px] text-gray-500 mb-2">
-                    Creates a Kubernetes <code className="bg-gray-100 px-1 rounded">LoadBalancer</code> Service
-                    that exposes the API externally. The assigned IP is injected into the collector automatically.
-                    Requires RBAC permission to create Services.
-                  </p>
-                  {ingress?.external_url && (
-                    <div className="flex items-center gap-2 px-3 py-2 bg-green-50 border border-green-200 rounded-lg text-xs">
-                      <Check size={11} className="text-green-600 flex-shrink-0" />
-                      <span className="font-mono text-green-800 flex-1 truncate">{ingress.external_url}</span>
-                      <button className="text-green-600 hover:text-green-800 text-[10px]"
-                              onClick={() => setApiUrl(ingress.external_url)}>
-                        Use
-                      </button>
-                    </div>
-                  )}
-                  {ingress?.status === 'error' && (
-                    <RbacErrorBanner error={ingress.error} />
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Download */}
-            <div className="card p-4">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
-                Download
-              </h3>
-
               <button
-                className={`btn-primary w-full justify-center h-10 gap-2 ${
-                  downloaded ? '!bg-green-600' : ''
-                }`}
+                className={`btn-primary w-full justify-center h-10 gap-2 ${downloaded ? '!bg-green-600' : ''}`}
                 onClick={handleDownload}
                 disabled={selected.size === 0 || downloading}
               >
                 {downloading
-                  ? 'Generating…'
+                  ? 'Preparing…'
                   : downloaded
-                  ? <><Check size={14} /> Downloaded — fo-collector.py</>
-                  : <><Download size={14} /> Download fo-collector.py</>
+                  ? <><Check size={14} /> fo-harvester.zip downloaded</>
+                  : <><Download size={14} /> Download fo-harvester.zip</>
                 }
               </button>
 
               {downloaded && (
-                <div className="mt-3 bg-gray-950 rounded-lg p-3.5 text-[11px] font-mono text-gray-300 leading-relaxed">
-                  <span className="text-gray-500"># Run on the target machine</span>{'\n'}
-                  {platformDef?.id === 'win'
-                    ? 'python fo-collector.py     # as Administrator'
-                    : 'python3 fo-collector.py   # as root'
-                  }
-                  {caseId && apiUrl && (
-                    <>
-                      {'\n\n'}
-                      <span className="text-gray-500"># Artifacts auto-upload to case </span>
-                      <span className="text-brand-accent">{caseId}</span>
-                      {'\n'}
-                      <span className="text-gray-500"># via </span>
-                      <span className="text-emerald-400">{apiUrl}</span>
-                    </>
-                  )}
-                  {!caseId && apiUrl && (
-                    <>
-                      {'\n\n'}
-                      <span className="text-gray-500"># API URL embedded: </span>
-                      <span className="text-emerald-400">{apiUrl}</span>
-                      {'\n'}
-                      <span className="text-amber-400">
-                        ⚠ No case linked — collector will save a local ZIP.{'\n'}
-                        Drag & drop the ZIP into any case via Add Evidence.
-                      </span>
-                    </>
-                  )}
-                  {!caseId && !apiUrl && (
-                    <>
-                      {'\n\n'}
-                      <span className="text-amber-400">
-                        ⚠ No case or API URL — ZIP saved locally.{'\n'}
-                        Upload manually via any case Ingest panel.
-                      </span>
-                    </>
-                  )}
-                  {caseId && !apiUrl && (
-                    <>
-                      {'\n\n'}
-                      <span className="text-amber-400">
-                        ⚠ No API URL set — ZIP will be saved locally.{'\n'}
-                        Upload manually via the case Ingest panel.
-                      </span>
-                    </>
-                  )}
+                <div className="mt-4 bg-gray-950 rounded-lg p-4 text-[11px] font-mono leading-relaxed space-y-2">
+                  <div className="text-gray-500"># Extract fo-harvester.zip then run on the target machine</div>
+                  {platformDef?.id === 'win' ? <>
+                    <div>
+                      <span className="text-gray-500"># Live OS (run as Administrator):</span>{'\n'}
+                      <span className="text-green-400">python fo-harvester.py</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500"># Dead-box — mounted directory:</span>{'\n'}
+                      <span className="text-green-400">{'python fo-harvester.py --path D:\\'}</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500"># BitLocker — key stays local, never in config.json:</span>{'\n'}
+                      <span className="text-green-400">{'python fo-harvester.py --path E:\\ ^'}</span>{'\n'}
+                      <span className="text-green-400">{'  --bitlocker-key 123456-123456-...'}</span>
+                    </div>
+                  </> : <>
+                    <div>
+                      <span className="text-gray-500"># Live OS (run as root):</span>{'\n'}
+                      <span className="text-green-400">python3 fo-harvester.py</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500"># Dead-box — mounted directory:</span>{'\n'}
+                      <span className="text-green-400">python3 fo-harvester.py --path /mnt/windows</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500"># Dead-box — raw device + BitLocker:</span>{'\n'}
+                      <span className="text-green-400">python3 fo-harvester.py --disk /dev/sdb1 \</span>{'\n'}
+                      <span className="text-green-400">{'  --bitlocker-key 123456-123456-...'}</span>
+                    </div>
+                  </>}
+                  <div className="text-gray-500 pt-1"># Output ZIP is created in ./output/ — upload via Case → Ingest</div>
                 </div>
               )}
-
-              {/* PyInstaller note */}
-              <p className="text-[11px] text-gray-400 mt-3 leading-relaxed">
-                The script requires <strong className="text-gray-500">Python 3.8+</strong> on the target.
-                To build a zero-dependency binary (no Python required on target):
-                {' '}<code className="text-[10px] bg-gray-100 px-1 py-0.5 rounded">build.bat</code> (Windows)
-                {' '}or{' '}
-                <code className="text-[10px] bg-gray-100 px-1 py-0.5 rounded">./build.sh</code> (Linux).
-              </p>
             </div>
           </div>
         )}
 
-        {/* ── Navigation ───────────────────────────────────────────────────── */}
+        {/* ── Navigation ────────────────────────────────────────────── */}
         <div className="flex items-center justify-between mt-6">
           <button
             className="btn-outline gap-1"
@@ -740,6 +660,7 @@ export default function Collector() {
           )}
         </div>
 
+
       </div>
     </div>
   )
@@ -754,63 +675,3 @@ function SummaryRow({ label, value, mono }) {
   )
 }
 
-// ── RbacErrorBanner ───────────────────────────────────────────────────────────
-function RbacErrorBanner({ error }) {
-  const [yaml, setYaml]       = useState(null)
-  const [copied, setCopied]   = useState(false)
-  const is403 = error?.includes('403') || error?.toLowerCase().includes('forbidden')
-
-  useEffect(() => {
-    if (!is403) return
-    api.collector.getRbacYaml()
-      .then(text => setYaml(text))
-      .catch(() => {})
-  }, [is403])
-
-  function copyYaml() {
-    if (!yaml) return
-    navigator.clipboard.writeText(yaml).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    })
-  }
-
-  return (
-    <div className="mt-2 space-y-1.5">
-      <p className="text-[11px] text-red-500">{error}</p>
-      {is403 && (
-        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-[11px] text-amber-800 space-y-2">
-          <p className="font-semibold flex items-center gap-1.5">
-            <Info size={11} /> RBAC setup required
-          </p>
-          <p>
-            The pod's service account lacks permission to create Services.
-            Download the manifest and apply it <strong>from any machine with kubectl access</strong> to your cluster:
-          </p>
-          <div className="flex items-center gap-2">
-            <a
-              href={api.collector.rbacUrl()}
-              download="fo-rbac.yaml"
-              className="inline-flex items-center gap-1 px-2 py-1 bg-amber-100 rounded border border-amber-300 text-amber-800 hover:bg-amber-200 font-medium"
-            >
-              <ExternalLink size={10} /> Download fo-rbac.yaml
-            </a>
-            {yaml && (
-              <button
-                onClick={copyYaml}
-                className="inline-flex items-center gap-1 px-2 py-1 bg-amber-100 rounded border border-amber-300 text-amber-800 hover:bg-amber-200"
-              >
-                <Copy size={10} /> {copied ? 'Copied!' : 'Copy YAML'}
-              </button>
-            )}
-          </div>
-          {yaml && (
-            <pre className="bg-gray-900 text-green-300 rounded p-2 text-[10px] font-mono overflow-x-auto max-h-40 leading-relaxed">
-              {`kubectl apply -f fo-rbac.yaml`}
-            </pre>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}

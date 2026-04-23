@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { X, Flag, Tag, Plus, Minus, Save, Search, Shield, AlertTriangle, Brain, Loader2, Clock } from 'lucide-react'
-import { api } from '../../api/client'
+import { X, Flag, Tag, Plus, Minus, Save, Search, Shield, AlertTriangle, Brain, Loader2, Clock, Download, FileText, Check } from 'lucide-react'
+import { api, getToken } from '../../api/client'
 import { extractIocs, iocSearchQuery } from '../../utils/ioc'
 import { getMitre, TACTIC_COLORS } from '../../utils/mitre'
 
@@ -10,8 +10,10 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
   const [note, setNote]               = useState(event.analyst_note || '')
   const [tagInput, setTagInput]       = useState('')
   const [saving, setSaving]           = useState(false)
+  const [noteSaved, setNoteSaved]     = useState(false)
   const [explaining, setExplaining]   = useState(false)
   const [explanation, setExplanation] = useState(null)
+  const [downloading, setDownloading] = useState(false)
   const navigate = useNavigate()
 
   async function explainEvent() {
@@ -38,7 +40,10 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
   async function saveNote() {
     setSaving(true)
     await api.search.noteEvent(caseId, event.fo_id, note)
+    setEvent(p => ({ ...p, analyst_note: note }))
     setSaving(false)
+    setNoteSaved(true)
+    setTimeout(() => setNoteSaved(false), 2000)
   }
 
   async function addTag(e) {
@@ -56,8 +61,52 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
     setEvent(p => ({ ...p, tags }))
   }
 
+  async function downloadFile() {
+    if (!event.ingest_job_id || downloading) return
+    setDownloading(true)
+    try {
+      const archiveMember = event.raw?.archive_member
+      const url = archiveMember
+        ? `/api/v1/cases/${caseId}/files/${event.ingest_job_id}/extract?member=${encodeURIComponent(archiveMember)}`
+        : `/api/v1/cases/${caseId}/files/${event.ingest_job_id}/download`
+      const token = getToken()
+      const res = await fetch(url, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }))
+        throw new Error(err.detail || `HTTP ${res.status}`)
+      }
+      const blob = await res.blob()
+      const blobUrl = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = blobUrl
+      // Use the artifact filename, or the last segment of the archive path, or job id
+      const fallback = archiveMember
+        ? archiveMember.split('/').pop()
+        : event.ingest_job_id
+      a.download = artifactData.filename || fallback
+      a.click()
+      URL.revokeObjectURL(blobUrl)
+    } catch (err) {
+      console.error('File download failed:', err)
+    } finally {
+      setDownloading(false)
+    }
+  }
+
+  function downloadEventJSON() {
+    const blob = new Blob([JSON.stringify(event, null, 2)], { type: 'application/json' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href     = url
+    a.download = `event-${event.fo_id || 'unknown'}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   function pivot(query) {
-    navigate('../search', { state: { pivotQuery: query } })
+    navigate(`/cases/${caseId}`, { state: { pivotQuery: query } })
   }
 
   function pivotTimeWindow(minutes) {
@@ -65,7 +114,7 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
     const center = new Date(event.timestamp)
     const from = new Date(center.getTime() - minutes * 60_000).toISOString()
     const to   = new Date(center.getTime() + minutes * 60_000).toISOString()
-    navigate('../search', { state: { pivotQuery: `timestamp:[${from} TO ${to}]` } })
+    navigate(`/cases/${caseId}`, { state: { pivotQuery: `timestamp:[${from} TO ${to}]` } })
   }
 
   const ts = event.timestamp
@@ -135,6 +184,13 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
           >
             {explaining ? <Loader2 size={12} className="animate-spin" /> : <Brain size={12} />}
             {explaining ? 'Analyzing…' : 'Explain'}
+          </button>
+          <button
+            onClick={downloadEventJSON}
+            className="btn-ghost text-xs flex items-center gap-1"
+            title="Download this event as JSON"
+          >
+            <Download size={12} /> Event JSON
           </button>
         </div>
 
@@ -258,8 +314,9 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
             className="input w-full h-20 resize-none text-xs"
             placeholder="Investigation notes…"
           />
-          <button onClick={saveNote} disabled={saving} className="btn-primary text-xs mt-1.5">
-            <Save size={11} /> {saving ? 'Saving…' : 'Save Note'}
+          <button onClick={saveNote} disabled={saving} className={`text-xs mt-1.5 btn ${noteSaved ? 'btn-success' : 'btn-primary'}`}>
+            {noteSaved ? <Check size={11} /> : <Save size={11} />}
+            {saving ? 'Saving…' : noteSaved ? 'Saved' : 'Save Note'}
           </button>
         </div>
 
@@ -288,8 +345,48 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
           onFilterOut={onFilterOut}
         />
 
-        {/* Artifact-specific fields */}
-        {Object.keys(artifactData).length > 0 && (
+        {/* Artifact-specific rendering */}
+        {(event.artifact_type === 'strings' || event.artifact_type === 'file') ? (
+          // Binary/text files — show filename + extracted content
+          <div className="space-y-2">
+            {/* Filename banner */}
+            {artifactData.filename && (
+              <div className="flex items-center gap-2 px-2.5 py-2 bg-gray-100 rounded-lg border border-gray-200">
+                <FileText size={12} className="text-gray-400 flex-shrink-0" />
+                <span className="font-mono text-xs text-brand-text font-semibold truncate flex-1" title={artifactData.filename}>
+                  {artifactData.filename}
+                </span>
+                {event.ingest_job_id && (
+                  <button
+                    onClick={downloadFile}
+                    disabled={downloading}
+                    className="btn-ghost text-[10px] flex items-center gap-1 flex-shrink-0 px-1.5 py-0.5"
+                    title="Download original file"
+                  >
+                    {downloading ? <Loader2 size={10} className="animate-spin" /> : <Download size={10} />}
+                    {downloading ? '' : 'Download'}
+                  </button>
+                )}
+              </div>
+            )}
+            {/* Extracted content */}
+            <div>
+              <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1 flex items-center gap-1">
+                <FileText size={9} />
+                {event.artifact_type === 'strings' ? 'Extracted Strings' : 'File Content'}
+                {artifactData.count != null && (
+                  <span className="normal-case font-normal text-gray-400 ml-1">
+                    ({Number(artifactData.count).toLocaleString()} strings)
+                  </span>
+                )}
+              </p>
+              <pre className="bg-gray-50 border border-gray-200 rounded-lg p-2 text-[10px] font-mono text-gray-700 overflow-auto max-h-56 leading-relaxed whitespace-pre-wrap break-all">
+                {artifactData.content || '—'}
+              </pre>
+            </div>
+          </div>
+        ) : Object.keys(artifactData).length > 0 && (
+          // Generic artifact fields for all other types
           <FieldGroup
             title={event.artifact_type?.toUpperCase()}
             fields={Object.fromEntries(

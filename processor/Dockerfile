@@ -1,4 +1,4 @@
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
@@ -10,7 +10,7 @@ WORKDIR /app
 # libimage-exiftool-perl → ExifTool metadata extractor
 # libjpeg-dev / zlib1g-dev → optional image libraries for ExifTool
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-dev \
+    python3 python3-pip python3-dev python3-venv \
     build-essential \
     libmagic1 libmagic-dev \
     wget curl git \
@@ -19,9 +19,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     libimage-exiftool-perl \
     libtsk-dev \
-    libewf-dev \
     testdisk \
+    mono-runtime \
+    software-properties-common \
     && rm -rf /var/lib/apt/lists/*
+
+# Add GIFT PPA for plaso (Ubuntu 24.04 = noble)
+RUN add-apt-repository -y ppa:gift/stable
 
 # ── Hayabusa DFIR binary + rules (Sigma-based EVTX threat hunting) ───────────
 # Extract to a temp location, then normalize: copy the *contents* of the
@@ -45,22 +49,41 @@ RUN wget -q -O /tmp/regripper.zip \
     && chmod +x /opt/regripper/rip.pl \
     && rm /tmp/regripper.zip
 
+# ── de4dot (.NET assembly deobfuscator, runs under Mono) ─────────────────────
+# Uses kant2002/de4dot v3.2.0 net48 build (Mono-compatible Linux binary).
+RUN wget -q -O /tmp/de4dot.zip \
+         "https://github.com/kant2002/de4dot/releases/download/v3.2.0/de4dot-net48.zip" \
+    && unzip -q /tmp/de4dot.zip -d /tmp/de4dot_extracted \
+    && mkdir -p /usr/local/lib/de4dot \
+    && EXE=$(find /tmp/de4dot_extracted -name "de4dot.exe" -type f | head -1) \
+    && cp "$EXE" /usr/local/lib/de4dot/de4dot.exe \
+    && printf '#!/bin/sh\nexec mono /usr/local/lib/de4dot/de4dot.exe "$@"\n' \
+         > /usr/local/bin/de4dot \
+    && chmod +x /usr/local/bin/de4dot \
+    && rm -rf /tmp/de4dot.zip /tmp/de4dot_extracted
+
+# ── Plaso (log2timeline/psort) — required for .plaso file parsing ────────────
+RUN apt-get update && apt-get install -y --no-install-recommends plaso-tools
+
+# ── Python venv for additional packages (with system site-packages) ──────────
+RUN python3 -m venv --system-site-packages /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
 # ── Python deps (includes pyhindsight for the Hindsight module) ───────────────
-# Upgrade build tools first so pyproject.toml-based packages build on Ubuntu 22.04's old pip.
-RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 COPY processor/requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # ccl_chromium_reader is required by pyhindsight but is not on PyPI.
 # Install from GitHub (has pyproject.toml so pip handles it, including its ccl_simplesnappy dep).
-RUN pip3 install --no-cache-dir \
+RUN pip install --no-cache-dir \
     "git+https://github.com/cclgroupltd/ccl_chromium_reader.git" \
     && python3 -c "import ccl_chromium_reader; print('ccl_chromium_reader installed OK')"
 
 # Patch pyhindsight for Python < 3.11 compatibility.
 # datetime.UTC was introduced in Python 3.11; replace with datetime.timezone.utc.
 RUN python3 -c "import datetime; datetime.UTC" 2>/dev/null || \
-    find /usr/local/lib /usr/lib -name "*.py" -path "*/pyhindsight/*" -exec \
+    find /opt/venv/lib -name "*.py" -path "*/pyhindsight/*" -exec \
     sed -i 's/datetime\.UTC/datetime.timezone.utc/g' {} \;
 
 # ── Processor source code ─────────────────────────────────────────────────────

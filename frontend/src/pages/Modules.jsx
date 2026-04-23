@@ -2,16 +2,32 @@ import { useEffect, useState, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Cpu, CheckCircle, XCircle, ChevronDown,
-  Code2, BookOpen, AlertCircle, ArrowRight, Search as SearchIcon, X,
+  Code2, AlertCircle, Search as SearchIcon, X, BookOpen,
+  Shield, Monitor, HardDrive, Globe, Brain,
+  Binary, Bug, Network, FileImage, TextSearch, Tag, ArrowRight,
 } from 'lucide-react'
 import { api } from '../api/client'
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts'
+
+const CATEGORY_ICONS = {
+  'Threat Hunting':     <Shield    size={13} className="text-red-500" />,
+  'Windows':            <Monitor   size={13} className="text-sky-500" />,
+  'Disk Forensics':     <HardDrive size={13} className="text-amber-500" />,
+  'Browser Forensics':  <Globe     size={13} className="text-blue-500" />,
+  'Memory Forensics':   <Brain     size={13} className="text-purple-500" />,
+  'Network':            <Network   size={13} className="text-teal-500" />,
+  'Binary Analysis':    <Binary    size={13} className="text-orange-500" />,
+  'Malware Detection':  <Bug       size={13} className="text-red-500" />,
+  'Threat Intelligence':<Tag       size={13} className="text-pink-500" />,
+  'Metadata Extraction':<FileImage size={13} className="text-indigo-500" />,
+  'Search':             <TextSearch size={13} className="text-gray-500" />,
+}
 
 // ── ModuleCard ────────────────────────────────────────────────────────────────
 function ModuleCard({ mod, onEdit }) {
   const [open, setOpen] = useState(false)
 
-  const acceptsAll = mod.input_extensions.length === 0 && (mod.input_filenames || []).length === 0
+  const acceptsAll = (mod.input_extensions || []).length === 0 && (mod.input_filenames || []).length === 0
   const allTags    = [...(mod.input_extensions || []), ...(mod.input_filenames || [])]
 
   return (
@@ -108,6 +124,20 @@ function ModuleCard({ mod, onEdit }) {
               </code>
             </div>
 
+            {/* Tags */}
+            {(mod.tags || []).length > 0 && (
+              <div className="col-span-2">
+                <p className="section-title mb-1.5">Tags</p>
+                <div className="flex flex-wrap gap-1">
+                  {mod.tags.map(t => (
+                    <span key={t} className="badge bg-gray-100 text-gray-500 border border-gray-200 text-[10px]">
+                      {t}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
           </div>
 
           {/* Custom module edit link */}
@@ -154,7 +184,8 @@ export default function Modules() {
       const textMatch = !q ||
         (m.name || '').toLowerCase().includes(q) ||
         (m.description || '').toLowerCase().includes(q) ||
-        (m.category || '').toLowerCase().includes(q)
+        (m.category || '').toLowerCase().includes(q) ||
+        (m.tags || []).some(t => t.toLowerCase().includes(q))
       const availabilityMatch = showUnavailable || m.available
       return textMatch && availabilityMatch
     })
@@ -162,9 +193,9 @@ export default function Modules() {
 
   // Group filtered modules by category, available-first within each group
   const CATEGORY_ORDER = [
-    'Threat Hunting', 'Windows', 'Disk Forensics', 'Browser Forensics',
-    'Memory Forensics', 'Network', 'Binary Analysis', 'Malware Detection',
-    'Threat Intelligence', 'Metadata Extraction',
+    'Threat Hunting', 'Malware Detection', 'Binary Analysis', 'Windows',
+    'Memory Forensics', 'Disk Forensics', 'Browser Forensics', 'Network',
+    'Threat Intelligence', 'Metadata Extraction', 'Search',
   ]
   const groupedModules = useMemo(() => {
     const groups = {}
@@ -291,6 +322,9 @@ export default function Modules() {
             groupedModules.map(([category, mods]) => (
               <section key={category} className="mb-8">
                 <div className="flex items-center gap-2 mb-3">
+                  {CATEGORY_ICONS[category] && (
+                    <span className="flex-shrink-0">{CATEGORY_ICONS[category]}</span>
+                  )}
                   <h2 className="section-title">{category}</h2>
                   <span className="badge bg-gray-100 text-gray-500 border border-gray-200">
                     {mods.filter(m => m.available).length}/{mods.length}

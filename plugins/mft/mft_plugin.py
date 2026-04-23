@@ -149,7 +149,7 @@ class MftPlugin(BasePlugin):
                     yield {
                         "fo_id": str(uuid.uuid4()),
                         "artifact_type": "mft",
-                        "timestamp": modified or created or "",
+                        "timestamp": modified or created or None,
                         "timestamp_desc": "MFT Modified",
                         "message": f"{'[DIR]' if is_dir else '[FILE]'} "
                                    f"{'[DELETED]' if is_deleted else ''} {fname}",
