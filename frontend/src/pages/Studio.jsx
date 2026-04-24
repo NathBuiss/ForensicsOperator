@@ -298,7 +298,7 @@ const TYPE_TOOLBAR = {
   ingester:  { label: 'ingester',   cls: 'bg-blue-50 text-blue-700 border border-blue-100' },
   module:    { label: 'module',     cls: 'bg-purple-50 text-purple-700 border border-purple-100' },
   yara:      { label: 'yara rule',  cls: 'bg-green-50 text-green-700 border border-green-100' },
-  alertrule: { label: 'alert rule', cls: 'bg-orange-50 text-orange-700 border border-orange-100' },
+  alertrule: { label: 'detection rule', cls: 'bg-orange-50 text-orange-700 border border-orange-100' },
 }
 
 // ── NewFileModal ──────────────────────────────────────────────────────────────
@@ -311,7 +311,7 @@ function NewFileModal({ type, existing, onClose, onCreate }) {
   const suffix = type === 'ingester' ? '_ingester' : type === 'module' ? '_module' : ''
   const ext    = isCodeFile ? '.py' : ''
 
-  const titles = { ingester: 'Ingester', module: 'Module', yara: 'YARA Rule', alertrule: 'Alert Rule' }
+  const titles = { ingester: 'Ingester', module: 'Module', yara: 'YARA Rule', alertrule: 'Detection Rule' }
   const placeholders = { ingester: 'my_format', module: 'my_analysis', yara: 'DetectMimikatz', alertrule: 'Suspicious Login' }
 
   function handleCreate(e) {
@@ -662,16 +662,21 @@ export default function Studio() {
 
   const loadLists = useCallback(async () => {
     try {
-      const [ing, mod, ingBuiltin, modBuiltin, yara, alertLib] = await Promise.all([
+      const [ing, mod, ingBuiltin, modBuiltin, procFiles, yara, alertLib] = await Promise.all([
         api.editor.listIngesters(),
         api.editor.listModules(),
         api.editor.listBuiltinIngesters().catch(() => ({ files: [] })),
         api.editor.listBuiltinModules().catch(() => ({ files: [] })),
+        api.editor.listProcessorFiles().catch(() => ({ files: [] })),
         api.yaraRules.list().catch(() => ({ rules: [] })),
         api.alertRules.listLibrary().catch(() => ({ rules: [] })),
       ])
       setIngFiles([...(ingBuiltin.files || []), ...(ing.files || [])])
-      setModFiles([...(modBuiltin.files || []), ...(mod.files || [])])
+      setModFiles([
+        ...(procFiles.files || []),
+        ...(modBuiltin.files || []),
+        ...(mod.files || []),
+      ])
       setRefModFiles(modBuiltin.files || [])
       setYaraRules([...(yara.rules || [])].sort((a, b) => a.name.localeCompare(b.name)))
       setAlertRuleList([...(alertLib.rules || [])].sort((a, b) => a.name.localeCompare(b.name)))
@@ -738,9 +743,12 @@ export default function Studio() {
         code  = alertRuleToCode(rule)
         label = rule.name || name
       } else if (builtin) {
+        const isProcessor = type === 'module' && name.endsWith('.py')
         const res = type === 'ingester'
           ? await api.editor.getBuiltinIngester(name)
-          : await api.editor.getBuiltinModule(name)
+          : isProcessor
+            ? await api.editor.getProcessorFile(name)
+            : await api.editor.getBuiltinModule(name)
         code = res.content
       } else {
         const res = type === 'ingester'
@@ -856,8 +864,10 @@ export default function Studio() {
       updateTab(type, name, { saving: true, validation: null, saveMsg: null })
       try {
         if (builtin) {
-          if (type === 'ingester') await api.editor.saveBuiltinIngester(name, { content: code })
-          else                     await api.editor.saveBuiltinModule(name, { content: code })
+          const isProcessor = type === 'module' && name.endsWith('.py')
+          if (type === 'ingester')   await api.editor.saveBuiltinIngester(name, { content: code })
+          else if (isProcessor)      await api.editor.saveProcessorFile(name, { content: code })
+          else                       await api.editor.saveBuiltinModule(name, { content: code })
         } else {
           if (type === 'ingester') await api.editor.saveIngester(name, { content: code })
           else                     await api.editor.saveModule(name, { content: code })
@@ -1095,7 +1105,7 @@ export default function Studio() {
     ingesters:  'New Ingester',
     modules:    'New Module',
     yara:       'New YARA Rule',
-    alertrule:  'New Alert Rule',
+    alertrule:  'New Detection Rule',
   }[sidebarTab] || 'New'
 
   const newBtnType = {

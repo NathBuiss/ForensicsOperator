@@ -475,7 +475,7 @@ export default function AlertRules({ caseId, onSearchQuery }) {
       <div className="flex items-center justify-between mb-5">
         <div>
           <h1 className="text-base font-bold text-brand-text flex items-center gap-2">
-            <AlertTriangle size={16} className="text-yellow-500" /> Alert Rules
+            <AlertTriangle size={16} className="text-yellow-500" /> Detection Rules
           </h1>
           <p className="text-xs text-gray-500 mt-0.5">Define suspicious patterns and check them on demand</p>
         </div>

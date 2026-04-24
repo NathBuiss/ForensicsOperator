@@ -2,7 +2,7 @@ apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
   name: upload-timeouts
-  namespace: forensics-operator-dev
+  namespace: tracex-dev
 spec:
   plugin:
     # Traefik doesn't have native timeout middleware, we need to configure it on the entrypoint

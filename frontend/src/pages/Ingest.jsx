@@ -273,6 +273,7 @@ export default function Ingest({ caseId, onComplete }) {
   const [jobStatuses, setJobStatuses]   = useState({})       // jobId → status string
   const [jobDataMap, setJobDataMap]     = useState({})       // jobId → full job object
   const [error, setError]               = useState('')
+  const [keepRaw, setKeepRaw]           = useState(false)
   const inputRef   = useRef()
   const folderRef  = useRef()
   const jobsRef    = useRef([])          // mirror of jobs — readable inside setInterval
@@ -407,6 +408,7 @@ export default function Ingest({ caseId, onComplete }) {
           fd.append('chunk_index', i)
           fd.append('total_chunks', totalChunks)
           fd.append('chunk', slice)
+          fd.append('keep_raw', keepRaw ? 'true' : 'false')
 
           const res = await fetch(`${base}/api/v1/cases/${caseId}/ingest/chunk`, {
             method: 'POST',
@@ -511,7 +513,7 @@ export default function Ingest({ caseId, onComplete }) {
       </div>
 
       {/* Folder upload button */}
-      <div className="flex items-center gap-2 mb-4">
+      <div className="flex items-center gap-2 mb-3">
         <button
           onClick={() => folderRef.current?.click()}
           disabled={uploading}
@@ -533,6 +535,23 @@ export default function Ingest({ caseId, onComplete }) {
           onChange={e => handleFiles([...e.target.files])}
         />
       </div>
+
+      {/* Keep raw files toggle */}
+      <label className="flex items-center gap-2 mb-4 cursor-pointer w-fit select-none">
+        <div
+          onClick={() => setKeepRaw(v => !v)}
+          className={`relative inline-flex h-4 w-7 flex-shrink-0 items-center rounded-full transition-colors ${
+            keepRaw ? 'bg-brand-accent' : 'bg-gray-300'
+          }`}
+        >
+          <span className={`inline-block h-3 w-3 transform rounded-full bg-white shadow transition-transform ${
+            keepRaw ? 'translate-x-3.5' : 'translate-x-0.5'
+          }`} />
+        </div>
+        <span className="text-xs text-gray-500">
+          Keep raw files in storage after processing
+        </span>
+      </label>
 
       {/* ── Server-side harvest ───────────────────────────────────────── */}
       <div className="mt-5 pt-5 border-t border-gray-100">

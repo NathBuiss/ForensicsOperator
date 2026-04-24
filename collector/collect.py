@@ -213,10 +213,15 @@ class Collector:
         print(f"  [!] {msg}", file=sys.stderr)
 
     def _add(self, src: Path, arcname: str) -> bool:
+        arcname = arcname.replace("\\", "/")
         if not src.exists() or not src.is_file():
             self._log(f"missing  {src}")
             return False
-        size = src.stat().st_size
+        try:
+            size = src.stat().st_size
+        except OSError as exc:
+            self._warn(f"stat failed {src.name}: {exc}")
+            return False
         if size == 0:
             self._log(f"empty    {src.name}")
             return False
@@ -330,7 +335,10 @@ class Collector:
         if self._want(key):
             label = ARTIFACT_LABELS.get(key, key)
             with self._timed(key, label):
-                fn(*args)
+                try:
+                    fn(*args)
+                except Exception as exc:
+                    self._warn(f"Collection error in '{key}': {exc}")
 
     def _copy_locked(self, src: Path, dest: Path) -> bool:
         try:
@@ -338,6 +346,32 @@ class Collector:
             return True
         except (PermissionError, OSError):
             return False
+
+    def _stage_file(self, src: Path, dest: Path) -> bool:
+        """
+        Copy src to dest for staging. On Windows, falls back to cmd /c copy
+        which handles WOF-compressed prefetch and locked Event Log files.
+        Returns True only when dest has non-zero content.
+        """
+        if not src.is_file():
+            return False
+        try:
+            shutil.copy2(str(src), str(dest))
+            if dest.is_file() and dest.stat().st_size > 0:
+                return True
+        except Exception:
+            pass
+        if IS_WINDOWS:
+            try:
+                r = subprocess.run(
+                    ["cmd", "/c", "copy", "/B", "/Y", str(src), str(dest)],
+                    capture_output=True, timeout=30,
+                )
+                if r.returncode == 0 and dest.is_file() and dest.stat().st_size > 0:
+                    return True
+            except Exception:
+                pass
+        return False
 
     def _run_cmd(self, cmd: list[str], timeout: int = 30) -> str:
         try:
@@ -413,7 +447,8 @@ class WindowsCollector(Collector):
         self._run_cat("pe",        self._pe_binaries)
         self._run_cat("documents", self._documents)
         self._run_cat("triage",    self._system_triage)
-        self._run_cat("memory",    self._memory)
+        # "memory" removed: winpmem requires elevation; System Volume Information
+        # access is denied on live systems. Use --collect memory explicitly.
 
     def _evtx(self) -> None:
         print("  [*] Event Logs (EVTX)")
@@ -434,14 +469,34 @@ class WindowsCollector(Collector):
         ]
         seen: set[str] = set()
         for name in priority:
-            if self._add(evtx_dir / name, f"evtx/{name}"):
-                seen.add(name)
+            src = evtx_dir / name
+            try:
+                if not src.is_file() or src.stat().st_size == 0:
+                    continue
+                tmp = self.staging / f"evtx_{name}"
+                if self._stage_file(src, tmp) and self._add(tmp, f"evtx/{name}"):
+                    seen.add(name)
+            except Exception as exc:
+                self._warn(f"EVTX {name}: {exc}")
         count = 0
-        for p in sorted(evtx_dir.glob("*.evtx")):
+        try:
+            all_evtx = sorted(evtx_dir.glob("*.evtx"))
+        except Exception as exc:
+            self._warn(f"EVTX glob error: {exc}")
+            return
+        for p in all_evtx:
             if count >= 100:
                 break
-            if p.name not in seen and self._add(p, f"evtx/{p.name}"):
-                count += 1
+            if p.name in seen:
+                continue
+            try:
+                if p.stat().st_size == 0:
+                    continue
+                tmp = self.staging / f"evtx_{p.name}"
+                if self._stage_file(p, tmp) and self._add(tmp, f"evtx/{p.name}"):
+                    count += 1
+            except Exception as exc:
+                self._warn(f"EVTX {p.name}: {exc}")
 
     def _registry(self) -> None:
         print("  [*] Registry Hives")
@@ -467,41 +522,75 @@ class WindowsCollector(Collector):
             except Exception as exc:
                 self._warn(f"reg.exe SAVE {name}: {exc}")
         users_dir = Path(os.environ.get("SystemDrive", "C:")) / "Users"
-        for user_dir in (sorted(users_dir.iterdir()) if users_dir.exists() else []):
+        try:
+            user_dirs = sorted(users_dir.iterdir()) if users_dir.exists() else []
+        except Exception as exc:
+            self._warn(f"Registry users scan error: {exc}")
+            user_dirs = []
+        for user_dir in user_dirs:
             if not user_dir.is_dir():
                 continue
             for rel, suffix in [
                 ("NTUSER.DAT", "NTUSER.DAT"),
                 (r"AppData\Local\Microsoft\Windows\UsrClass.dat", "USRCLASS.DAT"),
             ]:
-                src = user_dir / rel
-                tmp = staging_reg / f"{user_dir.name}_{suffix}"
-                if self._copy_locked(src, tmp):
-                    self._add(tmp, f"registry/users/{user_dir.name}/{suffix}")
+                try:
+                    src = user_dir / rel
+                    tmp = staging_reg / f"{user_dir.name}_{suffix}"
+                    if self._stage_file(src, tmp):
+                        self._add(tmp, f"registry/users/{user_dir.name}/{suffix}")
+                except Exception as exc:
+                    self._warn(f"Registry {user_dir.name}/{suffix}: {exc}")
 
     def _prefetch(self) -> None:
         print("  [*] Prefetch Files")
         pf_dir = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "Prefetch"
+        if not pf_dir.exists():
+            self._warn("Prefetch directory not found (may be disabled)")
+            return
         count = 0
-        for p in (sorted(pf_dir.glob("*.pf")) if pf_dir.exists() else []):
+        try:
+            pf_files = sorted(pf_dir.glob("*.pf"))
+        except Exception as exc:
+            self._warn(f"Prefetch glob error: {exc}")
+            return
+        for p in pf_files:
             if count >= 500:
                 break
-            if self._add(p, f"prefetch/{p.name}"):
-                count += 1
+            try:
+                if p.stat().st_size == 0:
+                    continue
+                tmp = self.staging / f"pf_{p.name}"
+                if self._stage_file(p, tmp) and self._add(tmp, f"prefetch/{p.name}"):
+                    count += 1
+            except Exception as exc:
+                self._warn(f"Prefetch {p.name}: {exc}")
 
     def _lnk(self) -> None:
         print("  [*] LNK / Recent Items")
         users_dir = Path(os.environ.get("SystemDrive", "C:")) / "Users"
         count = 0
-        for user_dir in (sorted(users_dir.iterdir()) if users_dir.exists() else []):
+        try:
+            user_dirs = sorted(users_dir.iterdir()) if users_dir.exists() else []
+        except Exception as exc:
+            self._warn(f"LNK users scan error: {exc}")
+            return
+        for user_dir in user_dirs:
             if not user_dir.is_dir():
                 continue
             recent = user_dir / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Recent"
-            for p in (recent.rglob("*.lnk") if recent.exists() else []):
+            try:
+                lnk_files = list(recent.rglob("*.lnk")) if recent.exists() else []
+            except Exception:
+                lnk_files = []
+            for p in lnk_files:
                 if count >= 2000:
                     break
-                if self._add(p, f"lnk/{user_dir.name}/{p.name}"):
-                    count += 1
+                try:
+                    if self._add(p, f"lnk/{user_dir.name}/{p.name}"):
+                        count += 1
+                except Exception:
+                    pass
 
     def _browser(self) -> None:
         print("  [*] Browser Artifacts")
@@ -533,36 +622,61 @@ class WindowsCollector(Collector):
             ("vivaldi", r"AppData\Local\Vivaldi\User Data\Default\Cookies"),
             ("vivaldi", r"AppData\Local\Vivaldi\User Data\Default\Login Data"),
         ]
-        for user_dir in (sorted(users_dir.iterdir()) if users_dir.exists() else []):
+        try:
+            user_dirs = sorted(users_dir.iterdir()) if users_dir.exists() else []
+        except Exception as exc:
+            self._warn(f"Browser users scan error: {exc}")
+            return
+        for user_dir in user_dirs:
             if not user_dir.is_dir():
                 continue
             for browser, rel in PROFILES:
-                src = user_dir / rel
-                tmp = self.staging / f"{user_dir.name}_{browser}_{Path(rel).name}"
-                if self._copy_locked(src, tmp):
-                    self._add(tmp, f"browser/{browser}/{user_dir.name}/{Path(rel).name}")
+                try:
+                    src = user_dir / rel
+                    tmp = self.staging / f"{user_dir.name}_{browser}_{Path(rel).name}"
+                    if self._copy_locked(src, tmp):
+                        self._add(tmp, f"browser/{browser}/{user_dir.name}/{Path(rel).name}")
+                except Exception:
+                    pass
             ff_base = user_dir / "AppData" / "Roaming" / "Mozilla" / "Firefox" / "Profiles"
-            if ff_base.exists():
-                for profile_dir in ff_base.iterdir():
-                    if not profile_dir.is_dir():
-                        continue
-                    for db in ("places.sqlite", "cookies.sqlite", "logins.json", "formhistory.sqlite"):
+            try:
+                ff_profiles = list(ff_base.iterdir()) if ff_base.exists() else []
+            except Exception:
+                ff_profiles = []
+            for profile_dir in ff_profiles:
+                if not profile_dir.is_dir():
+                    continue
+                for db in ("places.sqlite", "cookies.sqlite", "logins.json", "formhistory.sqlite"):
+                    try:
                         src = profile_dir / db
                         tmp = self.staging / f"{user_dir.name}_ff_{profile_dir.name}_{db}"
                         if self._copy_locked(src, tmp):
                             self._add(tmp, f"browser/firefox/{user_dir.name}/{profile_dir.name}/{db}")
+                    except Exception:
+                        pass
 
     def _scheduled_tasks(self) -> None:
         print("  [*] Scheduled Tasks")
         tasks_dir = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "Tasks"
+        if not tasks_dir.exists():
+            self._warn("Tasks directory not found")
+            return
         count = 0
-        for p in (tasks_dir.rglob("*") if tasks_dir.exists() else []):
+        try:
+            task_files = list(tasks_dir.rglob("*"))
+        except Exception as exc:
+            self._warn(f"Scheduled tasks scan error: {exc}")
+            return
+        for p in task_files:
             if count >= 500:
                 break
-            if p.is_file() and not p.suffix:
-                rel = p.relative_to(tasks_dir)
-                if self._add(p, f"scheduled_tasks/{rel}"):
-                    count += 1
+            try:
+                if p.is_file() and not p.suffix:
+                    rel = str(p.relative_to(tasks_dir)).replace("\\", "/")
+                    if self._add(p, f"scheduled_tasks/{rel}"):
+                        count += 1
+            except Exception as exc:
+                self._warn(f"Task {p.name}: {exc}")
 
     def _mft(self) -> None:
         """Raw-copy $MFT from all NTFS volumes via Windows kernel API (requires Admin)."""
@@ -1788,14 +1902,25 @@ class ExternalDiskCollector(Collector):
         ]
         seen: set = set()
         for name in priority:
-            if self._add(evtx_dir / name, f"evtx/{name}"):
-                seen.add(name)
+            try:
+                if self._add(evtx_dir / name, f"evtx/{name}"):
+                    seen.add(name)
+            except Exception as exc:
+                self._warn(f"EVTX {name}: {exc}")
         count = 0
-        for p in sorted(evtx_dir.glob("*.evtx")):
+        try:
+            all_evtx = sorted(evtx_dir.glob("*.evtx"))
+        except Exception as exc:
+            self._warn(f"EVTX glob error: {exc}")
+            return
+        for p in all_evtx:
             if count >= 100:
                 break
-            if p.name not in seen and self._add(p, f"evtx/{p.name}"):
-                count += 1
+            try:
+                if p.name not in seen and self._add(p, f"evtx/{p.name}"):
+                    count += 1
+            except Exception as exc:
+                self._warn(f"EVTX {p.name}: {exc}")
 
     def _registry_from(self, win_dir: Path, users_dir: Path) -> None:
         print("  [*] Registry Hives")
@@ -1822,11 +1947,19 @@ class ExternalDiskCollector(Collector):
         print("  [*] Prefetch Files")
         pf_dir = win_dir / "Prefetch"
         count = 0
-        for p in (sorted(pf_dir.glob("*.pf")) if pf_dir.exists() else []):
+        try:
+            pf_files = sorted(pf_dir.glob("*.pf")) if pf_dir.exists() else []
+        except Exception as exc:
+            self._warn(f"Prefetch glob error: {exc}")
+            return
+        for p in pf_files:
             if count >= 500:
                 break
-            if self._add(p, f"prefetch/{p.name}"):
-                count += 1
+            try:
+                if self._add(p, f"prefetch/{p.name}"):
+                    count += 1
+            except Exception as exc:
+                self._warn(f"Prefetch {p.name}: {exc}")
 
     def _lnk_from(self, users_dir: Path) -> None:
         print("  [*] LNK / Recent Items")
@@ -1882,13 +2015,21 @@ class ExternalDiskCollector(Collector):
         print("  [*] Scheduled Tasks")
         tasks_dir = win_dir / "System32" / "Tasks"
         count = 0
-        for p in (tasks_dir.rglob("*") if tasks_dir.exists() else []):
+        try:
+            task_files = list(tasks_dir.rglob("*")) if tasks_dir.exists() else []
+        except Exception as exc:
+            self._warn(f"Tasks scan error: {exc}")
+            return
+        for p in task_files:
             if count >= 500:
                 break
-            if p.is_file() and not p.suffix:
-                rel = p.relative_to(tasks_dir)
-                if self._add(p, f"scheduled_tasks/{rel}"):
-                    count += 1
+            try:
+                if p.is_file() and not p.suffix:
+                    rel = str(p.relative_to(tasks_dir)).replace("\\", "/")
+                    if self._add(p, f"scheduled_tasks/{rel}"):
+                        count += 1
+            except Exception as exc:
+                self._warn(f"Task {p.name}: {exc}")
 
     def _mft_from(self, root: Path) -> None:
         """Copy $MFT directly from the NTFS mount point root."""
@@ -1985,16 +2126,27 @@ class ExternalDiskCollector(Collector):
         print("  [*] Persistence (Tasks, WMI)")
         for tasks_dir in [win_dir / "System32" / "Tasks", win_dir / "SysWOW64" / "Tasks"]:
             count = 0
-            for p in (tasks_dir.rglob("*") if tasks_dir.exists() else []):
+            try:
+                task_files = list(tasks_dir.rglob("*")) if tasks_dir.exists() else []
+            except Exception as exc:
+                self._warn(f"Persistence tasks scan ({tasks_dir.name}): {exc}")
+                continue
+            for p in task_files:
                 if count >= 500:
                     break
-                if p.is_file() and not p.suffix:
-                    rel = p.relative_to(tasks_dir)
-                    if self._add(p, f"persistence/tasks/{tasks_dir.name}/{rel}"):
-                        count += 1
+                try:
+                    if p.is_file() and not p.suffix:
+                        rel = str(p.relative_to(tasks_dir)).replace("\\", "/")
+                        if self._add(p, f"persistence/tasks/{tasks_dir.name}/{rel}"):
+                            count += 1
+                except Exception as exc:
+                    self._warn(f"Persistence task {p.name}: {exc}")
         wmi_repo = win_dir / "System32" / "wbem" / "Repository"
-        self._add(wmi_repo / "OBJECTS.DATA", "persistence/wmi/OBJECTS.DATA")
-        self._add(wmi_repo / "INDEX.BTR",    "persistence/wmi/INDEX.BTR")
+        try:
+            self._add(wmi_repo / "OBJECTS.DATA", "persistence/wmi/OBJECTS.DATA")
+            self._add(wmi_repo / "INDEX.BTR",    "persistence/wmi/INDEX.BTR")
+        except Exception as exc:
+            self._warn(f"WMI repo: {exc}")
 
     def _network_cfg_from(self, root: Path, win_dir: Path) -> None:
         print("  [*] Network Config (Hosts, WLAN, Firewall)")
@@ -2016,27 +2168,43 @@ class ExternalDiskCollector(Collector):
     def _credentials_from(self, win_dir: Path, users_dir: Path) -> None:
         print("  [*] Credentials (DPAPI, Credential Manager)")
         cfg = win_dir / "System32" / "config"
-        self._add(cfg / "SAM",      "credentials/SAM")
-        self._add(cfg / "SECURITY", "credentials/SECURITY")
+        try:
+            self._add(cfg / "SAM",      "credentials/SAM")
+            self._add(cfg / "SECURITY", "credentials/SECURITY")
+        except Exception as exc:
+            self._warn(f"Credentials hives: {exc}")
         for ud in self._iter_users(users_dir):
             for rel in ["AppData/Local/Microsoft/Credentials",
                         "AppData/Roaming/Microsoft/Credentials",
                         "AppData/Local/Microsoft/Protect"]:
                 d = ud / Path(rel.replace("/", os.sep))
-                if d.exists():
-                    for p in d.rglob("*"):
+                try:
+                    items = list(d.rglob("*")) if d.exists() else []
+                except Exception:
+                    continue
+                for p in items:
+                    try:
                         if p.is_file():
                             self._add(p, f"credentials/{ud.name}/{rel.split('/')[-1]}/{p.name}")
+                    except Exception:
+                        pass
 
     def _antivirus_from(self, root: Path) -> None:
         print("  [*] Antivirus / Windows Defender")
         base = root / "ProgramData" / "Microsoft" / "Windows Defender"
         for sub in ["Quarantine", "Support"]:
             d = base / sub
-            if d.exists():
-                for p in d.rglob("*"):
+            try:
+                items = list(d.rglob("*")) if d.exists() else []
+            except Exception as exc:
+                self._warn(f"Antivirus {sub}: {exc}")
+                continue
+            for p in items:
+                try:
                     if p.is_file():
                         self._add(p, f"antivirus/{sub}/{p.name}")
+                except Exception:
+                    pass
 
     def _wer_crashes_from(self, root: Path) -> None:
         print("  [*] WER Crash Dumps & Reports")
@@ -2044,12 +2212,20 @@ class ExternalDiskCollector(Collector):
         count = 0
         for sub in ["ReportQueue", "ReportArchive"]:
             d = base / sub
-            for p in (d.rglob("*") if d.exists() else []):
+            try:
+                items = list(d.rglob("*")) if d.exists() else []
+            except Exception as exc:
+                self._warn(f"WER {sub}: {exc}")
+                continue
+            for p in items:
                 if count >= 200:
                     break
-                if p.is_file():
-                    if self._add(p, f"wer_crashes/{sub}/{p.name}"):
-                        count += 1
+                try:
+                    if p.is_file():
+                        if self._add(p, f"wer_crashes/{sub}/{p.name}"):
+                            count += 1
+                except Exception:
+                    pass
 
     def _win_logs_from(self, win_dir: Path) -> None:
         print("  [*] Windows Logs (CBS, DISM, WU)")

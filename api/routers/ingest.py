@@ -122,6 +122,7 @@ def _ingest_one_async(
     errors: list,
     background_tasks: BackgroundTasks,
     source_zip: str = "",
+    keep_raw: bool = False,
 ) -> None:
     """Create job record, register background upload, append to dispatched."""
     if size == 0:
@@ -138,7 +139,7 @@ def _ingest_one_async(
     job_id    = uuid.uuid4().hex
     minio_key = f"cases/{case_id}/{job_id}/{filename}"
 
-    job_svc.create_job(job_id, case_id, filename, "", source_zip=source_zip)
+    job_svc.create_job(job_id, case_id, filename, "", source_zip=source_zip, keep_raw=keep_raw)
     job_svc.update_job(job_id, status="UPLOADING", size_bytes=size)
 
     background_tasks.add_task(
@@ -237,6 +238,7 @@ def _handle_zip_async(
     dispatched: list,
     errors: list,
     background_tasks: BackgroundTasks,
+    keep_raw: bool = False,
 ) -> None:
     """
     Phase 1 (sync, fast): read ZIP central directory, create job stubs, return immediately.
@@ -283,7 +285,7 @@ def _handle_zip_async(
             # MinIO key includes the full relative path so the object is addressable by path
             minio_key = f"cases/{case_id}/{job_id}/{entry_name}"
 
-            job_svc.create_job(job_id, case_id, entry_name, "", source_zip=zip_name)
+            job_svc.create_job(job_id, case_id, entry_name, "", source_zip=zip_name, keep_raw=keep_raw)
             job_svc.update_job(job_id, status="UPLOADING", size_bytes=placeholder_size)
 
             bg_entries.append((entry, entry_name, job_id, minio_key))
@@ -319,6 +321,7 @@ async def ingest_chunk(
     chunk_index: int = Form(...),
     total_chunks: int = Form(...),
     chunk: UploadFile = File(...),
+    keep_raw: bool = Form(False),
     background_tasks: BackgroundTasks = None,
 ):
     """
@@ -361,9 +364,9 @@ async def ingest_chunk(
 
     try:
         if filename.lower().endswith(".zip"):
-            _handle_zip_async(case_id, filename, tmp_path, dispatched, errors, background_tasks)
+            _handle_zip_async(case_id, filename, tmp_path, dispatched, errors, background_tasks, keep_raw=keep_raw)
         else:
-            _ingest_one_async(case_id, filename, tmp_path, size, dispatched, errors, background_tasks)
+            _ingest_one_async(case_id, filename, tmp_path, size, dispatched, errors, background_tasks, keep_raw=keep_raw)
     except Exception as exc:
         logger.error("Failed to register chunked ingest for '%s': %s", filename, exc)
         try:
@@ -384,6 +387,7 @@ async def ingest_chunk(
 async def ingest_files(
     case_id: str,
     files: List[UploadFile] = File(...),
+    keep_raw: bool = Form(False),
     background_tasks: BackgroundTasks = None,
 ):
     """
@@ -436,9 +440,9 @@ async def ingest_files(
 
         try:
             if filename.lower().endswith(".zip"):
-                _handle_zip_async(case_id, filename, tmp_path, dispatched, errors, background_tasks)
+                _handle_zip_async(case_id, filename, tmp_path, dispatched, errors, background_tasks, keep_raw=keep_raw)
             else:
-                _ingest_one_async(case_id, filename, tmp_path, size, dispatched, errors, background_tasks)
+                _ingest_one_async(case_id, filename, tmp_path, size, dispatched, errors, background_tasks, keep_raw=keep_raw)
         except Exception as exc:
             logger.error("Failed to register ingest job for '%s': %s", filename, exc)
             errors.append({"filename": filename, "error": f"Server error: {exc}"})

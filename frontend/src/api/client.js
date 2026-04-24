@@ -202,6 +202,10 @@ export const api = {
     getBuiltinModule:     (name)        => request('GET',    `/editor/builtin-modules/${name}`),
     saveBuiltinModule:    (name, data)  => request('PUT',    `/editor/builtin-modules/${name}`, data),
     deleteBuiltinModule:  (name)        => request('DELETE', `/editor/builtin-modules/${name}`),
+    // Processor Python files — tasks/ and utils/ (execution engine)
+    listProcessorFiles:   ()            => request('GET',    '/editor/processor-files'),
+    getProcessorFile:     (name)        => request('GET',    `/editor/processor-files/${name}`),
+    saveProcessorFile:    (name, data)  => request('PUT',    `/editor/processor-files/${name}`, data),
   },
 
   s3: {

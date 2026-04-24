@@ -25,6 +25,8 @@ INGESTER_DIR      = Path(os.getenv("INGESTER_DIR",  "/app/ingester"))
 MODULES_DIR       = Path(os.getenv("MODULES_DIR",   "/app/modules"))
 PLUGINS_DIR       = Path(os.getenv("PLUGINS_DIR",   "/app/plugins"))
 MODULES_REG_DIR   = Path(__file__).parent.parent / "modules_registry"
+# Processor Python files: tasks + utils (the execution engine behind modules/ingestion)
+PROCESSOR_DIR     = Path(os.getenv("PROCESSOR_DIR", "/app/processor"))
 
 INGESTER_SUFFIX = "_ingester.py"
 MODULE_SUFFIX   = "_module.py"
@@ -260,6 +262,54 @@ def delete_builtin_module_file(name: str):
     if not path.exists():
         raise HTTPException(404, "File not found")
     path.unlink()
+
+
+# ── Processor Python files (tasks/ + utils/) ──────────────────────────────────
+
+def _safe_processor(name: str) -> Path:
+    if ".." in name or name.startswith("/"):
+        raise HTTPException(400, "Invalid file path")
+    if not name.endswith(".py"):
+        raise HTTPException(400, "File must be a .py file")
+    return PROCESSOR_DIR / name
+
+
+@router.get("/editor/processor-files")
+def list_processor_files():
+    """List editable processor Python files (tasks/ and utils/)."""
+    if not PROCESSOR_DIR.exists():
+        return {"files": []}
+    files = []
+    for subdir in ("tasks", "utils"):
+        d = PROCESSOR_DIR / subdir
+        if not d.exists():
+            continue
+        for f in sorted(d.glob("*.py")):
+            if f.name.startswith("__"):
+                continue
+            files.append({
+                "name":     f"{subdir}/{f.name}",
+                "size":     f.stat().st_size,
+                "modified": f.stat().st_mtime,
+                "builtin":  True,
+            })
+    return {"files": files}
+
+
+@router.get("/editor/processor-files/{name:path}")
+def get_processor_file(name: str):
+    path = _safe_processor(name)
+    if not path.exists():
+        raise HTTPException(404, "File not found")
+    return {"name": name, "content": path.read_text(encoding="utf-8"), "builtin": True}
+
+
+@router.put("/editor/processor-files/{name:path}")
+def save_processor_file(name: str, body: FileWrite):
+    """Overwrite a processor Python file."""
+    path = _safe_processor(name)
+    _write(path, body.content)
+    return {"saved": True, "name": name, "builtin": True}
 
 
 # ── Shared: syntax validation ──────────────────────────────────────────────────

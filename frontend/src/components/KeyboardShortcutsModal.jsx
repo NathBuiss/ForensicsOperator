@@ -14,7 +14,7 @@ const SHORTCUT_SECTIONS = [
       { keys: ['g', 'd'], label: 'Dashboard' },
       { keys: ['g', 'c'], label: 'Cases' },
       { keys: ['g', 'm'], label: 'Modules' },
-      { keys: ['g', 'a'], label: 'Alert Rules' },
+      { keys: ['g', 'a'], label: 'Detection Rules' },
       { keys: ['g', 'i'], label: 'Ingesters' },
       { keys: ['g', 's'], label: 'Studio' },
     ],

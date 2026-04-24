@@ -90,6 +90,7 @@ def _expand_zip_into_child_jobs(
     case_id: str,
     zip_path: Path,
     r: redis.Redis,
+    keep_raw: str = "0",
 ) -> int:
     """
     Extract every entry from a ZIP and create individual child jobs, mirroring
@@ -140,6 +141,7 @@ def _expand_zip_into_child_jobs(
                 "task_id":           "",
                 "source_zip":        zip_path.name,
                 "size_bytes":        str(info.file_size or info.compress_size or 1),
+                "keep_raw":          keep_raw,
             })
             r.expire(f"job:{child_id}", JOB_TTL)
             r.sadd(f"case:{case_id}:jobs", child_id)
@@ -233,13 +235,20 @@ def process_artifact(
         # This makes every individual artifact file visible to modules.
         if _is_fo_zip(local_file):
             logger.info("[%s] ZIP detected — expanding into child jobs", job_id)
-            child_count = _expand_zip_into_child_jobs(job_id, case_id, local_file, r)
+            keep_raw = r.hget(f"job:{job_id}", "keep_raw") or "0"
+            child_count = _expand_zip_into_child_jobs(job_id, case_id, local_file, r, keep_raw=keep_raw)
             completed_at = datetime.now(timezone.utc).isoformat()
             update_job_status(r, job_id,
                               status="COMPLETED",
                               plugin_used="archive (expanded)",
                               events_indexed="0",
                               completed_at=completed_at)
+            if keep_raw == "0":
+                try:
+                    get_minio().remove_object(MINIO_BUCKET, minio_object_key)
+                    logger.info("[%s] Deleted raw ZIP from MinIO (keep_raw=False)", job_id)
+                except Exception as exc:
+                    logger.warning("[%s] Could not delete raw ZIP from MinIO: %s", job_id, exc)
             logger.info("[%s] ZIP expanded into %d child jobs", job_id, child_count)
             return {"status": "COMPLETED", "events_indexed": 0, "child_jobs": child_count}
 
@@ -254,6 +263,12 @@ def process_artifact(
                               completed_at=skipped_at)
             _index_artifact_doc(job_id, case_id, original_filename, "", mime_type,
                                 0, True, minio_object_key, skipped_at)
+            if (r.hget(f"job:{job_id}", "keep_raw") or "0") == "0":
+                try:
+                    get_minio().remove_object(MINIO_BUCKET, minio_object_key)
+                    logger.info("[%s] Deleted raw file from MinIO after SKIPPED (keep_raw=False)", job_id)
+                except Exception as exc:
+                    logger.warning("[%s] Could not delete raw file from MinIO: %s", job_id, exc)
             return
 
         update_job_status(r, job_id, plugin_used=plugin_class.PLUGIN_NAME)
@@ -338,6 +353,12 @@ def process_artifact(
         plugin_name = getattr(plugin, "PLUGIN_NAME", "")
         _index_artifact_doc(job_id, case_id, original_filename, plugin_name, mime_type,
                             events_indexed, False, minio_object_key, completed_at)
+        if (r.hget(f"job:{job_id}", "keep_raw") or "0") == "0":
+            try:
+                get_minio().remove_object(MINIO_BUCKET, minio_object_key)
+                logger.info("[%s] Deleted raw file from MinIO after COMPLETED (keep_raw=False)", job_id)
+            except Exception as exc:
+                logger.warning("[%s] Could not delete raw file from MinIO: %s", job_id, exc)
         logger.info("[%s] Completed: %d events indexed", job_id, events_indexed)
         return result
 

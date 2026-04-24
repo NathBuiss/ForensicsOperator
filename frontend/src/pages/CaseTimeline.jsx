@@ -2073,7 +2073,7 @@ export default function CaseTimeline() {
             className={`btn-outline ${showAlertRules ? 'bg-yellow-50 border-yellow-300 text-yellow-700' : ''}`}
           >
             <Bell size={14} />
-            Alert Rules
+            Detection Rules
           </button>
 
           <button
@@ -2144,7 +2144,7 @@ export default function CaseTimeline() {
             <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 flex-shrink-0">
               <div className="flex items-center gap-2">
                 <Bell size={15} className="text-yellow-500" />
-                <span className="font-semibold text-brand-text text-sm">Alert Rules</span>
+                <span className="font-semibold text-brand-text text-sm">Detection Rules</span>
               </div>
               <button onClick={() => setShowAlertRules(false)} className="btn-ghost p-1.5 rounded-lg">
                 <X size={16} />

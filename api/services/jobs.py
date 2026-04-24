@@ -19,6 +19,7 @@ def create_job(
     filename: str,
     minio_key: str,
     source_zip: str = "",
+    keep_raw: bool = False,
 ) -> dict:
     r = get_redis()
     job = {
@@ -37,6 +38,7 @@ def create_job(
         "completed_at": "",
         "task_id": "",
         "source_zip": source_zip,
+        "keep_raw": "1" if keep_raw else "0",
     }
     r.hset(f"job:{job_id}", mapping=job)
     r.expire(f"job:{job_id}", JOB_TTL)
