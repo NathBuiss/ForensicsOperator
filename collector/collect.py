@@ -1755,6 +1755,14 @@ class ExternalDiskCollector(Collector):
         """
         disk_path = Path(self.disk)
 
+        # Normalize bare drive letter: Path("E:") on Windows is a *relative* path
+        # (it refers to the CWD of drive E:), so "E:" / "Windows" → "E:Windows".
+        # Appending os.sep makes it absolute: "E:\" / "Windows" → "E:\Windows".
+        if IS_WINDOWS:
+            s = str(disk_path)
+            if len(s) == 2 and s[1] == ':':
+                disk_path = Path(s + os.sep)
+
         # Already a mounted directory
         if disk_path.is_dir():
             print(f"      Using existing mount: {disk_path}")
@@ -1902,8 +1910,12 @@ class ExternalDiskCollector(Collector):
         ]
         seen: set = set()
         for name in priority:
+            src = evtx_dir / name
             try:
-                if self._add(evtx_dir / name, f"evtx/{name}"):
+                if not src.is_file() or src.stat().st_size == 0:
+                    continue
+                tmp = self.staging / f"evtx_{name}"
+                if self._stage_file(src, tmp) and self._add(tmp, f"evtx/{name}"):
                     seen.add(name)
             except Exception as exc:
                 self._warn(f"EVTX {name}: {exc}")
@@ -1917,7 +1929,12 @@ class ExternalDiskCollector(Collector):
             if count >= 100:
                 break
             try:
-                if p.name not in seen and self._add(p, f"evtx/{p.name}"):
+                if p.name in seen:
+                    continue
+                if p.stat().st_size == 0:
+                    continue
+                tmp = self.staging / f"evtx_{p.name}"
+                if self._stage_file(p, tmp) and self._add(tmp, f"evtx/{p.name}"):
                     count += 1
             except Exception as exc:
                 self._warn(f"EVTX {p.name}: {exc}")
@@ -1926,22 +1943,36 @@ class ExternalDiskCollector(Collector):
         print("  [*] Registry Hives")
         config_dir = win_dir / "System32" / "config"
         for name in ["SYSTEM", "SOFTWARE", "SAM", "SECURITY"]:
-            self._add(config_dir / name, f"registry/{name}")
+            src = config_dir / name
+            try:
+                if not src.is_file():
+                    continue
+                tmp = self.staging / f"reg_{name}"
+                if self._stage_file(src, tmp):
+                    self._add(tmp, f"registry/{name}")
+            except Exception as exc:
+                self._warn(f"Registry {name}: {exc}")
         if users_dir.exists():
             for user_dir in sorted(users_dir.iterdir()):
                 if not user_dir.is_dir():
                     continue
-                self._add(
-                    user_dir / "NTUSER.DAT",
-                    f"registry/users/{user_dir.name}/NTUSER.DAT",
-                )
-                usrclass = (
-                    user_dir / "AppData" / "Local" / "Microsoft" / "Windows" / "UsrClass.dat"
-                )
-                self._add(
-                    usrclass,
-                    f"registry/users/{user_dir.name}/USRCLASS.DAT",
-                )
+                safe = user_dir.name.replace(" ", "_")
+                for src_rel, arcname in [
+                    ("NTUSER.DAT", f"registry/users/{user_dir.name}/NTUSER.DAT"),
+                    (
+                        str(Path("AppData") / "Local" / "Microsoft" / "Windows" / "UsrClass.dat"),
+                        f"registry/users/{user_dir.name}/USRCLASS.DAT",
+                    ),
+                ]:
+                    src = user_dir / src_rel
+                    try:
+                        if not src.is_file():
+                            continue
+                        tmp = self.staging / f"reg_{safe}_{Path(src_rel).name}"
+                        if self._stage_file(src, tmp):
+                            self._add(tmp, arcname)
+                    except Exception as exc:
+                        self._warn(f"Registry {user_dir.name}/{Path(src_rel).name}: {exc}")
 
     def _prefetch_from(self, win_dir: Path) -> None:
         print("  [*] Prefetch Files")
@@ -1956,7 +1987,10 @@ class ExternalDiskCollector(Collector):
             if count >= 500:
                 break
             try:
-                if self._add(p, f"prefetch/{p.name}"):
+                if p.stat().st_size == 0:
+                    continue
+                tmp = self.staging / f"pf_{p.name}"
+                if self._stage_file(p, tmp) and self._add(tmp, f"prefetch/{p.name}"):
                     count += 1
             except Exception as exc:
                 self._warn(f"Prefetch {p.name}: {exc}")
