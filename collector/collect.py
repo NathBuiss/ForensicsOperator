@@ -186,11 +186,13 @@ class Collector:
         collect: set[str],
         verbose: bool = False,
         dry_run: bool = False,
+        skip_problematic: bool = False,
     ):
         self.output   = output
         self.collect  = collect
         self.verbose  = verbose
         self.dry_run  = dry_run
+        self.skip_problematic = skip_problematic
         self.staging  = Path(tempfile.mkdtemp(prefix="fo_collect_"))
         self._items: list[tuple[str, Path]] = []
         self._errors: list[str] = []
@@ -211,6 +213,42 @@ class Collector:
         self._errors.append(msg)
         # Buffered during _timed(); written directly otherwise.
         print(f"  [!] {msg}", file=sys.stderr)
+
+    def _check_deadbox_mode(self) -> dict:
+        """
+        Check if running in dead-box directory mode and warn about limitations.
+        Returns a dict of problematic categories and reasons.
+        """
+        warnings = {}
+        
+        # Check if we're accessing a mounted filesystem (not live OS)
+        is_deadbox = False
+        if hasattr(self, 'disk') and getattr(self, 'disk', None):
+            is_deadbox = True
+        elif IS_WINDOWS:
+            # Check if SystemDrive is different from C: or path looks like mount
+            sys_drive = os.environ.get("SystemDrive", "C:")
+            if sys_drive != "C:" or (hasattr(self, '_ntfs_dir') and getattr(self, '_ntfs_dir', None)):
+                is_deadbox = True
+        
+        if not is_deadbox:
+            return warnings
+        
+        # Categories that typically fail in dead-box directory mode
+        DEADBOX_LIMITATIONS = {
+            "mft": "$MFT requires raw volume access (\\\\.\\C:) - not available in directory mount mode",
+            "filesystem": "NTFS metadata ($MFT, $Boot, $LogFile) requires raw volume handle",
+            "prefetch": "Prefetch files may be WOF-compressed (Win10+) or have reparse points",
+            "tasks": "C:\\Windows\\System32\\Tasks often contains reparse points",
+            "browser_ie": "WebCache directories frequently use reparse points",
+            "memory_artifacts": "pagefile.sys and hiberfil.sys are locked by the OS",
+        }
+        
+        for cat, reason in DEADBOX_LIMITATIONS.items():
+            if cat in self.collect:
+                warnings[cat] = reason
+        
+        return warnings
 
     def _add(self, src: Path, arcname: str) -> bool:
         arcname = arcname.replace("\\", "/")
@@ -341,36 +379,168 @@ class Collector:
                     self._warn(f"Collection error in '{key}': {exc}")
 
     def _copy_locked(self, src: Path, dest: Path) -> bool:
+        """
+        Copy a file that may be locked by another process.
+        Tries multiple strategies in order of preference.
+        """
+        if not src.exists() or not src.is_file():
+            return False
+        
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Strategy 1: Direct copy (works if file is not locked)
         try:
             shutil.copy2(str(src), str(dest))
-            return True
+            if dest.exists() and dest.stat().st_size > 0:
+                return True
         except (PermissionError, OSError):
+            pass
+        
+        if not IS_WINDOWS:
+            return False
+        
+        # Strategy 2: cmd /c copy (bypasses some file locks)
+        try:
+            r = subprocess.run(
+                ["cmd", "/c", "copy", "/B", "/Y", str(src), str(dest)],
+                capture_output=True, timeout=30,
+            )
+            if r.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
+                return True
+        except Exception:
+            pass
+        
+        # Strategy 3: robocopy (handles more locked files)
+        try:
+            r = subprocess.run(
+                ["robocopy", str(src.parent), str(dest.parent), str(src.name), "/NJH", "/NJS", "/NDL", "/NFL"],
+                capture_output=True, timeout=60,
+            )
+            if r.returncode in (0, 1) and dest.exists() and dest.stat().st_size > 0:
+                return True
+        except Exception:
+            pass
+        
+        return False
+
+    def _is_reparse_point(self, path: Path) -> bool:
+        """Check if a path is a reparse point (junction/symlink)."""
+        if not IS_WINDOWS:
+            return False
+        try:
+            import ctypes
+            attrs = ctypes.windll.kernel32.GetFileAttributesW(str(path))
+            if attrs == -1:
+                return False
+            return bool(attrs & 0x0400)  # FILE_ATTRIBUTE_REPARSE_POINT
+        except Exception:
+            return False
+
+    def _resolve_long_path(self, path: Path) -> str:
+        r"""Convert to UNC path (\\?\) to bypass MAX_PATH limitation."""
+        if not IS_WINDOWS:
+            return str(path)
+        path_str = str(path)
+        if not path_str.startswith("\\\\?\\") and not path_str.startswith("\\\\"):
+            return "\\\\?\\" + path_str
+        return path_str
+
+    def _copy_with_robocopy(self, src: Path, dest: Path) -> bool:
+        """Use robocopy which handles WOF compression and reparse points better."""
+        try:
+            r = subprocess.run(
+                ["robocopy", str(src.parent), str(dest.parent), str(src.name), "/NJH", "/NJS", "/NDL", "/NFL"],
+                capture_output=True, timeout=60,
+            )
+            return r.returncode in (0, 1) and dest.exists() and dest.stat().st_size > 0
+        except Exception:
             return False
 
     def _stage_file(self, src: Path, dest: Path) -> bool:
         """
-        Copy src to dest for staging. On Windows, falls back to cmd /c copy
-        which handles WOF-compressed prefetch and locked Event Log files.
+        Copy src to dest for staging with multiple fallback strategies.
+        
+        Handles:
+        - WOF (Windows Overlay File System) compressed files (Prefetch on Win10+)
+        - Reparse points / junctions
+        - Long paths (>260 chars) via UNC prefix
+        - Locked files via cmd copy
+        - NTFS metadata files ($MFT, $Boot) - these require raw volume access
+        
         Returns True only when dest has non-zero content.
         """
+        if not src.exists():
+            return False
+        
         if not src.is_file():
             return False
+        
+        src_size = 0
+        try:
+            src_size = src.stat().st_size
+        except OSError:
+            pass
+        
+        if src_size == 0:
+            return False
+        
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Strategy 1: Direct copy (works for most files)
         try:
             shutil.copy2(str(src), str(dest))
-            if dest.is_file() and dest.stat().st_size > 0:
+            if dest.exists() and dest.stat().st_size > 0:
+                return True
+        except PermissionError as exc:
+            self._log(f"Permission denied (direct): {src} - {exc}")
+        except OSError as exc:
+            if exc.errno == 22:  # Invalid argument - often WOF or reparse point
+                self._log(f"Invalid argument (WOF/reparse): {src}")
+            else:
+                self._log(f"OSError (direct): {src} - {exc}")
+        except Exception as exc:
+            self._log(f"Copy failed (direct): {src} - {exc}")
+        
+        if not IS_WINDOWS:
+            return False
+        
+        # Strategy 2: UNC long path prefix (bypass MAX_PATH)
+        try:
+            src_unc = self._resolve_long_path(src)
+            dest_unc = self._resolve_long_path(dest)
+            shutil.copy2(src_unc, dest_unc)
+            if dest.exists() and dest.stat().st_size > 0:
                 return True
         except Exception:
             pass
-        if IS_WINDOWS:
-            try:
-                r = subprocess.run(
-                    ["cmd", "/c", "copy", "/B", "/Y", str(src), str(dest)],
-                    capture_output=True, timeout=30,
-                )
-                if r.returncode == 0 and dest.is_file() and dest.stat().st_size > 0:
-                    return True
-            except Exception:
-                pass
+        
+        # Strategy 3: robocopy (handles WOF compression)
+        if self._copy_with_robocopy(src, dest):
+            return True
+        
+        # Strategy 4: cmd /c copy (handles some locked files)
+        try:
+            r = subprocess.run(
+                ["cmd", "/c", "copy", "/B", "/Y", str(src), str(dest)],
+                capture_output=True, timeout=30,
+            )
+            if r.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
+                return True
+        except Exception:
+            pass
+        
+        # Strategy 5: PowerShell Copy-Item (sometimes works for reparse points)
+        try:
+            ps_cmd = f'Copy-Item -Path "{src}" -Destination "{dest}" -Force'
+            r = subprocess.run(
+                ["powershell", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
+                capture_output=True, timeout=30,
+            )
+            if r.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
+                return True
+        except Exception:
+            pass
+        
         return False
 
     def _run_cmd(self, cmd: list[str], timeout: int = 30) -> str:
@@ -1978,6 +2148,8 @@ class ExternalDiskCollector(Collector):
         print("  [*] Prefetch Files")
         pf_dir = win_dir / "Prefetch"
         count = 0
+        success_count = 0
+        error_count = 0
         try:
             pf_files = sorted(pf_dir.glob("*.pf")) if pf_dir.exists() else []
         except Exception as exc:
@@ -1986,14 +2158,34 @@ class ExternalDiskCollector(Collector):
         for p in pf_files:
             if count >= 500:
                 break
+            count += 1
             try:
                 if p.stat().st_size == 0:
                     continue
                 tmp = self.staging / f"pf_{p.name}"
                 if self._stage_file(p, tmp) and self._add(tmp, f"prefetch/{p.name}"):
-                    count += 1
+                    success_count += 1
+                else:
+                    error_count += 1
+                    if self.verbose and error_count <= 5:
+                        self._log(f"Prefetch copy failed: {p.name} (may be WOF-compressed)")
+            except PermissionError:
+                error_count += 1
+                if error_count <= 3:
+                    self._warn(f"Prefetch {p.name}: Permission denied")
+            except OSError as exc:
+                error_count += 1
+                if exc.errno == 22 and error_count <= 3:
+                    self._log(f"Prefetch {p.name}: Invalid argument (WOF compression)")
             except Exception as exc:
-                self._warn(f"Prefetch {p.name}: {exc}")
+                error_count += 1
+                if error_count <= 3:
+                    self._warn(f"Prefetch {p.name}: {exc}")
+        
+        if error_count > 0 and success_count == 0:
+            self._warn(f"Prefetch: {error_count} files failed - may be WOF-compressed (Windows 10+)")
+        elif error_count > success_count * 2:
+            self._log(f"Prefetch: {success_count}/{count} succeeded, {error_count} failed (WOF compression likely)")
 
     def _lnk_from(self, users_dir: Path) -> None:
         print("  [*] LNK / Recent Items")
@@ -2020,6 +2212,7 @@ class ExternalDiskCollector(Collector):
             ("vivaldi", "AppData/Local/Vivaldi/User Data/Default"),
         ]
         DB_FILES = ["History", "Web Data", "Cookies", "Login Data", "Bookmarks"]
+        error_count = 0
 
         for user_dir in (sorted(users_dir.iterdir()) if users_dir.exists() else []):
             if not user_dir.is_dir():
@@ -2027,10 +2220,21 @@ class ExternalDiskCollector(Collector):
             for browser, rel in PROFILES:
                 profile_dir = user_dir / Path(rel.replace("/", os.sep))
                 for db in DB_FILES:
-                    self._add(
-                        profile_dir / db,
-                        f"browser/{browser}/{user_dir.name}/{db}",
-                    )
+                    src = profile_dir / db
+                    try:
+                        if not src.exists() or not src.is_file():
+                            continue
+                        if src.stat().st_size == 0:
+                            continue
+                        tmp = self.staging / f"browser_{user_dir.name}_{browser}_{db}"
+                        if self._copy_locked(src, tmp):
+                            self._add(tmp, f"browser/{browser}/{user_dir.name}/{db}")
+                        else:
+                            error_count += 1
+                            if self.verbose and error_count <= 3:
+                                self._log(f"Browser {browser}/{db}: copy failed (file locked?)")
+                    except Exception:
+                        error_count += 1
             # Firefox
             ff_profiles = (
                 user_dir / "AppData" / "Roaming" / "Mozilla" / "Firefox" / "Profiles"
@@ -2040,15 +2244,21 @@ class ExternalDiskCollector(Collector):
                     if not prof.is_dir():
                         continue
                     for db in ("places.sqlite", "cookies.sqlite", "logins.json", "formhistory.sqlite"):
-                        self._add(
-                            prof / db,
-                            f"browser/firefox/{user_dir.name}/{prof.name}/{db}",
-                        )
+                        src = prof / db
+                        try:
+                            if not src.exists() or not src.is_file():
+                                continue
+                            tmp = self.staging / f"ff_{user_dir.name}_{prof.name}_{db}"
+                            if self._copy_locked(src, tmp):
+                                self._add(tmp, f"browser/firefox/{user_dir.name}/{prof.name}/{db}")
+                        except Exception:
+                            pass
 
     def _tasks_from(self, win_dir: Path) -> None:
         print("  [*] Scheduled Tasks")
         tasks_dir = win_dir / "System32" / "Tasks"
         count = 0
+        error_count = 0
         try:
             task_files = list(tasks_dir.rglob("*")) if tasks_dir.exists() else []
         except Exception as exc:
@@ -2062,17 +2272,46 @@ class ExternalDiskCollector(Collector):
                     rel = str(p.relative_to(tasks_dir)).replace("\\", "/")
                     if self._add(p, f"scheduled_tasks/{rel}"):
                         count += 1
+            except PermissionError:
+                error_count += 1
+                if error_count <= 3:
+                    self._log(f"Task {p.name}: Permission denied (reparse point?)")
+            except OSError as exc:
+                error_count += 1
+                if exc.errno == 22 and error_count <= 3:
+                    self._log(f"Task {p.name}: Invalid argument (reparse point/junction)")
             except Exception as exc:
-                self._warn(f"Task {p.name}: {exc}")
+                error_count += 1
+                if error_count <= 3:
+                    self._warn(f"Task {p.name}: {exc}")
+        
+        if error_count > 0:
+            self._log(f"Scheduled tasks: {error_count} files inaccessible (reparse points common in System32\\Tasks)")
 
     def _mft_from(self, root: Path) -> None:
         """Copy $MFT directly from the NTFS mount point root."""
         print("  [*] Master File Table ($MFT)")
         mft = root / "$MFT"
-        if mft.exists():
-            self._add(mft, "mft/C_$MFT")
-        else:
-            self._warn("$MFT not found at filesystem root (may require elevated access)")
+        if not mft.exists():
+            self._warn("$MFT not found - requires raw volume access (\\\\.\\C:) in dead-box mode")
+            return
+        try:
+            if mft.stat().st_size == 0:
+                return
+            tmp = self.staging / "mft_$MFT"
+            if self._stage_file(mft, tmp):
+                self._add(tmp, "mft/C_$MFT")
+            else:
+                self._warn("$MFT copy failed - file may be locked or requires raw volume handle")
+        except PermissionError:
+            self._warn("$MFT: Permission denied - run as Administrator or use raw device mode (--disk)")
+        except OSError as exc:
+            if exc.errno == 22:
+                self._warn("$MFT: Invalid argument - NTFS metadata inaccessible in directory mount mode")
+            else:
+                self._warn(f"$MFT: OSError - {exc}")
+        except Exception as exc:
+            self._warn(f"$MFT: Error - {exc}")
 
     def _pe_from(self, win_dir: Path, users_dir: Path) -> None:
         print("  [*] PE / Executable Binaries")
@@ -2274,7 +2513,25 @@ class ExternalDiskCollector(Collector):
     def _filesystem_from(self, root: Path) -> None:
         print("  [*] NTFS Metadata ($MFT, $LogFile, $Boot)")
         for name in ["$MFT", "$LogFile", "$Boot"]:
-            self._add(root / name, f"filesystem/{name}")
+            src = root / name
+            if not src.exists():
+                self._warn(f"NTFS metadata {name} not accessible in directory mount mode - requires raw volume handle (\\\\.\\C:)")
+                continue
+            try:
+                if src.stat().st_size == 0:
+                    continue
+                tmp = self.staging / f"fs_{name.replace('$', '')}"
+                if self._stage_file(src, tmp):
+                    self._add(tmp, f"filesystem/{name}")
+            except PermissionError:
+                self._warn(f"Permission denied reading {name} - requires Administrator or raw volume access")
+            except OSError as exc:
+                if exc.errno == 22:
+                    self._warn(f"Invalid argument reading {name} - file system limitation in directory mount mode")
+                else:
+                    self._warn(f"Error reading {name}: {exc}")
+            except Exception as exc:
+                self._warn(f"Error reading {name}: {exc}")
 
     def _boot_uefi_from(self, win_dir: Path) -> None:
         print("  [*] Boot Config (BCD, EFI)")
@@ -2685,6 +2942,10 @@ def main() -> None:
     parser.add_argument("--dry-run",   action="store_true")
     parser.add_argument("--verbose",   "-v", action="store_true")
     parser.add_argument(
+        "--skip-problematic", action="store_true",
+        help="Skip artifact categories known to fail in dead-box directory mode",
+    )
+    parser.add_argument(
         "--path", type=str, default=None,
         help="Already-mounted Windows filesystem root (e.g. /mnt/evidence or E:\\)",
     )
@@ -2728,6 +2989,7 @@ def main() -> None:
     path_arg      = args.path or ""
     disk          = args.disk or ""
     bitlocker_key = args.bitlocker_key or ""
+    skip_problematic = args.skip_problematic
 
     # Live Windows: use ExternalDiskCollector(C:\) to get all 52 _from() methods
     _live_windows = IS_WINDOWS and not path_arg and not disk
@@ -2773,6 +3035,27 @@ def main() -> None:
     print(f"  Collecting forensic artifacts")
     print(f"{_HR}\n")
 
+    # Check for dead-box limitations and warn user
+    if path_arg or disk:
+        temp_coll = Collector.__new__(Collector)
+        temp_coll.collect = collect_set
+        temp_coll.verbose = args.verbose
+        limitations = temp_coll._check_deadbox_mode()
+        if limitations:
+            print(f"  ⚠  Dead-box directory mode detected")
+            print(f"     The following categories may fail or produce limited results:")
+            for cat, reason in limitations.items():
+                if args.skip_problematic and cat in collect_set:
+                    print(f"       • {cat:<20} - SKIPPED ({reason[:50]}...)")
+                else:
+                    print(f"       • {cat:<20} ({reason[:50]}...)")
+            print()
+            
+            if args.skip_problematic:
+                # Remove problematic categories from collection set
+                collect_set = collect_set - set(limitations.keys())
+                print(f"     Adjusted collection set: {len(collect_set)} categories\n")
+
     external_root = path_arg or disk or ""
 
     if external_root:
@@ -2783,14 +3066,15 @@ def main() -> None:
             sys.exit(1)
         collector: Collector = ExternalDiskCollector(
             external_root, bitlocker_key=bitlocker_key,
-            output=output, collect=collect_set, verbose=args.verbose, dry_run=args.dry_run,
+            output=output, collect=collect_set, verbose=args.verbose, 
+            dry_run=args.dry_run, skip_problematic=skip_problematic,
         )
     elif IS_WINDOWS:
-        collector = WindowsCollector(output, collect_set, args.verbose, args.dry_run)
+        collector = WindowsCollector(output, collect_set, args.verbose, args.dry_run, skip_problematic)
     elif IS_MACOS:
-        collector = MacOSCollector(output, collect_set, args.verbose, args.dry_run)
+        collector = MacOSCollector(output, collect_set, args.verbose, args.dry_run, skip_problematic)
     elif IS_LINUX:
-        collector = LinuxCollector(output, collect_set, args.verbose, args.dry_run)
+        collector = LinuxCollector(output, collect_set, args.verbose, args.dry_run, skip_problematic)
     else:
         print(f"  Unsupported OS: {platform.system()}", file=sys.stderr)
         sys.exit(1)
