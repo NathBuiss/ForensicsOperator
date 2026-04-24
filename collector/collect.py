@@ -379,9 +379,63 @@ class Collector:
                     self._warn(f"Collection error in '{key}': {exc}")
 
     def _copy_locked(self, src: Path, dest: Path) -> bool:
-        """Copy a file that may be locked."""
+        """
+        Copy a file that may be locked (browser databases, Event Logs).
+        
+        Cross-platform: works on Windows, Linux, macOS.
+        On live Windows: uses robocopy for WOF compression.
+        On mounted drives: uses binary I/O to avoid timeouts.
+        """
         if not src.exists() or not src.is_file():
             return False
+        
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Method 1: Binary read/write (most reliable, cross-platform)
+        try:
+            with open(src, 'rb') as fsrc:
+                with open(dest, 'wb') as fdst:
+                    shutil.copyfileobj(fsrc, fdst, length=1024*1024)
+            if dest.exists() and dest.stat().st_size > 0:
+                return True
+        except Exception:
+            pass
+        
+        # Clean up
+        try:
+            if dest.exists() and dest.stat().st_size == 0:
+                dest.unlink()
+        except Exception:
+            pass
+        
+        # Windows: try robocopy for WOF (live Windows only, not mounted)
+        if IS_WINDOWS and not self._is_mounted_drive(src):
+            if self._copy_with_robocopy(src, dest):
+                return True
+            try:
+                if dest.exists() and dest.stat().st_size == 0:
+                    dest.unlink()
+            except Exception:
+                pass
+        
+        # Windows: cmd copy fallback
+        if IS_WINDOWS:
+            try:
+                r = subprocess.run(
+                    ["cmd", "/c", "copy", "/B", "/Y", str(src), str(dest)],
+                    capture_output=True, timeout=10,
+                )
+                if r.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
+                    return True
+            except Exception:
+                pass
+            
+            try:
+                dest.unlink(missing_ok=True)
+            except Exception:
+                pass
+        
+        return False
         
         dest.parent.mkdir(parents=True, exist_ok=True)
         
@@ -416,142 +470,136 @@ class Collector:
         
         # Clean up
         try:
-            if dest.exists() and dest.stat().st_size == 0:
-                dest.unlink()
-        except Exception:
-            pass
-        
-        # Try robocopy (handles WOF compression) - don't capture to avoid deadlock
-        try:
-            r = subprocess.run(
-                ["robocopy", str(src.parent), str(dest.parent), str(src.name), 
-                 "/NJH", "/NJS", "/NDL", "/NFL", "/R:0", "/W:0"],
-                timeout=60,
-            )
-            if r.returncode <= 7 and dest.exists() and dest.stat().st_size > 0:
-                return True
-        except Exception:
-            pass
-        
-        # Final cleanup
-        try:
             dest.unlink(missing_ok=True)
         except Exception:
             pass
         
         return False
 
-    def _is_reparse_point(self, path: Path) -> bool:
-        """Check if a path is a reparse point (junction/symlink)."""
+    def _is_mounted_drive(self, path: Path) -> bool:
+        """
+        Detect if path is a mounted drive (dead-box) vs live Windows.
+        Returns True for mounted drives where robocopy causes timeouts.
+        """
         if not IS_WINDOWS:
+            return True  # Non-Windows is always mounted
+        
+        # Extract drive letter
+        drive = str(path)[:2].upper()
+        if len(drive) != 2 or drive[1] != ':':
+            return True  # Not a drive letter path
+        
+        # C: is always live (system drive)
+        if drive == "C:":
             return False
+        
+        # Check drive type - NETWORK/UNKNOWN = mounted
         try:
             import ctypes
-            attrs = ctypes.windll.kernel32.GetFileAttributesW(str(path))
-            if attrs == -1:
-                return False
-            return bool(attrs & 0x0400)  # FILE_ATTRIBUTE_REPARSE_POINT
+            drive_type = ctypes.windll.kernel32.GetDriveTypeW(f"{drive}\\")
+            # DRIVE_REMOTE = 4 (network), DRIVE_NO_ROOT_DIR = 0 (invalid)
+            # DRIVE_FIXED = 3 (local hard drive)
+            if drive_type in (0, 4):
+                return True  # Network/invalid = mounted
         except Exception:
-            return False
-
-    def _resolve_long_path(self, path: Path) -> str:
-        r"""Convert to UNC path (\\?\) to bypass MAX_PATH limitation."""
-        if not IS_WINDOWS:
-            return str(path)
-        path_str = str(path)
-        if not path_str.startswith("\\\\?\\") and not path_str.startswith("\\\\"):
-            return "\\\\?\\" + path_str
-        return path_str
+            # If we can't check, assume non-C: drives are mounted
+            return True
+        
+        # For fixed drives other than C:, check if it's the system drive
+        sys_drive = os.environ.get("SystemDrive", "C:").upper()
+        return drive != sys_drive
 
     def _copy_with_robocopy(self, src: Path, dest: Path) -> bool:
-        """Use robocopy which handles WOF compression better."""
+        """
+        Use robocopy for WOF-compressed files (Windows 10+ Prefetch).
+        ONLY used on live Windows - skipped for mounted drives (causes timeouts).
+        """
         if not IS_WINDOWS or not src.exists():
             return False
+        
+        # Skip robocopy for mounted drives (causes semaphore timeouts)
+        if self._is_mounted_drive(src):
+            self._log(f"Skipping robocopy for mounted drive: {src.name}")
+            return False
+        
         try:
-            # Don't capture output - prevents pipe buffer deadlock on Windows
-            # Use longer timeout for large files
             r = subprocess.run(
                 ["robocopy", str(src.parent), str(dest.parent), str(src.name), 
                  "/NJH", "/NJS", "/NDL", "/NFL", "/BYTES", "/R:0", "/W:0"],
-                timeout=60,  # 60 seconds for large compressed files
+                capture_output=True, timeout=30,
             )
+            # robocopy returns 0-7 for success, 8+ for errors
             return r.returncode <= 7 and dest.exists() and dest.stat().st_size > 0
         except Exception:
             return False
 
     def _stage_file(self, src: Path, dest: Path) -> bool:
         """
-        Copy src to dest for staging with multiple fallback strategies.
+        Copy src to dest for staging with smart fallback strategy.
         
-        Handles:
-        - WOF (Windows Overlay File System) compressed files (Prefetch on Win10+)
-        - Reparse points / junctions
-        - Long paths (>260 chars) via UNC prefix
-        - Locked files via cmd copy
-        - NTFS metadata files ($MFT, $Boot) - these require raw volume access
-        
-        Returns True only when dest has non-zero content.
+        Cross-platform: works on Windows, Linux, macOS.
+        Handles WOF compression on live Windows, avoids timeouts on mounted drives.
         """
         if not src.exists() or not src.is_file():
             return False
         
         try:
-            if src.stat().st_size == 0:
+            src_size = src.stat().st_size
+            if src_size == 0:
                 return False
         except OSError:
             return False
         
         dest.parent.mkdir(parents=True, exist_ok=True)
         
-        # Strategy 1: Direct copy (works for most files)
+        # Method 1: Simple binary read/write (cross-platform, most reliable)
         try:
-            shutil.copy2(str(src), str(dest))
+            with open(src, 'rb') as fsrc:
+                with open(dest, 'wb') as fdst:
+                    shutil.copyfileobj(fsrc, fdst, length=1024*1024)  # 1MB chunks
             if dest.exists() and dest.stat().st_size > 0:
                 return True
-        except Exception:
-            pass
+        except (PermissionError, OSError) as exc:
+            self._log(f"read/write failed: {src.name} - {exc.errno if hasattr(exc, 'errno') else exc}")
+        except Exception as exc:
+            self._log(f"read/write failed: {src.name} - {exc}")
         
-        # Clean up failed copy
+        # Clean up partial copy
         try:
             if dest.exists() and dest.stat().st_size == 0:
                 dest.unlink()
         except Exception:
             pass
         
-        if not IS_WINDOWS:
-            return False
-        
-        # Strategy 2: cmd /c copy (handles some locked files)
-        # Don't capture_output - prevents pipe buffer deadlock on Windows
-        try:
-            r = subprocess.run(
-                ["cmd", "/c", "copy", "/B", "/Y", str(src), str(dest)],
-                timeout=30,
-            )
-            if r.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
+        # Windows-only: try robocopy for WOF compression (live Windows only)
+        if IS_WINDOWS and not self._is_mounted_drive(src):
+            if self._copy_with_robocopy(src, dest):
                 return True
-        except Exception:
-            pass
+            # Clean up failed robocopy attempt
+            try:
+                if dest.exists() and dest.stat().st_size == 0:
+                    dest.unlink()
+            except Exception:
+                pass
         
-        # Clean up
-        try:
-            if dest.exists() and dest.stat().st_size == 0:
-                dest.unlink()
-        except Exception:
-            pass
-        
-        # Strategy 3: robocopy (handles WOF compression)
-        # Don't capture_output - prevents pipe buffer deadlock on Windows
-        try:
-            r = subprocess.run(
-                ["robocopy", str(src.parent), str(dest.parent), str(src.name), 
-                 "/NJH", "/NJS", "/NDL", "/NFL", "/BYTES", "/R:0", "/W:0"],
-                timeout=60,
-            )
-            if r.returncode <= 7 and dest.exists() and dest.stat().st_size > 0:
-                return True
-        except Exception:
-            pass
+        # Windows-only: cmd /c copy fallback for locked files
+        if IS_WINDOWS:
+            try:
+                r = subprocess.run(
+                    ["cmd", "/c", "copy", "/B", "/Y", str(src), str(dest)],
+                    capture_output=True, timeout=10,
+                )
+                if r.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
+                    return True
+            except Exception:
+                pass
+            
+            # Clean up
+            try:
+                if dest.exists() and dest.stat().st_size == 0:
+                    dest.unlink()
+            except Exception:
+                pass
         
         return False
 
