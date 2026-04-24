@@ -379,45 +379,63 @@ class Collector:
                     self._warn(f"Collection error in '{key}': {exc}")
 
     def _copy_locked(self, src: Path, dest: Path) -> bool:
-        """
-        Copy a file that may be locked by another process.
-        Tries multiple strategies in order of preference.
-        """
+        """Copy a file that may be locked."""
         if not src.exists() or not src.is_file():
             return False
         
         dest.parent.mkdir(parents=True, exist_ok=True)
         
-        # Strategy 1: Direct copy (works if file is not locked)
+        # Try direct copy first
         try:
             shutil.copy2(str(src), str(dest))
             if dest.exists() and dest.stat().st_size > 0:
                 return True
-        except (PermissionError, OSError):
+        except Exception:
+            pass
+        
+        # Clean up partial copy
+        try:
+            if dest.exists() and dest.stat().st_size == 0:
+                dest.unlink()
+        except Exception:
             pass
         
         if not IS_WINDOWS:
             return False
         
-        # Strategy 2: cmd /c copy (bypasses some file locks)
+        # Try cmd copy (handles some locked files) - don't capture to avoid deadlock
         try:
             r = subprocess.run(
                 ["cmd", "/c", "copy", "/B", "/Y", str(src), str(dest)],
-                capture_output=True, timeout=30,
+                timeout=30,
             )
             if r.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
                 return True
         except Exception:
             pass
         
-        # Strategy 3: robocopy (handles more locked files)
+        # Clean up
+        try:
+            if dest.exists() and dest.stat().st_size == 0:
+                dest.unlink()
+        except Exception:
+            pass
+        
+        # Try robocopy (handles WOF compression) - don't capture to avoid deadlock
         try:
             r = subprocess.run(
-                ["robocopy", str(src.parent), str(dest.parent), str(src.name), "/NJH", "/NJS", "/NDL", "/NFL"],
-                capture_output=True, timeout=60,
+                ["robocopy", str(src.parent), str(dest.parent), str(src.name), 
+                 "/NJH", "/NJS", "/NDL", "/NFL", "/R:0", "/W:0"],
+                timeout=60,
             )
-            if r.returncode in (0, 1) and dest.exists() and dest.stat().st_size > 0:
+            if r.returncode <= 7 and dest.exists() and dest.stat().st_size > 0:
                 return True
+        except Exception:
+            pass
+        
+        # Final cleanup
+        try:
+            dest.unlink(missing_ok=True)
         except Exception:
             pass
         
@@ -446,13 +464,18 @@ class Collector:
         return path_str
 
     def _copy_with_robocopy(self, src: Path, dest: Path) -> bool:
-        """Use robocopy which handles WOF compression and reparse points better."""
+        """Use robocopy which handles WOF compression better."""
+        if not IS_WINDOWS or not src.exists():
+            return False
         try:
+            # Don't capture output - prevents pipe buffer deadlock on Windows
+            # Use longer timeout for large files
             r = subprocess.run(
-                ["robocopy", str(src.parent), str(dest.parent), str(src.name), "/NJH", "/NJS", "/NDL", "/NFL"],
-                capture_output=True, timeout=60,
+                ["robocopy", str(src.parent), str(dest.parent), str(src.name), 
+                 "/NJH", "/NJS", "/NDL", "/NFL", "/BYTES", "/R:0", "/W:0"],
+                timeout=60,  # 60 seconds for large compressed files
             )
-            return r.returncode in (0, 1) and dest.exists() and dest.stat().st_size > 0
+            return r.returncode <= 7 and dest.exists() and dest.stat().st_size > 0
         except Exception:
             return False
 
@@ -469,19 +492,13 @@ class Collector:
         
         Returns True only when dest has non-zero content.
         """
-        if not src.exists():
+        if not src.exists() or not src.is_file():
             return False
         
-        if not src.is_file():
-            return False
-        
-        src_size = 0
         try:
-            src_size = src.stat().st_size
+            if src.stat().st_size == 0:
+                return False
         except OSError:
-            pass
-        
-        if src_size == 0:
             return False
         
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -491,52 +508,47 @@ class Collector:
             shutil.copy2(str(src), str(dest))
             if dest.exists() and dest.stat().st_size > 0:
                 return True
-        except PermissionError as exc:
-            self._log(f"Permission denied (direct): {src} - {exc}")
-        except OSError as exc:
-            if exc.errno == 22:  # Invalid argument - often WOF or reparse point
-                self._log(f"Invalid argument (WOF/reparse): {src}")
-            else:
-                self._log(f"OSError (direct): {src} - {exc}")
-        except Exception as exc:
-            self._log(f"Copy failed (direct): {src} - {exc}")
+        except Exception:
+            pass
+        
+        # Clean up failed copy
+        try:
+            if dest.exists() and dest.stat().st_size == 0:
+                dest.unlink()
+        except Exception:
+            pass
         
         if not IS_WINDOWS:
             return False
         
-        # Strategy 2: UNC long path prefix (bypass MAX_PATH)
+        # Strategy 2: cmd /c copy (handles some locked files)
+        # Don't capture_output - prevents pipe buffer deadlock on Windows
         try:
-            src_unc = self._resolve_long_path(src)
-            dest_unc = self._resolve_long_path(dest)
-            shutil.copy2(src_unc, dest_unc)
-            if dest.exists() and dest.stat().st_size > 0:
+            r = subprocess.run(
+                ["cmd", "/c", "copy", "/B", "/Y", str(src), str(dest)],
+                timeout=30,
+            )
+            if r.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
                 return True
+        except Exception:
+            pass
+        
+        # Clean up
+        try:
+            if dest.exists() and dest.stat().st_size == 0:
+                dest.unlink()
         except Exception:
             pass
         
         # Strategy 3: robocopy (handles WOF compression)
-        if self._copy_with_robocopy(src, dest):
-            return True
-        
-        # Strategy 4: cmd /c copy (handles some locked files)
+        # Don't capture_output - prevents pipe buffer deadlock on Windows
         try:
             r = subprocess.run(
-                ["cmd", "/c", "copy", "/B", "/Y", str(src), str(dest)],
-                capture_output=True, timeout=30,
+                ["robocopy", str(src.parent), str(dest.parent), str(src.name), 
+                 "/NJH", "/NJS", "/NDL", "/NFL", "/BYTES", "/R:0", "/W:0"],
+                timeout=60,
             )
-            if r.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
-                return True
-        except Exception:
-            pass
-        
-        # Strategy 5: PowerShell Copy-Item (sometimes works for reparse points)
-        try:
-            ps_cmd = f'Copy-Item -Path "{src}" -Destination "{dest}" -Force'
-            r = subprocess.run(
-                ["powershell", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
-                capture_output=True, timeout=30,
-            )
-            if r.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
+            if r.returncode <= 7 and dest.exists() and dest.stat().st_size > 0:
                 return True
         except Exception:
             pass
