@@ -45,6 +45,9 @@ INDEX_TEMPLATE = {
                 "user":           {"type": "object", "dynamic": True},
                 "process":        {"type": "object", "dynamic": True},
                 "network":        {"type": "object", "dynamic": True},
+                "http":           {"type": "object", "dynamic": True},
+                "error":          {"type": "object", "dynamic": True},
+                "access_log":     {"type": "object", "dynamic": True},
                 "mitre":          {"type": "object", "dynamic": True},
                 "evtx":           {"type": "object", "dynamic": True},
                 "prefetch":       {"type": "object", "dynamic": True},
@@ -111,6 +114,7 @@ def count_case_events(case_id: str) -> int:
 _SEARCH_FIELDS = [
     "message", "host.hostname", "user.name",
     "process.name", "process.cmdline", "process.args",
+    "network.src_ip", "http.request_path", "http.user_agent",
 ]
 
 
@@ -165,7 +169,7 @@ def search_events(
         "query": es_query,
         "from": page * size,
         "size": size,
-        "sort": [{sort_field: {"order": sort_order}}, {"_doc": {"order": "asc"}}],
+        "sort": [{sort_field: {"order": sort_order, "unmapped_type": "keyword", "missing": "_last"}}, {"_doc": {"order": "asc"}}],
         "_source": {
             "excludes": ["raw"]
         },

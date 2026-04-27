@@ -11,6 +11,7 @@ import tempfile
 import hashlib
 import uuid
 import zipfile as _zipfile
+import tarfile as _tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -185,6 +186,113 @@ def _expand_zip_into_child_jobs(
     return count
 
 
+def _is_fo_tar(path: Path) -> bool:
+    """Return True if the file is a TAR archive (including .tar.gz, .tgz, .tar.bz2)."""
+    try:
+        return _tarfile.is_tarfile(str(path))
+    except Exception:
+        return False
+
+
+def _expand_tar_into_child_jobs(
+    parent_job_id: str,
+    case_id: str,
+    tar_path: Path,
+    r: redis.Redis,
+    keep_raw: str = "0",
+) -> int:
+    """
+    Extract every file entry from a TAR archive and create individual child jobs.
+    Mirrors _expand_zip_into_child_jobs() for .tar.gz / .tgz / .tar.bz2 archives.
+    """
+    minio_client = get_minio()
+    count = 0
+
+    try:
+        tf = _tarfile.open(tar_path, "r:*")
+    except Exception as exc:
+        logger.error("[%s] Cannot open TAR archive: %s", parent_job_id, exc)
+        return 0
+
+    with tf:
+        for member in tf.getmembers():
+            if not member.isfile():
+                continue
+            entry_rel = member.name.replace("\\", "/").lstrip("/").rstrip("/")
+            base_name = entry_rel.split("/")[-1]
+
+            if not base_name or base_name.startswith("."):
+                continue
+            if base_name.lower() in _ZIP_SKIP_BASENAMES:
+                continue
+            if Path(base_name).suffix.lower() in _ZIP_SKIP_EXTS:
+                continue
+
+            child_id  = uuid.uuid4().hex
+            minio_key = f"cases/{case_id}/{child_id}/{entry_rel}"
+
+            now = datetime.now(timezone.utc).isoformat()
+            r.hset(f"job:{child_id}", mapping={
+                "job_id":            child_id,
+                "case_id":           case_id,
+                "status":            "UPLOADING",
+                "original_filename": entry_rel,
+                "minio_object_key":  minio_key,
+                "events_indexed":    "0",
+                "error":             "",
+                "plugin_used":       "",
+                "plugin_stats":      "{}",
+                "created_at":        now,
+                "started_at":        "",
+                "completed_at":      "",
+                "task_id":           "",
+                "source_zip":        tar_path.name,
+                "size_bytes":        str(member.size or 1),
+                "keep_raw":          keep_raw,
+            })
+            r.expire(f"job:{child_id}", JOB_TTL)
+            r.sadd(f"case:{case_id}:jobs", child_id)
+            r.expire(f"case:{case_id}:jobs", JOB_TTL)
+            r.zadd(f"case:{case_id}:jobs:zs", {child_id: time.time()})
+            r.expire(f"case:{case_id}:jobs:zs", JOB_TTL)
+
+            try:
+                fobj = tf.extractfile(member)
+                if fobj is None:
+                    raise ValueError("extractfile returned None (symlink or special file)")
+                data = fobj.read()
+                actual_size = len(data)
+                minio_client.put_object(
+                    MINIO_BUCKET, minio_key,
+                    _io.BytesIO(data), actual_size,
+                )
+                r.hset(f"job:{child_id}", mapping={
+                    "minio_object_key": minio_key,
+                    "size_bytes":       str(actual_size),
+                    "status":           "PENDING",
+                })
+            except Exception as exc:
+                logger.error(
+                    "[%s] Failed to extract/upload '%s' from TAR: %s",
+                    parent_job_id, entry_rel, exc,
+                )
+                r.hset(f"job:{child_id}", mapping={
+                    "status":       "FAILED",
+                    "error":        f"TAR extraction failed: {exc}",
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                })
+                continue
+
+            app.send_task(
+                "ingest.process_artifact",
+                args=[child_id, case_id, minio_key, entry_rel],
+                queue="ingest",
+            )
+            count += 1
+
+    return count
+
+
 @app.task(bind=True, name="ingest.process_artifact", queue="ingest")
 def process_artifact(
     self,
@@ -244,6 +352,19 @@ def process_artifact(
                               events_indexed="0",
                               completed_at=completed_at)
             logger.info("[%s] ZIP expanded into %d child jobs", job_id, child_count)
+            return {"status": "COMPLETED", "events_indexed": 0, "child_jobs": child_count}
+
+        if _is_fo_tar(local_file):
+            logger.info("[%s] TAR archive detected — expanding into child jobs", job_id)
+            keep_raw = r.hget(f"job:{job_id}", "keep_raw") or "0"
+            child_count = _expand_tar_into_child_jobs(job_id, case_id, local_file, r, keep_raw=keep_raw)
+            completed_at = datetime.now(timezone.utc).isoformat()
+            update_job_status(r, job_id,
+                              status="COMPLETED",
+                              plugin_used="archive (tar expanded)",
+                              events_indexed="0",
+                              completed_at=completed_at)
+            logger.info("[%s] TAR expanded into %d child jobs", job_id, child_count)
             return {"status": "COMPLETED", "events_indexed": 0, "child_jobs": child_count}
 
         # ── 3. Find matching plugin ───────────────────────────────────────────

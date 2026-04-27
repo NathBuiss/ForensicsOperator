@@ -31,17 +31,22 @@ const LEVEL_COLORS = {
 
 // ── Column definitions ───────────────────────────────────────────────────────
 const ALL_COLUMNS = [
-  { id: 'timestamp', label: 'Timestamp', defaultOn: true },
-  { id: 'type',      label: 'Type',      defaultOn: true },
-  { id: 'level',     label: 'Level',     defaultOn: true },
-  { id: 'event_id',  label: 'Event ID',  defaultOn: true },
-  { id: 'host',      label: 'Host',      defaultOn: true },
-  { id: 'user',      label: 'User',      defaultOn: true },
-  { id: 'process',   label: 'Process',   defaultOn: false },
-  { id: 'channel',   label: 'Channel',   defaultOn: false },
-  { id: 'rule',      label: 'Rule',      defaultOn: false },
-  { id: 'message',   label: 'Message',   defaultOn: true },
-  { id: 'tags',      label: 'Tags',      defaultOn: true },
+  { id: 'timestamp',   label: 'Timestamp',   defaultOn: true  },
+  { id: 'type',        label: 'Type',        defaultOn: true  },
+  { id: 'level',       label: 'Level',       defaultOn: true  },
+  { id: 'event_id',    label: 'Event ID',    defaultOn: true  },
+  { id: 'host',        label: 'Host',        defaultOn: true  },
+  { id: 'user',        label: 'User',        defaultOn: true  },
+  { id: 'process',     label: 'Process',     defaultOn: false },
+  { id: 'src_ip',      label: 'Src IP',      defaultOn: false },
+  { id: 'http_method', label: 'Method',      defaultOn: false },
+  { id: 'http_status', label: 'Status',      defaultOn: false },
+  { id: 'http_path',   label: 'Path',        defaultOn: false },
+  { id: 'mitre',       label: 'MITRE',       defaultOn: false },
+  { id: 'channel',     label: 'Channel',     defaultOn: false },
+  { id: 'rule',        label: 'Rule',        defaultOn: false },
+  { id: 'message',     label: 'Message',     defaultOn: true  },
+  { id: 'tags',        label: 'Tags',        defaultOn: true  },
 ]
 
 const DEFAULT_COLUMNS = ALL_COLUMNS.filter(c => c.defaultOn).map(c => c.id)
@@ -90,10 +95,38 @@ function deduplicateEvents(events) {
 
 // Map column IDs → ES sort field names
 const SORT_ES_FIELDS = {
-  timestamp: 'timestamp',
-  type:      'artifact_type',
-  host:      'host.hostname.keyword',
-  user:      'user.name.keyword',
+  timestamp:   'timestamp',
+  type:        'artifact_type',
+  host:        'host.hostname.keyword',
+  user:        'user.name.keyword',
+  src_ip:      'network.src_ip.keyword',
+  http_status: 'http.status_code',
+}
+
+// Columns eligible for auto-detection (optional, data-driven)
+const AUTO_DETECT_COLS = ['process', 'src_ip', 'http_method', 'http_status', 'http_path', 'mitre', 'channel', 'rule']
+
+function getMitreValue(ev, art) {
+  const mitreTags = (ev.tags || []).filter(t =>
+    t.toLowerCase().startsWith('attack.') || /^t\d{4}/i.test(t)
+  )
+  if (mitreTags.length) return mitreTags.join(', ')
+  return art?.mitre_attack || ev.mitre_attack || ''
+}
+
+function getColValue(colId, ev) {
+  const art = getArtifact(ev)
+  switch (colId) {
+    case 'process':     return ev.process?.name || ev.process?.path || ''
+    case 'src_ip':      return ev.network?.src_ip || ''
+    case 'http_method': return ev.http?.method || ''
+    case 'http_status': return ev.http?.status_code ? String(ev.http.status_code) : ''
+    case 'http_path':   return ev.http?.request_path || ''
+    case 'mitre':       return getMitreValue(ev, art)
+    case 'channel':     return art.channel || ev.channel || ''
+    case 'rule':        return art.rule_title || ev.rule_title || ''
+    default:            return ''
+  }
 }
 
 export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
@@ -136,14 +169,30 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
   const [sortField, setSortField]           = useState('timestamp')
   const [sortOrder, setSortOrder]           = useState('desc')
 
-  const loaderRef = useRef(null)
-  const searchRef = useRef(null)
-  const rowRefs   = useRef({})
+  const loaderRef       = useRef(null)
+  const searchRef       = useRef(null)
+  const rowRefs         = useRef({})
+  const autoDetectedRef = useRef(false)
 
   // Load saved searches on mount
   useEffect(() => {
     api.savedSearches.list(caseId).then(r => setSavedSearches(r.searches || [])).catch(() => {})
   }, [caseId])
+
+  // Auto-detect optional columns from first event batch (only when no saved prefs)
+  useEffect(() => {
+    if (autoDetectedRef.current || events.length === 0) return
+    autoDetectedRef.current = true
+    if (localStorage.getItem(LS_KEY)) return  // user has saved custom cols, skip
+    const detected = AUTO_DETECT_COLS.filter(colId => events.some(ev => getColValue(colId, ev)))
+    if (detected.length > 0) {
+      setVisibleCols(prev => {
+        const next = [...new Set([...prev, ...detected])]
+        localStorage.setItem(LS_KEY, JSON.stringify(next))
+        return next
+      })
+    }
+  }, [events])
 
   // Refresh facets whenever query, facetFilters, or selectedType changes
   useEffect(() => {
@@ -761,10 +810,26 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
                       </label>
                     ))}
                   </div>
-                  <div className="mt-2 pt-2 border-t border-gray-100">
+                  <div className="mt-2 pt-2 border-t border-gray-100 flex flex-col gap-1">
+                    <button
+                      onClick={() => {
+                        const detected = AUTO_DETECT_COLS.filter(colId => events.some(ev => getColValue(colId, ev)))
+                        if (detected.length > 0) {
+                          setVisibleCols(prev => {
+                            const next = [...new Set([...prev, ...detected])]
+                            localStorage.setItem(LS_KEY, JSON.stringify(next))
+                            return next
+                          })
+                        }
+                      }}
+                      className="text-[10px] text-indigo-500 hover:underline text-left"
+                      title="Enable columns that have data in the current events"
+                    >
+                      Auto-detect from events
+                    </button>
                     <button
                       onClick={resetCols}
-                      className="text-[10px] text-brand-accent hover:underline"
+                      className="text-[10px] text-brand-accent hover:underline text-left"
                     >
                       Reset to defaults
                     </button>
@@ -940,6 +1005,21 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
                 )}
                 {vis('process') && (
                   <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-28">Process</th>
+                )}
+                {vis('src_ip') && (
+                  <SortableTh colId="src_ip" label="Src IP" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-32" />
+                )}
+                {vis('http_method') && (
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-20">Method</th>
+                )}
+                {vis('http_status') && (
+                  <SortableTh colId="http_status" label="Status" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-16" />
+                )}
+                {vis('http_path') && (
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-48">Path</th>
+                )}
+                {vis('mitre') && (
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-36">MITRE</th>
                 )}
                 {vis('channel') && (
                   <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-28">Channel</th>
@@ -1237,13 +1317,18 @@ function EventRow({ event, index, onSelect, selected, keyboardSelected, onFilter
   const color = ARTIFACT_COLORS[type] || ARTIFACT_COLORS.generic
 
   // Resolve per-column values (check artifact sub-doc first, then top-level)
-  const level    = String(art.level || event.level || '').toLowerCase()
-  const eventId  = art.event_id != null ? String(art.event_id) : ''
-  const host     = event.host?.hostname || ''
-  const user     = event.user?.name || ''
-  const process  = event.process?.name || event.process?.path?.split(/[\\/]/).pop() || ''
-  const channel  = art.channel  || event.channel  || ''
-  const rule     = art.rule_title || event.rule_title || ''
+  const level      = String(art.level || event.level || '').toLowerCase()
+  const eventId    = art.event_id != null ? String(art.event_id) : ''
+  const host       = event.host?.hostname || ''
+  const user       = event.user?.name || ''
+  const process    = event.process?.name || event.process?.path?.split(/[\\/]/).pop() || ''
+  const srcIp      = event.network?.src_ip || ''
+  const httpMethod = event.http?.method || ''
+  const httpStatus = event.http?.status_code ? String(event.http.status_code) : ''
+  const httpPath   = event.http?.request_path || ''
+  const mitre      = getMitreValue(event, art)
+  const channel    = art.channel  || event.channel  || ''
+  const rule       = art.rule_title || event.rule_title || ''
 
   async function handleFlag(e) {
     e.stopPropagation()
@@ -1359,6 +1444,71 @@ function EventRow({ event, index, onSelect, selected, keyboardSelected, onFilter
             <span className="truncate">{process}</span>
             {process && <FilterButtons field="process.name" value={process} onIn={onFilterIn} onOut={onFilterOut} />}
           </div>
+        </td>
+      )}
+
+      {vis('src_ip') && (
+        <td className="px-3 py-2 text-gray-500 font-mono max-w-[8rem]">
+          <div className="flex items-center">
+            <span className="truncate">{srcIp}</span>
+            {srcIp && <FilterButtons field="network.src_ip" value={srcIp} onIn={onFilterIn} onOut={onFilterOut} />}
+          </div>
+        </td>
+      )}
+
+      {vis('http_method') && (
+        <td className="px-3 py-2">
+          {httpMethod && (
+            <span className={`badge text-[10px] px-1.5 py-0.5 font-mono font-semibold ${
+              httpMethod === 'GET'                        ? 'bg-green-100 text-green-700' :
+              httpMethod === 'POST'                       ? 'bg-blue-100 text-blue-700'  :
+              httpMethod === 'DELETE'                     ? 'bg-red-100 text-red-700'    :
+              httpMethod === 'PUT' || httpMethod === 'PATCH' ? 'bg-amber-100 text-amber-700' :
+              'bg-gray-100 text-gray-700'
+            }`}>{httpMethod}</span>
+          )}
+        </td>
+      )}
+
+      {vis('http_status') && (
+        <td className="px-3 py-2 font-mono font-semibold">
+          {httpStatus && (
+            <span className={
+              httpStatus.startsWith('2') ? 'text-green-600' :
+              httpStatus.startsWith('3') ? 'text-blue-500'  :
+              httpStatus.startsWith('4') ? 'text-amber-600' :
+              httpStatus.startsWith('5') ? 'text-red-600'   :
+              'text-gray-500'
+            }>{httpStatus}</span>
+          )}
+        </td>
+      )}
+
+      {vis('http_path') && (
+        <td className="px-3 py-2 text-gray-500 font-mono max-w-[12rem]">
+          <span className="truncate block text-[10px]" title={httpPath}>{httpPath}</span>
+        </td>
+      )}
+
+      {vis('mitre') && (
+        <td className="px-3 py-2 max-w-[9rem]">
+          {mitre && (
+            <div className="flex flex-wrap gap-0.5">
+              {mitre.split(', ').slice(0, 2).map(t => (
+                <button
+                  key={t}
+                  onClick={e => { e.stopPropagation(); onFilterIn('tags', t) }}
+                  className="text-[9px] px-1.5 py-0.5 rounded-full bg-orange-100 text-orange-700 hover:bg-orange-200 transition-colors font-medium flex-shrink-0 truncate max-w-[8rem]"
+                  title={t}
+                >
+                  {t}
+                </button>
+              ))}
+              {mitre.split(', ').length > 2 && (
+                <span className="text-[9px] text-gray-400">+{mitre.split(', ').length - 2}</span>
+              )}
+            </div>
+          )}
         </td>
       )}
 
