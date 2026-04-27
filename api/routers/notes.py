@@ -18,8 +18,8 @@ def get_notes(case_id: str):
     if not data:
         return {"body": "", "updated_at": None}
     return {
-        "body": data.get(b"body", b"").decode(),
-        "updated_at": data.get(b"updated_at", b"").decode() or None,
+        "body": data.get("body", ""),
+        "updated_at": data.get("updated_at") or None,
     }
 
 

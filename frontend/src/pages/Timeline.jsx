@@ -38,10 +38,19 @@ const ALL_COLUMNS = [
   { id: 'host',        label: 'Host',        defaultOn: true  },
   { id: 'user',        label: 'User',        defaultOn: true  },
   { id: 'process',     label: 'Process',     defaultOn: false },
+  { id: 'action',      label: 'Action',      defaultOn: false },
+  { id: 'protocol',    label: 'Protocol',    defaultOn: false },
   { id: 'src_ip',      label: 'Src IP',      defaultOn: false },
+  { id: 'src_port',    label: 'Src Port',    defaultOn: false },
+  { id: 'dst_ip',      label: 'Dst IP',      defaultOn: false },
+  { id: 'dst_port',    label: 'Dst Port',    defaultOn: false },
+  { id: 'run_count',   label: 'Run Count',   defaultOn: false },
+  { id: 'pid',         label: 'PID',         defaultOn: false },
   { id: 'http_method', label: 'Method',      defaultOn: false },
   { id: 'http_status', label: 'Status',      defaultOn: false },
   { id: 'http_path',   label: 'Path',        defaultOn: false },
+  { id: 'user_agent',  label: 'User Agent',  defaultOn: false },
+  { id: 'resp_size',   label: 'Resp Bytes',  defaultOn: false },
   { id: 'mitre',       label: 'MITRE',       defaultOn: false },
   { id: 'channel',     label: 'Channel',     defaultOn: false },
   { id: 'rule',        label: 'Rule',        defaultOn: false },
@@ -100,11 +109,21 @@ const SORT_ES_FIELDS = {
   host:        'host.hostname.keyword',
   user:        'user.name.keyword',
   src_ip:      'network.src_ip.keyword',
+  dst_ip:      'network.dst_ip.keyword',
+  src_port:    'network.src_port',
+  dst_port:    'network.dst_port',
   http_status: 'http.status_code',
+  resp_size:   'http.response_size',
+  run_count:   'prefetch.run_count',
 }
 
 // Columns eligible for auto-detection (optional, data-driven)
-const AUTO_DETECT_COLS = ['process', 'src_ip', 'http_method', 'http_status', 'http_path', 'mitre', 'channel', 'rule']
+const AUTO_DETECT_COLS = [
+  'process', 'pid', 'run_count',
+  'action', 'protocol', 'src_ip', 'src_port', 'dst_ip', 'dst_port',
+  'http_method', 'http_status', 'http_path', 'user_agent', 'resp_size',
+  'mitre', 'channel', 'rule',
+]
 
 function getMitreValue(ev, art) {
   const mitreTags = (ev.tags || []).filter(t =>
@@ -118,10 +137,19 @@ function getColValue(colId, ev) {
   const art = getArtifact(ev)
   switch (colId) {
     case 'process':     return ev.process?.name || ev.process?.path || ''
-    case 'src_ip':      return ev.network?.src_ip || ''
+    case 'pid':         return ev.process?.pid != null ? String(ev.process.pid) : ''
+    case 'run_count':   return art.run_count != null ? String(art.run_count) : ''
+    case 'action':      return ev.network?.action || art.action || ''
+    case 'protocol':    return ev.network?.protocol || art.protocol || ''
+    case 'src_ip':      return ev.network?.src_ip || art.src_ip || ''
+    case 'src_port':    return ev.network?.src_port != null ? String(ev.network.src_port) : (art.src_port != null ? String(art.src_port) : '')
+    case 'dst_ip':      return ev.network?.dst_ip || art.dst_ip || ''
+    case 'dst_port':    return ev.network?.dst_port != null ? String(ev.network.dst_port) : (art.dst_port != null ? String(art.dst_port) : '')
     case 'http_method': return ev.http?.method || ''
     case 'http_status': return ev.http?.status_code ? String(ev.http.status_code) : ''
     case 'http_path':   return ev.http?.request_path || ''
+    case 'user_agent':  return ev.http?.user_agent || ''
+    case 'resp_size':   return ev.http?.response_size != null ? String(ev.http.response_size) : ''
     case 'mitre':       return getMitreValue(ev, art)
     case 'channel':     return art.channel || ev.channel || ''
     case 'rule':        return art.rule_title || ev.rule_title || ''
@@ -169,29 +197,28 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
   const [sortField, setSortField]           = useState('timestamp')
   const [sortOrder, setSortOrder]           = useState('desc')
 
-  const loaderRef       = useRef(null)
-  const searchRef       = useRef(null)
-  const rowRefs         = useRef({})
-  const autoDetectedRef = useRef(false)
+  const loaderRef   = useRef(null)
+  const searchRef   = useRef(null)
+  const rowRefs     = useRef({})
 
   // Load saved searches on mount
   useEffect(() => {
     api.savedSearches.list(caseId).then(r => setSavedSearches(r.searches || [])).catch(() => {})
   }, [caseId])
 
-  // Auto-detect optional columns from first event batch (only when no saved prefs)
+  // Auto-detect optional columns whenever events change — only adds, never removes
   useEffect(() => {
-    if (autoDetectedRef.current || events.length === 0) return
-    autoDetectedRef.current = true
-    if (localStorage.getItem(LS_KEY)) return  // user has saved custom cols, skip
+    if (events.length === 0) return
     const detected = AUTO_DETECT_COLS.filter(colId => events.some(ev => getColValue(colId, ev)))
-    if (detected.length > 0) {
-      setVisibleCols(prev => {
-        const next = [...new Set([...prev, ...detected])]
-        localStorage.setItem(LS_KEY, JSON.stringify(next))
-        return next
-      })
-    }
+    if (detected.length === 0) return
+    setVisibleCols(prev => {
+      const prevSet = new Set(prev)
+      const added = detected.filter(c => !prevSet.has(c))
+      if (added.length === 0) return prev  // nothing new — skip re-render
+      const next = [...prev, ...added]
+      localStorage.setItem(LS_KEY, JSON.stringify(next))
+      return next
+    })
   }, [events])
 
   // Refresh facets whenever query, facetFilters, or selectedType changes
@@ -552,7 +579,11 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
                   <input
                     type="datetime-local"
                     value={fromTs ? fromTs.slice(0, 16) : ''}
-                    onChange={e => { setFromTs(e.target.value ? new Date(e.target.value).toISOString() : ''); setActivePreset(null) }}
+                    onChange={e => {
+                      if (!e.target.value) { setFromTs(''); setActivePreset(null); return }
+                      const d = new Date(e.target.value)
+                      if (!isNaN(d.getTime())) { setFromTs(d.toISOString()); setActivePreset(null) }
+                    }}
                     className="input w-full text-[10px] py-0.5 px-1.5"
                   />
                 </div>
@@ -561,7 +592,11 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
                   <input
                     type="datetime-local"
                     value={toTs ? toTs.slice(0, 16) : ''}
-                    onChange={e => setToTs(e.target.value ? new Date(e.target.value).toISOString() : '')}
+                    onChange={e => {
+                      if (!e.target.value) { setToTs(''); return }
+                      const d = new Date(e.target.value)
+                      if (!isNaN(d.getTime())) setToTs(d.toISOString())
+                    }}
                     className="input w-full text-[10px] py-0.5 px-1.5"
                   />
                 </div>
@@ -810,22 +845,34 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
                       </label>
                     ))}
                   </div>
-                  <div className="mt-2 pt-2 border-t border-gray-100 flex flex-col gap-1">
+                  <div className="mt-2 pt-2 border-t border-gray-100 flex flex-col gap-1.5">
+                    <p className="text-[9px] font-semibold text-gray-400 uppercase tracking-wider">Presets</p>
                     <button
                       onClick={() => {
-                        const detected = AUTO_DETECT_COLS.filter(colId => events.some(ev => getColValue(colId, ev)))
-                        if (detected.length > 0) {
-                          setVisibleCols(prev => {
-                            const next = [...new Set([...prev, ...detected])]
-                            localStorage.setItem(LS_KEY, JSON.stringify(next))
-                            return next
-                          })
-                        }
+                        const net = ['action','protocol','src_ip','src_port','dst_ip','dst_port']
+                        setVisibleCols(prev => { const next = [...new Set([...prev, ...net])]; localStorage.setItem(LS_KEY, JSON.stringify(next)); return next })
                       }}
-                      className="text-[10px] text-indigo-500 hover:underline text-left"
-                      title="Enable columns that have data in the current events"
+                      className="text-[10px] text-teal-600 hover:underline text-left"
                     >
-                      Auto-detect from events
+                      + Network columns
+                    </button>
+                    <button
+                      onClick={() => {
+                        const http = ['http_method','http_status','http_path','src_ip','user_agent','resp_size']
+                        setVisibleCols(prev => { const next = [...new Set([...prev, ...http])]; localStorage.setItem(LS_KEY, JSON.stringify(next)); return next })
+                      }}
+                      className="text-[10px] text-blue-600 hover:underline text-left"
+                    >
+                      + HTTP columns
+                    </button>
+                    <button
+                      onClick={() => {
+                        const pf = ['process','run_count','pid']
+                        setVisibleCols(prev => { const next = [...new Set([...prev, ...pf])]; localStorage.setItem(LS_KEY, JSON.stringify(next)); return next })
+                      }}
+                      className="text-[10px] text-amber-600 hover:underline text-left"
+                    >
+                      + Process columns
                     </button>
                     <button
                       onClick={resetCols}
@@ -1006,8 +1053,29 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
                 {vis('process') && (
                   <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-28">Process</th>
                 )}
+                {vis('action') && (
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-20">Action</th>
+                )}
+                {vis('protocol') && (
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-20">Proto</th>
+                )}
                 {vis('src_ip') && (
                   <SortableTh colId="src_ip" label="Src IP" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-32" />
+                )}
+                {vis('src_port') && (
+                  <SortableTh colId="src_port" label="S.Port" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-16" />
+                )}
+                {vis('dst_ip') && (
+                  <SortableTh colId="dst_ip" label="Dst IP" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-32" />
+                )}
+                {vis('dst_port') && (
+                  <SortableTh colId="dst_port" label="D.Port" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-16" />
+                )}
+                {vis('run_count') && (
+                  <SortableTh colId="run_count" label="Runs" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-14" />
+                )}
+                {vis('pid') && (
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-16">PID</th>
                 )}
                 {vis('http_method') && (
                   <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-20">Method</th>
@@ -1017,6 +1085,12 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
                 )}
                 {vis('http_path') && (
                   <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-48">Path</th>
+                )}
+                {vis('user_agent') && (
+                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-48">User Agent</th>
+                )}
+                {vis('resp_size') && (
+                  <SortableTh colId="resp_size" label="Bytes" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-16" />
                 )}
                 {vis('mitre') && (
                   <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-36">MITRE</th>
@@ -1322,10 +1396,19 @@ function EventRow({ event, index, onSelect, selected, keyboardSelected, onFilter
   const host       = event.host?.hostname || ''
   const user       = event.user?.name || ''
   const process    = event.process?.name || event.process?.path?.split(/[\\/]/).pop() || ''
-  const srcIp      = event.network?.src_ip || ''
+  const pid        = event.process?.pid != null ? String(event.process.pid) : ''
+  const runCount   = art.run_count != null ? String(art.run_count) : ''
+  const action     = event.network?.action || art.action || ''
+  const protocol   = event.network?.protocol || art.protocol || ''
+  const srcIp      = event.network?.src_ip || art.src_ip || ''
+  const srcPort    = event.network?.src_port != null ? String(event.network.src_port) : (art.src_port != null ? String(art.src_port) : '')
+  const dstIp      = event.network?.dst_ip || art.dst_ip || ''
+  const dstPort    = event.network?.dst_port != null ? String(event.network.dst_port) : (art.dst_port != null ? String(art.dst_port) : '')
   const httpMethod = event.http?.method || ''
   const httpStatus = event.http?.status_code ? String(event.http.status_code) : ''
   const httpPath   = event.http?.request_path || ''
+  const userAgent  = event.http?.user_agent || ''
+  const respSize   = event.http?.response_size != null ? String(event.http.response_size) : ''
   const mitre      = getMitreValue(event, art)
   const channel    = art.channel  || event.channel  || ''
   const rule       = art.rule_title || event.rule_title || ''
@@ -1447,11 +1530,81 @@ function EventRow({ event, index, onSelect, selected, keyboardSelected, onFilter
         </td>
       )}
 
+      {vis('action') && (
+        <td className="px-3 py-2">
+          {action && (
+            <span className={`badge text-[10px] px-1.5 py-0.5 font-semibold uppercase ${
+              action === 'ALLOW' ? 'bg-green-100 text-green-700' :
+              action === 'DROP'  ? 'bg-red-100 text-red-700'    :
+              action === 'BLOCK' ? 'bg-red-100 text-red-700'    :
+              'bg-gray-100 text-gray-600'
+            }`}>
+              {action}
+            </span>
+          )}
+        </td>
+      )}
+
+      {vis('protocol') && (
+        <td className="px-3 py-2 font-mono text-gray-500">
+          <div className="flex items-center">
+            <span className="truncate">{protocol}</span>
+            {protocol && <FilterButtons field="network.protocol" value={protocol} onIn={onFilterIn} onOut={onFilterOut} />}
+          </div>
+        </td>
+      )}
+
       {vis('src_ip') && (
         <td className="px-3 py-2 text-gray-500 font-mono max-w-[8rem]">
           <div className="flex items-center">
             <span className="truncate">{srcIp}</span>
             {srcIp && <FilterButtons field="network.src_ip" value={srcIp} onIn={onFilterIn} onOut={onFilterOut} />}
+          </div>
+        </td>
+      )}
+
+      {vis('src_port') && (
+        <td className="px-3 py-2 font-mono text-gray-500 tabular-nums">
+          <div className="flex items-center">
+            <span>{srcPort !== '-' ? srcPort : ''}</span>
+            {srcPort && srcPort !== '-' && <FilterButtons field="network.src_port" value={srcPort} onIn={onFilterIn} onOut={onFilterOut} />}
+          </div>
+        </td>
+      )}
+
+      {vis('dst_ip') && (
+        <td className="px-3 py-2 text-gray-500 font-mono max-w-[8rem]">
+          <div className="flex items-center">
+            <span className="truncate">{dstIp}</span>
+            {dstIp && <FilterButtons field="network.dst_ip" value={dstIp} onIn={onFilterIn} onOut={onFilterOut} />}
+          </div>
+        </td>
+      )}
+
+      {vis('dst_port') && (
+        <td className="px-3 py-2 font-mono text-gray-500 tabular-nums">
+          <div className="flex items-center">
+            <span>{dstPort !== '-' ? dstPort : ''}</span>
+            {dstPort && dstPort !== '-' && <FilterButtons field="network.dst_port" value={dstPort} onIn={onFilterIn} onOut={onFilterOut} />}
+          </div>
+        </td>
+      )}
+
+      {vis('run_count') && (
+        <td className="px-3 py-2 tabular-nums text-center">
+          {runCount && (
+            <span className="badge bg-amber-50 text-amber-700 border border-amber-200 font-semibold text-[10px]">
+              ×{runCount}
+            </span>
+          )}
+        </td>
+      )}
+
+      {vis('pid') && (
+        <td className="px-3 py-2 font-mono text-gray-400 text-[10px]">
+          <div className="flex items-center">
+            <span>{pid}</span>
+            {pid && <FilterButtons field="process.pid" value={pid} onIn={onFilterIn} onOut={onFilterOut} />}
           </div>
         </td>
       )}
@@ -1487,6 +1640,18 @@ function EventRow({ event, index, onSelect, selected, keyboardSelected, onFilter
       {vis('http_path') && (
         <td className="px-3 py-2 text-gray-500 font-mono max-w-[12rem]">
           <span className="truncate block text-[10px]" title={httpPath}>{httpPath}</span>
+        </td>
+      )}
+
+      {vis('user_agent') && (
+        <td className="px-3 py-2 text-gray-400 max-w-[12rem]">
+          <span className="truncate block text-[10px]" title={userAgent}>{userAgent}</span>
+        </td>
+      )}
+
+      {vis('resp_size') && (
+        <td className="px-3 py-2 font-mono tabular-nums text-gray-500 text-[10px]">
+          {respSize ? Number(respSize).toLocaleString() : ''}
         </td>
       )}
 

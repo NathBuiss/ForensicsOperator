@@ -401,6 +401,7 @@ class WindowsTriagePlugin(BasePlugin):
                     "dst_port":  dst_port,
                 },
                 "network": {
+                    "action":    action,
                     "protocol":  proto,
                     "src_ip":    src_ip,
                     "dst_ip":    dst_ip,

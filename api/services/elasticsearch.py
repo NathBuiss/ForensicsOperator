@@ -114,7 +114,8 @@ def count_case_events(case_id: str) -> int:
 _SEARCH_FIELDS = [
     "message", "host.hostname", "user.name",
     "process.name", "process.cmdline", "process.args",
-    "network.src_ip", "http.request_path", "http.user_agent",
+    "network.src_ip", "network.dst_ip", "network.protocol", "network.action",
+    "http.request_path", "http.user_agent",
 ]
 
 

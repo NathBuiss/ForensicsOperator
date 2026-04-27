@@ -1,5 +1,5 @@
 """Alert rules per case — defined patterns checked on demand against ES."""
-import json, uuid
+import json, uuid, urllib.error
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -94,6 +94,12 @@ def run_single_rule(case_id: str, rule_id: str):
             "rule": rule, "match_count": count,
             "sample_events": [h["_source"] for h in resp["hits"]["hits"]],
         } if count >= int(rule.get("threshold", 1)) else None
+    except urllib.error.HTTPError as exc:
+        if exc.code in (400, 404):
+            # Index doesn't exist or query is invalid — treat as zero matches
+            match = None
+        else:
+            raise HTTPException(status_code=500, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
