@@ -50,7 +50,7 @@ class JsonFilePlugin(BasePlugin):
         ".ps1", ".sh", ".bat", ".py",
     ]
     SUPPORTED_MIME_TYPES = [
-        "text/plain", "text/html", "text/xml",
+        "text/plain", "text/html", "text/xml", "text/csv",
         "application/json", "application/yaml",
     ]
     PLUGIN_PRIORITY = 15
@@ -70,11 +70,11 @@ class JsonFilePlugin(BasePlugin):
 
         text = raw.decode("utf-8", errors="replace")
 
-        if ext == ".json":
+        if ext == ".json" or (not ext and text.lstrip().startswith(('{', '['))):
             yield from self._parse_json(filename, text)
         elif ext in (".yaml", ".yml"):
             yield from self._parse_yaml(filename, text)
-        elif ext == ".csv":
+        elif ext == ".csv" or (not ext and self._looks_like_csv(text)):
             yield from self._parse_csv(filename, text)
         else:
             yield from self._parse_text(filename, text)
@@ -146,7 +146,21 @@ class JsonFilePlugin(BasePlugin):
                 chunk,
             )
 
-    # ── Helper ────────────────────────────────────────────────────────────────
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _looks_like_csv(self, text: str) -> bool:
+        """Return True if the content looks like a CSV file (consistent comma-delimited rows)."""
+        lines = [l for l in text.splitlines()[:6] if l.strip()]
+        if len(lines) < 2:
+            return False
+        if ',' not in lines[0]:
+            return False
+        try:
+            reader = csv.reader(lines)
+            counts = [len(row) for row in reader]
+            return len(counts) >= 2 and counts[0] > 1 and all(c == counts[0] for c in counts)
+        except Exception:
+            return False
 
     def _file_event(self, filename: str, message: str, content: str) -> dict:
         return {

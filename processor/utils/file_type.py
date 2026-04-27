@@ -26,6 +26,11 @@ EXTENSION_MIME_MAP = {
 FILENAME_MIME_MAP = {
     "$MFT": "application/x-ntfs-mft",
     "MFT": "application/x-ntfs-mft",
+    "C_MFT": "application/x-ntfs-mft",
+    "C_MFT.BAK": "application/x-ntfs-mft",
+    # CSV scanner logs without extension (fo-harvester output)
+    "BASICINFOSCANNERLOGS": "text/csv",
+    "SHELLBAGSSCANNERLOGS": "text/csv",
     "NTUSER.DAT": "application/x-registry",
     "SYSTEM": "application/x-registry",
     "SOFTWARE": "application/x-registry",

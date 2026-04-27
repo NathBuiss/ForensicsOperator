@@ -2186,23 +2186,27 @@ class ExternalDiskCollector(Collector):
             for user_dir in sorted(users_dir.iterdir()):
                 if not user_dir.is_dir():
                     continue
-                safe = user_dir.name.replace(" ", "_")
-                for src_rel, arcname in [
-                    ("NTUSER.DAT", f"registry/users/{user_dir.name}/NTUSER.DAT"),
+                safe = user_dir.name.replace(" ", "_").replace("/", "_")
+                for src, fname, arcname in [
                     (
-                        str(Path("AppData") / "Local" / "Microsoft" / "Windows" / "UsrClass.dat"),
+                        user_dir / "NTUSER.DAT",
+                        "NTUSER.DAT",
+                        f"registry/users/{user_dir.name}/NTUSER.DAT",
+                    ),
+                    (
+                        user_dir / "AppData" / "Local" / "Microsoft" / "Windows" / "UsrClass.dat",
+                        "USRCLASS.DAT",
                         f"registry/users/{user_dir.name}/USRCLASS.DAT",
                     ),
                 ]:
-                    src = user_dir / src_rel
                     try:
                         if not src.is_file():
                             continue
-                        tmp = self.staging / f"reg_{safe}_{Path(src_rel).name}"
+                        tmp = self.staging / f"reg_{safe}_{fname}"
                         if self._stage_file(src, tmp):
                             self._add(tmp, arcname)
                     except Exception as exc:
-                        self._warn(f"Registry {user_dir.name}/{Path(src_rel).name}: {exc}")
+                        self._warn(f"Registry {user_dir.name}/{fname}: {exc}")
 
     def _prefetch_from(self, win_dir: Path) -> None:
         print("  [*] Prefetch Files")

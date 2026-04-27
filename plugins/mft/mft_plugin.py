@@ -32,7 +32,7 @@ class MftPlugin(BasePlugin):
 
     @classmethod
     def get_handled_filenames(cls) -> list[str]:
-        return ["$MFT", "MFT"]
+        return ["$MFT", "MFT", "C_MFT", "C_MFT.BAK", "D_MFT", "D_MFT.BAK"]
 
     def __init__(self, context: PluginContext) -> None:
         super().__init__(context)
