@@ -135,10 +135,17 @@ def analyze_run_match(case_id: str, rule_id: str):
     match = next((m for m in run.get("matches", []) if m["rule"]["id"] == rule_id), None)
 
     if not match:
-        # Rule not in last-run matches — look it up and query ES directly
+        # Rule not in last-run matches — look in case rules then global library
         rules_data = r.get(f"fo:alert_rules:{case_id}")
         rules = json.loads(rules_data) if rules_data else []
         rule = next((rl for rl in rules if rl["id"] == rule_id), None)
+
+        if not rule:
+            # Also check global library
+            global_data = r.get("fo:alert_rules:_global")
+            global_rules = json.loads(global_data) if global_data else []
+            rule = next((rl for rl in global_rules if rl["id"] == rule_id), None)
+
         if not rule:
             raise HTTPException(status_code=404, detail=f"Rule {rule_id} not found")
 

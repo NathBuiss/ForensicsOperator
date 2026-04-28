@@ -130,7 +130,7 @@ def search_events(
     size: int = 100,
     sort_field: str = "timestamp",
     sort_order: str = "asc",
-    regexp: bool = False,
+    regexp: bool = False,  # kept for API compat, ignored — use /regex/ in query instead
 ) -> dict[str, Any]:
     """
     Search events in a case with full-text query and field filters.
@@ -142,11 +142,17 @@ def search_events(
     filter_clauses: list[dict] = []
 
     if query:
-        if regexp:
-            # ES regexp on the unanalyzed full-text field — supports ., .*, [a-z], (a|b) but NOT \d \w \s
-            must_clauses.append({"regexp": {"message.keyword": {"value": query, "case_insensitive": True, "flags": "ALL"}}})
-        else:
-            must_clauses.append({"query_string": {"query": query, "default_operator": "AND", "fields": _SEARCH_FIELDS}})
+        # Full Lucene query_string over all indexed fields.
+        # Inline regexes work natively: /pattern/ syntax in the query string.
+        must_clauses.append({
+            "query_string": {
+                "query": query,
+                "default_operator": "AND",
+                "fields": ["*"],
+                "allow_leading_wildcard": True,
+                "analyze_wildcard": True,
+            }
+        })
 
     if from_ts or to_ts:
         range_filter: dict = {"range": {"timestamp": {}}}
@@ -303,7 +309,7 @@ def search_events_for_rule(case_id: str, query: str, size: int = 10) -> list[dic
     """Run a Lucene query against a case and return the first N hits (for Studio rule playground)."""
     index = f"fo-case-{case_id}-*"
     body = {
-        "query": {"query_string": {"query": query, "default_operator": "AND", "fields": _SEARCH_FIELDS}},
+        "query": {"query_string": {"query": query, "default_operator": "AND", "fields": ["*"], "allow_leading_wildcard": True, "analyze_wildcard": True}},
         "size": size,
         "sort": [{"timestamp": {"order": "asc"}}],
         "_source": {"excludes": ["raw"]},

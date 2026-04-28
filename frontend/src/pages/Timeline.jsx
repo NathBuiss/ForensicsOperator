@@ -106,15 +106,25 @@ function deduplicateEvents(events) {
 const SORT_ES_FIELDS = {
   timestamp:   'timestamp',
   type:        'artifact_type',
+  level:       'evtx.level.keyword',
+  event_id:    'evtx.event_id',
   host:        'host.hostname.keyword',
   user:        'user.name.keyword',
+  process:     'process.name.keyword',
+  pid:         'process.pid',
+  action:      'network.action.keyword',
+  protocol:    'network.protocol.keyword',
   src_ip:      'network.src_ip.keyword',
   dst_ip:      'network.dst_ip.keyword',
   src_port:    'network.src_port',
   dst_port:    'network.dst_port',
-  http_status: 'http.status_code',
-  resp_size:   'http.response_size',
   run_count:   'prefetch.run_count',
+  http_method: 'http.method.keyword',
+  http_status: 'http.status_code',
+  http_path:   'http.request_path.keyword',
+  resp_size:   'http.response_size',
+  channel:     'evtx.channel.keyword',
+  rule:        'evtx.rule_title.keyword',
 }
 
 // Columns eligible for auto-detection (optional, data-driven)
@@ -171,7 +181,7 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
   const [histogram, setHistogram]         = useState([])
   const [showHistogram, setShowHistogram] = useState(true)
   const [selectedRowIdx, setSelectedRowIdx] = useState(-1)
-  const [regexpMode, setRegexpMode]       = useState(false)
+  const [showCheatsheet, setShowCheatsheet] = useState(false)
   const [showHelp, setShowHelp]           = useState(false)
   const [flaggedOnly, setFlaggedOnly]     = useState(false)
   const [visibleCols, setVisibleCols]     = useState(loadSavedColumns)
@@ -251,7 +261,7 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
       }
       const hasSearch = effectiveQ || Object.keys(facetFilters).length > 0
       const r = hasSearch
-        ? await api.search.search(caseId, { ...params, q: effectiveQ, regexp: regexpMode })
+        ? await api.search.search(caseId, { ...params, q: effectiveQ })
         : await api.search.timeline(caseId, params)
       setTotal(r.total || 0)
       const incoming = deduplicateEvents(r.events || [])
@@ -263,7 +273,7 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
       setPage(pg)
     } catch (e) { console.error(e) }
     finally { setLoading(false) }
-  }, [caseId, selectedType, fromTs, toTs, query, flaggedOnly, facetFilters, regexpMode, sortField, sortOrder])
+  }, [caseId, selectedType, fromTs, toTs, query, flaggedOnly, facetFilters, sortField, sortOrder])
 
   useEffect(() => { load(0, true) }, [load])
 
@@ -758,22 +768,18 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
                 ref={searchRef}
                 value={inputVal}
                 onChange={e => setInputVal(e.target.value)}
-                placeholder={regexpMode
-                  ? 'Regexp on message… lateral.*movement  4[6-9][0-9]{2}  cmd\.exe'
-                  : 'Search… evtx.event_id:4624  host.hostname:DC01  message:"logon"'}
-                className="input-lg pl-9 pr-4 text-xs"
+                placeholder='Lucene: evtx.event_id:4624  process.name:power*  message:/cmd\.exe/  NOT user.name:SYSTEM'
+                className="input-lg pl-9 pr-4 text-xs font-mono"
               />
             </div>
 
             <button
               type="button"
-              onClick={() => setRegexpMode(v => !v)}
-              title={regexpMode ? 'Regexp mode ON — ES regexp on message field. Supports .* [a-z] (a|b) but NOT \\d \\w' : 'Switch to regexp mode'}
-              className={`btn-outline text-xs px-2.5 py-1.5 font-mono tracking-tight ${
-                regexpMode ? 'border-brand-accent text-brand-accent bg-brand-accentlight' : 'text-gray-500'
-              }`}
+              onClick={() => setShowCheatsheet(v => !v)}
+              title="Lucene query syntax cheatsheet"
+              className={`btn-ghost text-xs px-2 ${showCheatsheet ? 'text-brand-accent' : 'text-gray-400'}`}
             >
-              .*
+              <span className="font-mono font-bold text-sm leading-none">?</span>
             </button>
 
             <button
@@ -903,9 +909,6 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
                   <code className="badge bg-brand-accentlight text-brand-accent border border-brand-accent/20 text-[10px] max-w-xs truncate font-mono">
                     {query}
                   </code>
-                  {regexpMode && (
-                    <span className="badge bg-purple-100 text-purple-700 text-[10px]">regexp</span>
-                  )}
                 </>
               )}
               {Object.entries(facetFilters).map(([k, v]) => (
@@ -925,9 +928,13 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
           {showAiAssist && (
             <AiSearchAssistPanel
               caseId={caseId}
-              onApply={(q, regexp) => { setInputVal(q); setQuery(q); if (regexp) setRegexpMode(true); setShowAiAssist(false) }}
+              onApply={(q) => { setInputVal(q); setQuery(q); setShowAiAssist(false) }}
               onClose={() => setShowAiAssist(false)}
             />
+          )}
+
+          {showCheatsheet && (
+            <LuceneCheatsheet onUse={q => { setInputVal(q); setShowCheatsheet(false) }} />
           )}
         </div>
 
@@ -1039,10 +1046,10 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
                   <SortableTh colId="type" label="Type" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-24" />
                 )}
                 {vis('level') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-20">Level</th>
+                  <SortableTh colId="level" label="Level" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-20" />
                 )}
                 {vis('event_id') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-20">Event ID</th>
+                  <SortableTh colId="event_id" label="Event ID" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-20" />
                 )}
                 {vis('host') && (
                   <SortableTh colId="host" label="Host" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-28" />
@@ -1051,13 +1058,13 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
                   <SortableTh colId="user" label="User" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-24" />
                 )}
                 {vis('process') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-28">Process</th>
+                  <SortableTh colId="process" label="Process" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-28" />
                 )}
                 {vis('action') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-20">Action</th>
+                  <SortableTh colId="action" label="Action" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-20" />
                 )}
                 {vis('protocol') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-20">Proto</th>
+                  <SortableTh colId="protocol" label="Proto" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-20" />
                 )}
                 {vis('src_ip') && (
                   <SortableTh colId="src_ip" label="Src IP" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-32" />
@@ -1075,16 +1082,16 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
                   <SortableTh colId="run_count" label="Runs" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-14" />
                 )}
                 {vis('pid') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-16">PID</th>
+                  <SortableTh colId="pid" label="PID" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-16" />
                 )}
                 {vis('http_method') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-20">Method</th>
+                  <SortableTh colId="http_method" label="Method" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-20" />
                 )}
                 {vis('http_status') && (
                   <SortableTh colId="http_status" label="Status" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-16" />
                 )}
                 {vis('http_path') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-48">Path</th>
+                  <SortableTh colId="http_path" label="Path" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-48" />
                 )}
                 {vis('user_agent') && (
                   <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-48">User Agent</th>
@@ -1096,10 +1103,10 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
                   <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-36">MITRE</th>
                 )}
                 {vis('channel') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-28">Channel</th>
+                  <SortableTh colId="channel" label="Channel" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-28" />
                 )}
                 {vis('rule') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-36">Rule</th>
+                  <SortableTh colId="rule" label="Rule" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-36" />
                 )}
                 {vis('message') && (
                   <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Message</th>
@@ -1269,6 +1276,112 @@ function SortableTh({ colId, label, sortField, sortOrder, onSort, className = ''
   )
 }
 
+/* ── Lucene Cheatsheet ── */
+const CHEATSHEET = [
+  {
+    label: 'Basic matching',
+    color: 'sky',
+    rows: [
+      { q: 'powershell',                     desc: 'Bare term — all fields'              },
+      { q: 'evtx.event_id:4624',             desc: 'Exact field match'                   },
+      { q: 'message:"lateral movement"',     desc: 'Exact phrase'                        },
+      { q: 'process.name:power*',            desc: 'Suffix wildcard'                     },
+      { q: 'host.hostname:DC0?',             desc: 'Single-char wildcard'                },
+      { q: 'process.name:*shell',            desc: 'Leading wildcard (slower)'           },
+    ],
+  },
+  {
+    label: 'Boolean & grouping',
+    color: 'violet',
+    rows: [
+      { q: 'evtx.event_id:4625 AND host.hostname:DC*',        desc: 'AND (default)'      },
+      { q: 'evtx.event_id:(4625 OR 4771 OR 4776)',            desc: 'OR group'           },
+      { q: 'NOT evtx.event_id:4672',                          desc: 'Exclude'            },
+      { q: '(evtx.event_id:4624 OR 4625) AND NOT user.name:SYSTEM', desc: 'Complex'     },
+    ],
+  },
+  {
+    label: 'Ranges',
+    color: 'amber',
+    rows: [
+      { q: 'evtx.event_id:[4624 TO 4634]',   desc: 'Inclusive numeric range'            },
+      { q: 'timestamp:[2024-01-01 TO 2024-03-31]', desc: 'Date range'                   },
+      { q: 'http.status_code:>400',           desc: 'Greater-than'                      },
+      { q: 'network.dst_port:<1024',          desc: 'Less-than'                         },
+    ],
+  },
+  {
+    label: 'Inline regex  /pattern/',
+    color: 'rose',
+    rows: [
+      { q: 'message:/cmd\\.exe/',             desc: 'Literal dot in regex'               },
+      { q: 'process.cmdline:/(invoke|iex|bypass)/', desc: 'Alternation'                 },
+      { q: 'process.name:/power.*(shell|shel)/', desc: 'Prefix match'                   },
+      { q: 'evtx.event_id:/4[6-9][0-9]{2}/', desc: 'Character classes & quantifiers'   },
+    ],
+  },
+  {
+    label: 'DFIR quick picks',
+    color: 'emerald',
+    rows: [
+      { q: 'evtx.event_id:4625',                         desc: 'Failed logins'          },
+      { q: 'evtx.event_id:4624',                         desc: 'Successful logins'      },
+      { q: 'evtx.event_id:4688',                         desc: 'Process creation'       },
+      { q: 'evtx.event_id:4104',                         desc: 'PowerShell script block'},
+      { q: 'evtx.event_id:(4698 OR 4702)',               desc: 'Scheduled task'         },
+      { q: 'evtx.event_id:7045',                         desc: 'Service installed'      },
+      { q: 'evtx.event_id:(1102 OR 104)',                desc: 'Log cleared'            },
+      { q: 'artifact_type:hayabusa AND hayabusa.level:(critical OR high)', desc: 'Hayabusa alerts' },
+      { q: 'artifact_type:mft AND mft.is_deleted:true',  desc: 'Deleted files'          },
+      { q: 'is_flagged:true',                            desc: 'Flagged events'         },
+    ],
+  },
+]
+
+const CHIP_COLORS = {
+  sky:     'bg-sky-50 text-sky-700 border-sky-200',
+  violet:  'bg-violet-50 text-violet-700 border-violet-200',
+  amber:   'bg-amber-50 text-amber-700 border-amber-200',
+  rose:    'bg-rose-50 text-rose-700 border-rose-200',
+  emerald: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+}
+
+function LuceneCheatsheet({ onUse }) {
+  return (
+    <div className="mt-2 rounded-xl border border-gray-200 bg-white shadow-lg overflow-hidden">
+      {/* Header */}
+      <div className="px-4 py-2.5 bg-gradient-to-r from-brand-accent/10 to-transparent border-b border-gray-100 flex items-center gap-2">
+        <span className="font-mono font-bold text-brand-accent text-sm">?</span>
+        <span className="text-xs font-semibold text-brand-text">Lucene Query Syntax</span>
+        <span className="text-[10px] text-gray-400 ml-1">— click any example to insert</span>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-0 divide-y md:divide-y-0 md:divide-x divide-gray-100">
+        {CHEATSHEET.map(section => (
+          <div key={section.label} className="p-3 space-y-1.5">
+            <p className={`text-[9px] font-bold uppercase tracking-widest mb-2 ${CHIP_COLORS[section.color].split(' ')[1]}`}>
+              {section.label}
+            </p>
+            {section.rows.map((row, i) => (
+              <button
+                key={i}
+                type="button"
+                onClick={() => onUse(row.q)}
+                className="w-full flex items-start gap-2 text-left group rounded hover:bg-gray-50 px-1 py-0.5 transition-colors"
+              >
+                <code className={`flex-shrink-0 text-[10px] px-1.5 py-0.5 rounded border font-mono leading-tight group-hover:opacity-80 transition-opacity ${CHIP_COLORS[section.color]}`}>
+                  {row.q}
+                </code>
+                <span className="text-[10px] text-gray-500 leading-tight pt-0.5 truncate">{row.desc}</span>
+              </button>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 /* ── AI Search Assist panel ── */
 function AiSearchAssistPanel({ caseId, onApply, onClose }) {
   const [text, setText]       = useState('')
@@ -1313,8 +1426,8 @@ function AiSearchAssistPanel({ caseId, onApply, onClose }) {
         <div className="mt-2 space-y-1.5">
           <code className="block text-[11px] font-mono text-brand-accent bg-white border border-gray-200 rounded px-2 py-1 break-all">{result.query}</code>
           {result.explanation && <p className="text-[11px] text-indigo-600 italic">{result.explanation}</p>}
-          <button onClick={() => onApply(result.query, result.regexp)} className="btn-primary text-xs px-3 py-1 w-full justify-center">
-            Apply Query{result.regexp ? ' (regexp)' : ''}
+          <button onClick={() => onApply(result.query)} className="btn-primary text-xs px-3 py-1 w-full justify-center">
+            Apply Query
           </button>
         </div>
       )}

@@ -189,3 +189,61 @@ def note_event(case_id: str, fo_id: str, body: NoteUpdate):
     doc_id = event.get("_id", fo_id)
     es.update_event(case_id, index, doc_id, {"analyst_note": body.note})
     return {"fo_id": fo_id, "analyst_note": body.note}
+
+
+@router.get("/cases/{case_id}/iocs")
+def get_iocs(case_id: str, size: int = Query(50, le=200)):
+    """
+    Return the top observed values for IOC-relevant fields across the whole case.
+    Each category is an aggregation bucket list: [{value, count}].
+    """
+    from services.elasticsearch import _request as es_req
+    import urllib.error
+
+    index = f"fo-case-{case_id}-*"
+    body = {
+        "size": 0,
+        "aggs": {
+            "src_ips":      {"terms": {"field": "network.src_ip.keyword",    "size": size}},
+            "dst_ips":      {"terms": {"field": "network.dst_ip.keyword",    "size": size}},
+            "hostnames":    {"terms": {"field": "host.hostname.keyword",     "size": size}},
+            "usernames":    {"terms": {"field": "user.name.keyword",         "size": size}},
+            "processes":    {"terms": {"field": "process.name.keyword",      "size": size}},
+            "domains":      {"terms": {"field": "network.dst_domain.keyword","size": size}},
+            "urls":         {"terms": {"field": "http.request_path.keyword", "size": size}},
+            "user_agents":  {"terms": {"field": "http.user_agent.keyword",   "size": size}},
+            "cmdlines":     {"terms": {"field": "process.cmdline.keyword",   "size": size}},
+            "hashes_md5":   {"terms": {"field": "process.hash_md5.keyword",  "size": size}},
+            "hashes_sha256":{"terms": {"field": "process.hash_sha256.keyword","size": size}},
+            "reg_keys":     {"terms": {"field": "registry.key.keyword",      "size": size}},
+        },
+    }
+    try:
+        result = es_req("POST", f"/{index}/_search", body)
+        aggs = result.get("aggregations", {})
+
+        def buckets(key):
+            return [
+                {"value": b["key"], "count": b["doc_count"]}
+                for b in aggs.get(key, {}).get("buckets", [])
+                if b["key"]
+            ]
+
+        return {
+            "src_ips":       buckets("src_ips"),
+            "dst_ips":       buckets("dst_ips"),
+            "hostnames":     buckets("hostnames"),
+            "usernames":     buckets("usernames"),
+            "processes":     buckets("processes"),
+            "domains":       buckets("domains"),
+            "urls":          buckets("urls"),
+            "user_agents":   buckets("user_agents"),
+            "cmdlines":      buckets("cmdlines"),
+            "hashes_md5":    buckets("hashes_md5"),
+            "hashes_sha256": buckets("hashes_sha256"),
+            "reg_keys":      buckets("reg_keys"),
+        }
+    except (urllib.error.HTTPError, Exception):
+        return {k: [] for k in ["src_ips","dst_ips","hostnames","usernames","processes",
+                                 "domains","urls","user_agents","cmdlines",
+                                 "hashes_md5","hashes_sha256","reg_keys"]}

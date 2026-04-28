@@ -809,20 +809,50 @@ _SEARCH_ASSIST_PROMPT = """You are an expert Elasticsearch query builder for For
 - artifact_type:browser — Browser history from Chrome, Edge, Firefox, Brave, Opera; also OneDrive/cloud sync SQLite metadata (browser.url, browser.title, browser.visit_count, browser.profile)
 
 ## How queries work
-Normal mode (default): query_string searching message, host.hostname, user.name, process.name, process.cmdline, process.args.
-Regexp mode (.*toggle): ES regexp on message.keyword (full raw string). Supports . .* [a-z] (a|b) a+ a? a{n,m} — does NOT support \\d \\w \\s — use [0-9] [a-zA-Z] [ \\t] instead.
+The search uses **full Lucene query_string syntax** against ALL indexed fields.
+A bare term (e.g. `powershell`) matches any field that contains it.
+An explicit field query (e.g. `evtx.event_id:4624`) restricts to that field.
+There is NO separate regex mode — use Lucene inline regex syntax: `/pattern/`
 
-## query_string syntax
-- bare term: searches message + key fields: failed logon
-- field=value: evtx.event_id:4624
-- phrase: message:"lateral movement"
-- wildcard: process.name:cmd*
-- boolean AND: evtx.event_id:4625 AND host.hostname:DC*
-- OR group: evtx.event_id:(4625 OR 4771 OR 4776)
-- range: evtx.event_id:[4624 TO 4634]
-- NOT: NOT evtx.event_id:4672
-- is_flagged:true — only analyst-flagged events
-- tags:lateral-movement — events with a specific tag
+## Lucene query_string syntax — complete reference
+
+### Term matching
+- bare term (all fields):       powershell
+- specific field:               evtx.event_id:4624
+- phrase (exact sequence):      message:"lateral movement"
+- field phrase:                 process.cmdline:"cmd.exe /c"
+
+### Wildcards
+- suffix wildcard:              process.name:power*
+- single-char wildcard:         host.hostname:DC0?
+- leading wildcard:             process.name:*shell  (slower, but works)
+
+### Booleans
+- AND (default):                evtx.event_id:4625 AND host.hostname:DC*
+- OR group:                     evtx.event_id:(4625 OR 4771 OR 4776)
+- NOT / exclude:                NOT evtx.event_id:4672
+- complex:                      (evtx.event_id:4624 OR evtx.event_id:4625) AND NOT user.name:SYSTEM
+
+### Ranges
+- numeric:                      evtx.event_id:[4624 TO 4634]
+- date:                         timestamp:[2024-01-01 TO 2024-03-31]
+- greater-than:                 http.status_code:>400
+- less-than:                    http.status_code:<500
+
+### Regex (inline Lucene /pattern/)
+- message:/cmd\.exe/
+- process.cmdline:/(invoke|iex|bypass)/
+- process.name:/power.*(shell|shel)/
+- Note: Lucene regex anchors the whole value — use .* to allow prefix/suffix
+- Supported: . .* + ? {n,m} [a-z] (a|b) | ~  NOT supported: \\d \\w \\s — use [0-9] [a-zA-Z] [ \\t]
+
+### Fuzzy matching
+- process.name:powershell~1   (1 edit distance)
+
+### Special fields
+- is_flagged:true              — analyst-flagged events only
+- tags:lateral-movement        — events with a specific tag
+- analyst_note:*               — events with any analyst note
 
 ## Common forensics investigation patterns
 
@@ -891,19 +921,20 @@ Regexp mode (.*toggle): ES regexp on message.keyword (full raw string). Supports
 - Amcache execution: artifact_type:amcache
 
 ## UI features the analyst has access to
-- **Normal mode** (default): query_string against message + host/user/process fields. Best for field-level queries.
-- **Regexp mode** (.*): ES regexp on full message.keyword. Suggest this when the user wants to match a pattern like cmd\.exe, 4[6-9][0-9]{2}, or (mimikatz|sekurlsa).
+- **Search bar**: Full Lucene query_string over ALL indexed fields. Inline /regex/ works natively.
 - **Facet filters**: Host, User, Event ID, Channel can be filtered via sidebar chips (separate from the query). Do NOT include these in the query string unless the user explicitly targets a field.
 - **Date range**: Applied separately via date pickers — do NOT add timestamp range to the query.
-- **Studio — Rule Playground**: Alert rules can be tested against a live case using the "Test Query" button in the Studio editor. The generated query is run and the first 10 matching events are shown inline.
-- **Studio — YARA Tester**: YARA rules written in Studio can be tested against a specific source file from a case using the "Test YARA" button — no separate tool needed.
-- **Studio — Module Run**: Custom analysis modules written in Studio can be dispatched directly from the editor with the "Run" button — pick a case and source files, click Run, and a live log panel streams output.
+- **Column sorting**: Click any column header to sort by that field.
+- **Studio — Rule Playground**: Alert rules can be tested against a live case using the "Test Query" button in the Studio editor.
+- **Studio — YARA Tester**: YARA rules can be tested against a specific source file from a case.
+- **Studio — Module Run**: Custom analysis modules can be dispatched from the editor with the "Run" button.
 
 ## Output instructions
-Convert the user's natural language request into a query_string expression (or regexp if appropriate).
+Convert the user's natural language request into a Lucene query_string expression.
+Use inline /regex/ when pattern matching is needed — do NOT set regexp to true.
 Return ONLY a JSON object with exactly these keys:
 {"query": "the expression", "explanation": "one-sentence description of what the query finds", "regexp": false}
-Set "regexp" to true only when the pattern requires ES regexp semantics (special chars, character classes, quantifiers).
+Always set "regexp" to false — regex is now inline in the query using /pattern/ syntax.
 No markdown, no extra text — raw JSON only."""
 
 

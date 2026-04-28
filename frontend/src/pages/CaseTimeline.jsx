@@ -5,7 +5,7 @@ import {
   CheckCircle, Clock, Database, Loader2, Shield,
   Cpu, RefreshCw, Plus, Download, Play, Terminal,
   AlertCircle, ChevronDown, FileCode, ExternalLink,
-  Flag, Filter, Sparkles, FileText, Trash2,
+  Flag, Filter, Sparkles, FileText, Trash2, Crosshair,
   Monitor, HardDrive, Globe, Brain,
   Binary, Bug, Network, FileImage, TextSearch, Tag,
 } from 'lucide-react'
@@ -33,6 +33,7 @@ import Timeline from './Timeline'
 import AlertRules from './AlertRules'
 import CaseNotes from './CaseNotes'
 import IngestPanel from '../components/IngestPanel'
+import IocPanel from '../components/IocPanel'
 
 // ── Artifact badge colours ────────────────────────────────────────────────────
 const ARTIFACT_BADGE = {
@@ -1916,6 +1917,8 @@ export default function CaseTimeline() {
   const [showModuleRuns, setShowModuleRuns] = useState(false)
   const [showAlertRules, setShowAlertRules] = useState(false)
   const [showNotes, setShowNotes]           = useState(false)
+  const [showIocs, setShowIocs]             = useState(false)
+  const [iocPivotQuery, setIocPivotQuery]   = useState(null)
   const [confirmDelete, setConfirmDelete]   = useState(false)
   const [deleting, setDeleting]             = useState(false)
   const [jobSummary, setJobSummary]         = useState({ active: 0, failed: 0, eventsPerSec: null, totalEvents: 0 })
@@ -2082,6 +2085,14 @@ export default function CaseTimeline() {
           </button>
 
           <button
+            onClick={() => setShowIocs(v => !v)}
+            className={`btn-outline ${showIocs ? 'bg-red-50 border-red-300 text-red-600' : ''}`}
+          >
+            <Crosshair size={14} />
+            IOCs
+          </button>
+
+          <button
             onClick={() => setShowAlertRules(v => !v)}
             className={`btn-outline ${showAlertRules ? 'bg-yellow-50 border-yellow-300 text-yellow-700' : ''}`}
           >
@@ -2140,7 +2151,12 @@ export default function CaseTimeline() {
 
       {/* ── Timeline ─────────────────────────────────────────────────────── */}
       <div className="flex-1 overflow-hidden">
-        <Timeline key={initialQuery || '_'} caseId={caseId} artifactTypes={artifactTypes} initialQuery={initialQuery} />
+        <Timeline
+          key={(iocPivotQuery || initialQuery) || '_'}
+          caseId={caseId}
+          artifactTypes={artifactTypes}
+          initialQuery={iocPivotQuery || initialQuery}
+        />
       </div>
 
       {/* ── Modals / Panels ───────────────────────────────────────────────── */}
@@ -2170,6 +2186,35 @@ export default function CaseTimeline() {
             </div>
             <div className="flex-1 overflow-y-auto">
               <CaseNotes caseId={caseId} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showIocs && (
+        <div className="panel-backdrop" onClick={() => setShowIocs(false)}>
+          <div
+            className="absolute right-0 top-0 h-full w-[480px] bg-white border-l border-gray-200 flex flex-col"
+            style={{ boxShadow: '-4px 0 24px rgba(0,0,0,0.10)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 flex-shrink-0">
+              <div className="flex items-center gap-2">
+                <Crosshair size={16} className="text-red-500" />
+                <span className="font-semibold text-brand-text">Observed IOCs</span>
+              </div>
+              <button onClick={() => setShowIocs(false)} className="btn-ghost p-1.5 rounded-lg">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-hidden">
+              <IocPanel
+                caseId={caseId}
+                onSearch={q => {
+                  setIocPivotQuery(q)
+                  setShowIocs(false)
+                }}
+              />
             </div>
           </div>
         </div>

@@ -666,6 +666,20 @@ def run_library_against_case(case_id: str):
         except Exception:
             pass
 
+    # Persist the run so the AI analysis endpoint can find these matches
+    from datetime import timezone
+    run = {
+        "ran_at":        datetime.now(timezone.utc).isoformat(),
+        "rules_checked": len(rules),
+        "matches":       matches,
+        "analyses":      {},
+    }
+    _RUN_KEY = "fo:alert_run:{case_id}"
+    _RUN_TTL = 7 * 86400
+    run_key = _RUN_KEY.format(case_id=case_id)
+    r.set(run_key, json.dumps(run))
+    r.expire(run_key, _RUN_TTL)
+
     return {"matches": matches, "rules_checked": len(rules)}
 
 
