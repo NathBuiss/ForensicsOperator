@@ -125,15 +125,38 @@ def get_last_run(case_id: str):
 @router.post("/cases/{case_id}/alert-rules/last-run/analyze/{rule_id}")
 def analyze_run_match(case_id: str, rule_id: str):
     """
-    (Re-)run AI analysis for one match in the last run and persist it.
-    Returns {analysis} so the frontend can update in-place.
+    (Re-)run AI analysis for a rule and persist it.
+    Works even if the rule had 0 matches or no check has run yet —
+    falls back to a live ES query to gather sample events.
     """
     r   = _r()
     run = _load_run(r, case_id)
 
     match = next((m for m in run.get("matches", []) if m["rule"]["id"] == rule_id), None)
+
     if not match:
-        raise HTTPException(status_code=404, detail=f"Rule {rule_id} not in last run")
+        # Rule not in last-run matches — look it up and query ES directly
+        rules_data = r.get(f"fo:alert_rules:{case_id}")
+        rules = json.loads(rules_data) if rules_data else []
+        rule = next((rl for rl in rules if rl["id"] == rule_id), None)
+        if not rule:
+            raise HTTPException(status_code=404, detail=f"Rule {rule_id} not found")
+
+        idx = f"fo-case-{case_id}-{rule['artifact_type']}" if rule.get("artifact_type") else f"fo-case-{case_id}-*"
+        es_body = {
+            "query": {"query_string": {"query": rule["query"], "default_operator": "AND"}},
+            "size": 5,
+            "_source": ["timestamp", "message", "host", "fo_id", "artifact_type"],
+            "sort": [{"timestamp": {"order": "desc"}}],
+        }
+        try:
+            resp  = es_req("POST", f"/{idx}/_search", es_body)
+            count = resp["hits"]["total"]["value"]
+            sample_events = [h["_source"] for h in resp["hits"]["hits"]]
+        except (urllib.error.HTTPError, Exception):
+            count, sample_events = 0, []
+
+        match = {"rule": rule, "match_count": count, "sample_events": sample_events}
 
     analysis = _llm_analyze_match(match["rule"], match["match_count"], match["sample_events"])
     if analysis is None:

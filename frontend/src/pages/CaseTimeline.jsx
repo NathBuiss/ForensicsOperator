@@ -5,7 +5,7 @@ import {
   CheckCircle, Clock, Database, Loader2, Shield,
   Cpu, RefreshCw, Plus, Download, Play, Terminal,
   AlertCircle, ChevronDown, FileCode, ExternalLink,
-  Flag, Filter, Sparkles, FileText,
+  Flag, Filter, Sparkles, FileText, Trash2,
   Monitor, HardDrive, Globe, Brain,
   Binary, Bug, Network, FileImage, TextSearch, Tag,
 } from 'lucide-react'
@@ -1916,6 +1916,8 @@ export default function CaseTimeline() {
   const [showModuleRuns, setShowModuleRuns] = useState(false)
   const [showAlertRules, setShowAlertRules] = useState(false)
   const [showNotes, setShowNotes]           = useState(false)
+  const [confirmDelete, setConfirmDelete]   = useState(false)
+  const [deleting, setDeleting]             = useState(false)
   const [jobSummary, setJobSummary]         = useState({ active: 0, failed: 0, eventsPerSec: null, totalEvents: 0 })
   const prevJobSnap                         = useRef(null)
 
@@ -1987,6 +1989,17 @@ export default function CaseTimeline() {
   function handleRunCreated() {
     setShowModules(false)
     setShowModuleRuns(true)
+  }
+
+  async function deleteCase() {
+    setDeleting(true)
+    try {
+      await api.cases.delete(caseId)
+      navigate('/cases')
+    } catch {
+      setDeleting(false)
+      setConfirmDelete(false)
+    }
   }
 
   if (loading) {
@@ -2092,6 +2105,34 @@ export default function CaseTimeline() {
               title="View module runs"
             >
               <Clock size={14} />
+            </button>
+          )}
+
+          {/* Delete case — two-click confirmation */}
+          {confirmDelete ? (
+            <div className="flex items-center gap-1.5 bg-red-50 border border-red-200 rounded-lg px-2 py-1">
+              <span className="text-xs text-red-700 font-medium whitespace-nowrap">Delete case?</span>
+              <button
+                onClick={deleteCase}
+                disabled={deleting}
+                className="text-[11px] font-semibold text-white bg-red-500 hover:bg-red-600 rounded px-2 py-0.5 transition-colors disabled:opacity-50"
+              >
+                {deleting ? 'Deleting…' : 'Confirm'}
+              </button>
+              <button
+                onClick={() => setConfirmDelete(false)}
+                className="text-[11px] text-gray-500 hover:text-gray-700"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmDelete(true)}
+              className="btn-ghost p-1.5 rounded-lg text-gray-400 hover:text-red-500"
+              title="Delete this case"
+            >
+              <Trash2 size={14} />
             </button>
           )}
         </div>
