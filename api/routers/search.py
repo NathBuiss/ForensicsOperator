@@ -247,3 +247,91 @@ def get_iocs(case_id: str, size: int = Query(50, le=200)):
         return {k: [] for k in ["src_ips","dst_ips","hostnames","usernames","processes",
                                  "domains","urls","user_agents","cmdlines",
                                  "hashes_md5","hashes_sha256","reg_keys"]}
+
+
+@router.get("/whois/{ip}")
+def whois_lookup(ip: str):
+    """RDAP/WHOIS lookup for an IP address via rdap.org."""
+    import ipaddress as _ipaddr
+    import json as _json
+    import urllib.request as _req
+    import urllib.error as _err
+
+    try:
+        addr = _ipaddr.ip_address(ip)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid IP address")
+
+    if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_reserved:
+        kind = (
+            "Loopback"    if addr.is_loopback    else
+            "Link-local"  if addr.is_link_local  else
+            "Multicast"   if addr.is_multicast   else
+            "Reserved"    if addr.is_reserved    else
+            "Private"
+        )
+        return {
+            "ip": ip,
+            "org": f"{kind} / RFC-reserved",
+            "country": "—",
+            "cidr": "—",
+            "handle": "—",
+            "description": "Private, loopback, link-local, or reserved address space.",
+        }
+
+    url = f"https://rdap.org/ip/{ip}"
+    try:
+        request = _req.Request(url, headers={"Accept": "application/rdap+json, application/json"})
+        with _req.urlopen(request, timeout=8) as resp:
+            data = _json.loads(resp.read())
+    except _err.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"RDAP lookup failed: HTTP {exc.code}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"RDAP lookup: {exc}")
+
+    # CIDR from start/end address range
+    cidr = ""
+    start_addr = data.get("startAddress", "")
+    end_addr   = data.get("endAddress",   "")
+    if start_addr and end_addr:
+        try:
+            nets = list(_ipaddr.summarize_address_range(
+                _ipaddr.ip_address(start_addr),
+                _ipaddr.ip_address(end_addr),
+            ))
+            cidr = ", ".join(str(n) for n in nets[:4])
+        except Exception:
+            cidr = f"{start_addr} – {end_addr}"
+
+    # Org name from registrant/administrative vCard
+    org = data.get("name", "")
+    for entity in data.get("entities", []):
+        roles = entity.get("roles", [])
+        if not any(r in roles for r in ("registrant", "administrative")):
+            continue
+        vcard = entity.get("vcardArray", [])
+        if len(vcard) > 1:
+            for prop in vcard[1]:
+                if isinstance(prop, list) and prop and prop[0] == "fn":
+                    fn = prop[3] if len(prop) > 3 else ""
+                    if fn:
+                        org = fn
+                        break
+
+    # First remark description
+    description = ""
+    for remark in data.get("remarks", []):
+        if isinstance(remark, dict):
+            desc_list = remark.get("description", [])
+            if isinstance(desc_list, list) and desc_list:
+                description = desc_list[0]
+                break
+
+    return {
+        "ip":          ip,
+        "org":         org,
+        "country":     data.get("country", "—"),
+        "cidr":        cidr or data.get("handle", "—"),
+        "handle":      data.get("handle", "—"),
+        "description": description,
+    }

@@ -1,24 +1,81 @@
 import { useState, useEffect } from 'react'
-import { Loader2, Search, Copy, ChevronDown, ChevronRight } from 'lucide-react'
+import { Loader2, Search, Copy, ChevronDown, ChevronRight, Download, Globe, X } from 'lucide-react'
 import { api } from '../api/client'
 
 const CATEGORIES = [
-  { key: 'src_ips',       label: 'Source IPs',      searchField: 'network.src_ip',      color: 'text-red-600'    },
-  { key: 'dst_ips',       label: 'Dest IPs',         searchField: 'network.dst_ip',      color: 'text-orange-600' },
-  { key: 'hostnames',     label: 'Hostnames',        searchField: 'host.hostname',       color: 'text-sky-600'    },
-  { key: 'usernames',     label: 'Users',            searchField: 'user.name',           color: 'text-violet-600' },
-  { key: 'processes',     label: 'Processes',        searchField: 'process.name',        color: 'text-emerald-600'},
-  { key: 'domains',       label: 'Domains',          searchField: 'network.dst_domain',  color: 'text-teal-600'   },
-  { key: 'urls',          label: 'URLs / Paths',     searchField: 'http.request_path',   color: 'text-blue-600'   },
-  { key: 'cmdlines',      label: 'Command Lines',    searchField: 'process.cmdline',     color: 'text-amber-600'  },
-  { key: 'hashes_md5',    label: 'MD5 Hashes',       searchField: 'process.hash_md5',    color: 'text-pink-600'   },
-  { key: 'hashes_sha256', label: 'SHA256 Hashes',    searchField: 'process.hash_sha256', color: 'text-pink-700'   },
-  { key: 'reg_keys',      label: 'Registry Keys',    searchField: 'registry.key',        color: 'text-indigo-600' },
-  { key: 'user_agents',   label: 'User Agents',      searchField: 'http.user_agent',     color: 'text-gray-600'   },
+  { key: 'src_ips',       label: 'Source IPs',      searchField: 'network.src_ip',      color: 'text-red-600',    isIp: true  },
+  { key: 'dst_ips',       label: 'Dest IPs',         searchField: 'network.dst_ip',      color: 'text-orange-600', isIp: true  },
+  { key: 'hostnames',     label: 'Hostnames',        searchField: 'host.hostname',       color: 'text-sky-600',    isIp: false },
+  { key: 'usernames',     label: 'Users',            searchField: 'user.name',           color: 'text-violet-600', isIp: false },
+  { key: 'processes',     label: 'Processes',        searchField: 'process.name',        color: 'text-emerald-600',isIp: false },
+  { key: 'domains',       label: 'Domains',          searchField: 'network.dst_domain',  color: 'text-teal-600',   isIp: false },
+  { key: 'urls',          label: 'URLs / Paths',     searchField: 'http.request_path',   color: 'text-blue-600',   isIp: false },
+  { key: 'cmdlines',      label: 'Command Lines',    searchField: 'process.cmdline',     color: 'text-amber-600',  isIp: false },
+  { key: 'hashes_md5',    label: 'MD5 Hashes',       searchField: 'process.hash_md5',    color: 'text-pink-600',   isIp: false },
+  { key: 'hashes_sha256', label: 'SHA256 Hashes',    searchField: 'process.hash_sha256', color: 'text-pink-700',   isIp: false },
+  { key: 'reg_keys',      label: 'Registry Keys',    searchField: 'registry.key',        color: 'text-indigo-600', isIp: false },
+  { key: 'user_agents',   label: 'User Agents',      searchField: 'http.user_agent',     color: 'text-gray-600',   isIp: false },
 ]
 
+// ── WHOIS popover ─────────────────────────────────────────────────────────────
+function WhoisPopover({ ip, onClose }) {
+  const [data, setData]     = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError]   = useState('')
+
+  useEffect(() => {
+    setLoading(true)
+    setError('')
+    api.search.whois(ip)
+      .then(setData)
+      .catch(err => setError(err.message || 'Lookup failed'))
+      .finally(() => setLoading(false))
+  }, [ip])
+
+  return (
+    <div className="mt-1 mx-1 mb-1 rounded-lg border border-gray-200 bg-white shadow-lg p-3 text-xs">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-1.5">
+          <Globe size={11} className="text-sky-500" />
+          <span className="font-semibold text-gray-700 font-mono">{ip}</span>
+        </div>
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-0.5 rounded hover:bg-gray-100">
+          <X size={10} />
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="flex items-center gap-1.5 text-gray-400 py-1">
+          <Loader2 size={11} className="animate-spin" />
+          <span className="text-[11px]">Looking up…</span>
+        </div>
+      ) : error ? (
+        <p className="text-red-500 text-[11px]">{error}</p>
+      ) : data ? (
+        <div className="space-y-1">
+          {[
+            { label: 'Org',      value: data.org         },
+            { label: 'Country',  value: data.country     },
+            { label: 'CIDR',     value: data.cidr        },
+            { label: 'Handle',   value: data.handle      },
+            { label: 'Notes',    value: data.description },
+          ].filter(r => r.value && r.value !== '—').map(row => (
+            <div key={row.label} className="flex items-baseline gap-2">
+              <span className="text-[10px] text-gray-400 w-12 flex-shrink-0">{row.label}</span>
+              <span className="font-mono text-[11px] text-gray-800 break-all">{row.value}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+// ── Category accordion ────────────────────────────────────────────────────────
 function IocCategory({ cat, items, onSearch }) {
-  const [open, setOpen] = useState(items.length > 0 && items.length <= 10)
+  const [open, setOpen]           = useState(items.length > 0 && items.length <= 10)
+  const [whoisIp, setWhoisIp]     = useState(null)
+
   if (!items.length) return null
 
   return (
@@ -33,32 +90,47 @@ function IocCategory({ cat, items, onSearch }) {
           {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
         </div>
       </button>
+
       {open && (
-        <div className="divide-y divide-gray-50 max-h-64 overflow-y-auto">
+        <div className="divide-y divide-gray-50 max-h-72 overflow-y-auto">
           {items.map((item, i) => (
-            <div key={i} className="flex items-center gap-2 px-3 py-1.5 group hover:bg-blue-50 transition-colors">
-              <span className="flex-1 text-[11px] font-mono text-gray-800 truncate" title={item.value}>
-                {item.value}
-              </span>
-              <span className="text-[9px] text-gray-400 flex-shrink-0 tabular-nums">
-                ×{item.count.toLocaleString()}
-              </span>
-              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
-                <button
-                  onClick={() => navigator.clipboard.writeText(item.value)}
-                  className="p-0.5 rounded hover:bg-gray-200 text-gray-400 hover:text-gray-600 transition-colors"
-                  title="Copy"
-                >
-                  <Copy size={9} />
-                </button>
-                <button
-                  onClick={() => onSearch(`${cat.searchField}:"${item.value}"`)}
-                  className="p-0.5 rounded hover:bg-blue-100 text-gray-400 hover:text-blue-600 transition-colors"
-                  title="Search this value in timeline"
-                >
-                  <Search size={9} />
-                </button>
+            <div key={i}>
+              <div className="flex items-center gap-2 px-3 py-1.5 group hover:bg-blue-50 transition-colors">
+                <span className="flex-1 text-[11px] font-mono text-gray-800 truncate" title={item.value}>
+                  {item.value}
+                </span>
+                <span className="text-[9px] text-gray-400 flex-shrink-0 tabular-nums">
+                  ×{item.count.toLocaleString()}
+                </span>
+                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+                  <button
+                    onClick={() => navigator.clipboard.writeText(item.value)}
+                    className="p-0.5 rounded hover:bg-gray-200 text-gray-400 hover:text-gray-600 transition-colors"
+                    title="Copy"
+                  >
+                    <Copy size={9} />
+                  </button>
+                  {cat.isIp && (
+                    <button
+                      onClick={() => setWhoisIp(whoisIp === item.value ? null : item.value)}
+                      className={`p-0.5 rounded transition-colors ${whoisIp === item.value ? 'bg-sky-100 text-sky-600' : 'hover:bg-sky-100 text-gray-400 hover:text-sky-600'}`}
+                      title="WHOIS / RDAP lookup"
+                    >
+                      <Globe size={9} />
+                    </button>
+                  )}
+                  <button
+                    onClick={() => onSearch(`${cat.searchField}:"${item.value}"`)}
+                    className="p-0.5 rounded hover:bg-blue-100 text-gray-400 hover:text-blue-600 transition-colors"
+                    title="Search this value in timeline"
+                  >
+                    <Search size={9} />
+                  </button>
+                </div>
               </div>
+              {whoisIp === item.value && (
+                <WhoisPopover ip={item.value} onClose={() => setWhoisIp(null)} />
+              )}
             </div>
           ))}
         </div>
@@ -67,10 +139,42 @@ function IocCategory({ cat, items, onSearch }) {
   )
 }
 
+// ── Export helpers ────────────────────────────────────────────────────────────
+function exportCsv(iocs) {
+  const rows = ['Type,Value,Count']
+  CATEGORIES.forEach(cat => {
+    ;(iocs[cat.key] || []).forEach(item => {
+      rows.push(`${cat.label},${JSON.stringify(item.value)},${item.count}`)
+    })
+  })
+  _download(rows.join('\n'), 'text/csv', `iocs-${Date.now()}.csv`)
+}
+
+function exportJson(iocs) {
+  const out = {}
+  CATEGORIES.forEach(cat => {
+    const items = iocs[cat.key] || []
+    if (items.length) out[cat.label] = items
+  })
+  _download(JSON.stringify(out, null, 2), 'application/json', `iocs-${Date.now()}.json`)
+}
+
+function _download(content, mime, filename) {
+  const blob = new Blob([content], { type: mime })
+  const url  = URL.createObjectURL(blob)
+  const a    = document.createElement('a')
+  a.href     = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+// ── Main panel ────────────────────────────────────────────────────────────────
 export default function IocPanel({ caseId, onSearch }) {
   const [iocs, setIocs]       = useState(null)
   const [loading, setLoading] = useState(true)
   const [filter, setFilter]   = useState('')
+  const [showExport, setShowExport] = useState(false)
 
   useEffect(() => {
     setLoading(true)
@@ -102,6 +206,39 @@ export default function IocPanel({ caseId, onSearch }) {
             {loading ? 'Loading…' : `${totalIocs} unique values across ${filteredCats.length} categories`}
           </p>
         </div>
+
+        {/* Export dropdown */}
+        {!loading && totalIocs > 0 && (
+          <div className="relative">
+            <button
+              onClick={() => setShowExport(v => !v)}
+              className={`btn-ghost text-xs flex items-center gap-1 ${showExport ? 'text-brand-accent' : 'text-gray-500'}`}
+              title="Export IOCs"
+            >
+              <Download size={12} />
+              Export
+            </button>
+            {showExport && (
+              <div
+                className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 w-36 py-1"
+                onMouseLeave={() => setShowExport(false)}
+              >
+                <button
+                  onClick={() => { exportCsv(iocs); setShowExport(false) }}
+                  className="w-full text-left px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50 transition-colors"
+                >
+                  Export as CSV
+                </button>
+                <button
+                  onClick={() => { exportJson(iocs); setShowExport(false) }}
+                  className="w-full text-left px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50 transition-colors"
+                >
+                  Export as JSON
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Search filter */}

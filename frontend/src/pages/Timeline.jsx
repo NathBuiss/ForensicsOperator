@@ -59,7 +59,28 @@ const ALL_COLUMNS = [
 ]
 
 const DEFAULT_COLUMNS = ALL_COLUMNS.filter(c => c.defaultOn).map(c => c.id)
-const LS_KEY = 'timeline_visible_cols'
+const LS_KEY       = 'timeline_visible_cols'
+const LS_WIDTHS_KEY = 'timeline_col_widths'
+
+// Default pixel widths per column
+const DEFAULT_COL_WIDTHS = {
+  timestamp: 160, type: 96,  level: 80,  event_id: 80, host: 112, user: 96,
+  process: 112, action: 80, protocol: 72, src_ip: 128, src_port: 60,
+  dst_ip: 128, dst_port: 60, run_count: 56, pid: 60, http_method: 72,
+  http_status: 60, http_path: 192, user_agent: 192, resp_size: 64,
+  mitre: 144, channel: 112, rule: 144, message: 320, tags: 128,
+}
+
+function loadSavedWidths() {
+  try {
+    const raw = localStorage.getItem(LS_WIDTHS_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object') return parsed
+    }
+  } catch {}
+  return {}
+}
 
 function loadSavedColumns() {
   try {
@@ -206,10 +227,52 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
 
   const [sortField, setSortField]           = useState('timestamp')
   const [sortOrder, setSortOrder]           = useState('desc')
+  const [colWidths, setColWidths]           = useState(loadSavedWidths)
 
   const loaderRef   = useRef(null)
   const searchRef   = useRef(null)
   const rowRefs     = useRef({})
+  const resizeRef   = useRef(null)  // { colId, startX, startWidth, thEl }
+
+  function getColWidth(colId) {
+    return colWidths[colId] ?? DEFAULT_COL_WIDTHS[colId]
+  }
+
+  function onResizeStart(e, colId, thEl) {
+    e.preventDefault()
+    e.stopPropagation()
+    const startWidth = thEl.getBoundingClientRect().width
+    resizeRef.current = { colId, startX: e.clientX, startWidth, thEl }
+
+    function onMouseMove(ev) {
+      if (!resizeRef.current) return
+      const { startX, startWidth: sw, thEl: el } = resizeRef.current
+      const w = Math.max(48, sw + ev.clientX - startX)
+      el.style.width    = `${w}px`
+      el.style.minWidth = `${w}px`
+    }
+
+    function onMouseUp(ev) {
+      if (!resizeRef.current) return
+      const { colId: cid, startX, startWidth: sw } = resizeRef.current
+      const w = Math.max(48, sw + ev.clientX - startX)
+      setColWidths(prev => {
+        const next = { ...prev, [cid]: w }
+        localStorage.setItem(LS_WIDTHS_KEY, JSON.stringify(next))
+        return next
+      })
+      resizeRef.current = null
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup',   onMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+
+    document.body.style.cursor     = 'col-resize'
+    document.body.style.userSelect = 'none'
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup',   onMouseUp)
+  }
 
   // Load saved searches on mount
   useEffect(() => {
@@ -1018,11 +1081,19 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
             </div>
           )}
 
-          <table className="w-full text-xs">
+          <table className="w-full text-xs" style={{ tableLayout: 'fixed' }}>
+            <colgroup>
+              <col style={{ width: 28 }} />{/* checkbox */}
+              <col style={{ width: 18 }} />{/* note dot */}
+              <col style={{ width: 28 }} />{/* flag */}
+              {visibleCols.map(colId => (
+                <col key={colId} style={{ width: getColWidth(colId) }} />
+              ))}
+            </colgroup>
             <thead className="sticky top-0 bg-gray-50 border-b border-gray-200 z-10">
               <tr>
                 {/* Checkbox for AI explain — always visible */}
-                <th className="px-2 py-2.5 w-6">
+                <th className="px-2 py-2.5">
                   <input
                     type="checkbox"
                     className="rounded border-gray-300 accent-brand-accent"
@@ -1035,84 +1106,84 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
                   />
                 </th>
                 {/* Note indicator — always visible */}
-                <th className="px-1 py-2.5 w-4" />
+                <th className="px-1 py-2.5" />
                 {/* Flag — always visible */}
-                <th className="px-2 py-2.5 w-6" />
+                <th className="px-2 py-2.5" />
 
                 {vis('timestamp') && (
-                  <SortableTh colId="timestamp" label="Timestamp" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-40" />
+                  <SortableTh colId="timestamp" label="Timestamp" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('timestamp')} onResizeStart={onResizeStart} />
                 )}
                 {vis('type') && (
-                  <SortableTh colId="type" label="Type" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-24" />
+                  <SortableTh colId="type" label="Type" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('type')} onResizeStart={onResizeStart} />
                 )}
                 {vis('level') && (
-                  <SortableTh colId="level" label="Level" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-20" />
+                  <SortableTh colId="level" label="Level" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('level')} onResizeStart={onResizeStart} />
                 )}
                 {vis('event_id') && (
-                  <SortableTh colId="event_id" label="Event ID" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-20" />
+                  <SortableTh colId="event_id" label="Event ID" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('event_id')} onResizeStart={onResizeStart} />
                 )}
                 {vis('host') && (
-                  <SortableTh colId="host" label="Host" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-28" />
+                  <SortableTh colId="host" label="Host" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('host')} onResizeStart={onResizeStart} />
                 )}
                 {vis('user') && (
-                  <SortableTh colId="user" label="User" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-24" />
+                  <SortableTh colId="user" label="User" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('user')} onResizeStart={onResizeStart} />
                 )}
                 {vis('process') && (
-                  <SortableTh colId="process" label="Process" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-28" />
+                  <SortableTh colId="process" label="Process" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('process')} onResizeStart={onResizeStart} />
                 )}
                 {vis('action') && (
-                  <SortableTh colId="action" label="Action" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-20" />
+                  <SortableTh colId="action" label="Action" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('action')} onResizeStart={onResizeStart} />
                 )}
                 {vis('protocol') && (
-                  <SortableTh colId="protocol" label="Proto" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-20" />
+                  <SortableTh colId="protocol" label="Proto" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('protocol')} onResizeStart={onResizeStart} />
                 )}
                 {vis('src_ip') && (
-                  <SortableTh colId="src_ip" label="Src IP" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-32" />
+                  <SortableTh colId="src_ip" label="Src IP" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('src_ip')} onResizeStart={onResizeStart} />
                 )}
                 {vis('src_port') && (
-                  <SortableTh colId="src_port" label="S.Port" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-16" />
+                  <SortableTh colId="src_port" label="S.Port" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('src_port')} onResizeStart={onResizeStart} />
                 )}
                 {vis('dst_ip') && (
-                  <SortableTh colId="dst_ip" label="Dst IP" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-32" />
+                  <SortableTh colId="dst_ip" label="Dst IP" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('dst_ip')} onResizeStart={onResizeStart} />
                 )}
                 {vis('dst_port') && (
-                  <SortableTh colId="dst_port" label="D.Port" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-16" />
+                  <SortableTh colId="dst_port" label="D.Port" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('dst_port')} onResizeStart={onResizeStart} />
                 )}
                 {vis('run_count') && (
-                  <SortableTh colId="run_count" label="Runs" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-14" />
+                  <SortableTh colId="run_count" label="Runs" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('run_count')} onResizeStart={onResizeStart} />
                 )}
                 {vis('pid') && (
-                  <SortableTh colId="pid" label="PID" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-16" />
+                  <SortableTh colId="pid" label="PID" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('pid')} onResizeStart={onResizeStart} />
                 )}
                 {vis('http_method') && (
-                  <SortableTh colId="http_method" label="Method" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-20" />
+                  <SortableTh colId="http_method" label="Method" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('http_method')} onResizeStart={onResizeStart} />
                 )}
                 {vis('http_status') && (
-                  <SortableTh colId="http_status" label="Status" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-16" />
+                  <SortableTh colId="http_status" label="Status" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('http_status')} onResizeStart={onResizeStart} />
                 )}
                 {vis('http_path') && (
-                  <SortableTh colId="http_path" label="Path" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-48" />
+                  <SortableTh colId="http_path" label="Path" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('http_path')} onResizeStart={onResizeStart} />
                 )}
                 {vis('user_agent') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-48">User Agent</th>
+                  <SortableTh colId="user_agent" label="User Agent" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('user_agent')} onResizeStart={onResizeStart} />
                 )}
                 {vis('resp_size') && (
-                  <SortableTh colId="resp_size" label="Bytes" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-16" />
+                  <SortableTh colId="resp_size" label="Bytes" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('resp_size')} onResizeStart={onResizeStart} />
                 )}
                 {vis('mitre') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-36">MITRE</th>
+                  <SortableTh colId="mitre" label="MITRE" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('mitre')} onResizeStart={onResizeStart} />
                 )}
                 {vis('channel') && (
-                  <SortableTh colId="channel" label="Channel" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-28" />
+                  <SortableTh colId="channel" label="Channel" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('channel')} onResizeStart={onResizeStart} />
                 )}
                 {vis('rule') && (
-                  <SortableTh colId="rule" label="Rule" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} className="w-36" />
+                  <SortableTh colId="rule" label="Rule" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('rule')} onResizeStart={onResizeStart} />
                 )}
                 {vis('message') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Message</th>
+                  <SortableTh colId="message" label="Message" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('message')} onResizeStart={onResizeStart} />
                 )}
                 {vis('tags') && (
-                  <th className="text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider w-32">Tags</th>
+                  <SortableTh colId="tags" label="Tags" sortField={sortField} sortOrder={sortOrder} onSort={toggleSort} width={getColWidth('tags')} onResizeStart={onResizeStart} />
                 )}
               </tr>
             </thead>
@@ -1258,20 +1329,31 @@ export default function Timeline({ caseId, artifactTypes, initialQuery = '' }) {
   )
 }
 
-/* ── Sortable table header ── */
-function SortableTh({ colId, label, sortField, sortOrder, onSort, className = '' }) {
+/* ── Sortable + resizable table header ── */
+function SortableTh({ colId, label, sortField, sortOrder, onSort, width, onResizeStart }) {
+  const thRef  = useRef(null)
   const active = sortField === colId
   return (
     <th
-      className={`text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider cursor-pointer select-none hover:text-brand-accent transition-colors ${className}`}
+      ref={thRef}
+      style={{ width, minWidth: 48, overflow: 'hidden' }}
+      className="relative text-left px-3 py-2.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider cursor-pointer select-none hover:text-brand-accent transition-colors group"
       onClick={() => onSort(colId)}
     >
-      <span className="flex items-center gap-0.5">
-        {label}
+      <span className="flex items-center gap-0.5 overflow-hidden">
+        <span className="truncate">{label}</span>
         {active
-          ? <span className="text-brand-accent">{sortOrder === 'asc' ? ' ↑' : ' ↓'}</span>
-          : <span className="text-gray-300 opacity-0 group-hover:opacity-100"> ↕</span>}
+          ? <span className="text-brand-accent flex-shrink-0">{sortOrder === 'asc' ? ' ↑' : ' ↓'}</span>
+          : <span className="text-gray-300 flex-shrink-0"> ↕</span>}
       </span>
+      {/* Drag-to-resize handle */}
+      <div
+        className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize z-10 flex items-center justify-center group/handle"
+        onMouseDown={e => onResizeStart(e, colId, thRef.current)}
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="w-px h-4 bg-gray-300 opacity-0 group-hover:opacity-100 group/handle-hover:opacity-100 hover:!opacity-100 hover:bg-brand-accent transition-all" />
+      </div>
     </th>
   )
 }

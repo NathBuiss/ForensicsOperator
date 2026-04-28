@@ -82,6 +82,7 @@ export const api = {
       return request('GET', `/cases/${caseId}/search/facets${q ? '?' + q : ''}`)
     },
     iocs:      (caseId)              => request('GET', `/cases/${caseId}/iocs`),
+    whois:     (ip)                 => request('GET', `/whois/${encodeURIComponent(ip)}`),
     getEvent:  (caseId, foId)        => request('GET', `/cases/${caseId}/events/${foId}`),
     tagEvent:  (caseId, foId, tags)  => request('PUT', `/cases/${caseId}/events/${foId}/tag`,  { tags }),
     flagEvent: (caseId, foId)        => request('PUT', `/cases/${caseId}/events/${foId}/flag`),

@@ -159,7 +159,7 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
               </span>
             )}
           </div>
-          <p className="text-xs text-brand-text break-words line-clamp-3">{event.message}</p>
+          <p className="text-xs text-brand-text break-words line-clamp-2 text-gray-500 italic">{event.message}</p>
         </div>
         <button onClick={onClose} className="btn-ghost p-1 flex-shrink-0">
           <X size={14} />
@@ -319,6 +319,16 @@ export default function EventDetail({ event: initialEvent, caseId, onClose, onFi
             {saving ? 'Saving…' : noteSaved ? 'Saved' : 'Save Note'}
           </button>
         </div>
+
+        {/* Full message */}
+        {event.message && (
+          <div>
+            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Message</p>
+            <pre className="bg-gray-50 border border-gray-200 rounded-lg p-2.5 text-[11px] font-mono text-gray-800 whitespace-pre-wrap break-words leading-relaxed">
+              {event.message}
+            </pre>
+          </div>
+        )}
 
         {/* Base event fields */}
         <FieldGroup
