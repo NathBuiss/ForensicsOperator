@@ -751,7 +751,7 @@ _SEARCH_ASSIST_PROMPT = """You are an expert Elasticsearch query builder for For
 ### Core fields (present on every event)
 - timestamp          ISO 8601 event time
 - message            Full-text event description — PRIMARY search target for bare terms
-- artifact_type      Ingester: evtx, prefetch, mft, registry, lnk, syslog, hayabusa, browser, plaso, amcache, wlan-profile, windows-task, wer, etw, suricata, zeek, plist, csv, strings, generic
+- artifact_type      Ingester: evtx, prefetch, mft, registry, lnk, syslog, hayabusa, browser, plaso, amcache, wlan-profile, windows-task, wer, etw, suricata, zeek, plist, csv, strings, generic, k8s_event, k8s_pod, k8s_node, k8s_service, k8s_deployment, k8s_namespace, k8s_daemonset, k8s_replicaset, k8s_ingress, k8s_configmap, k8s_secret, k8s_job, k8s_cronjob, k8s_pv, k8s_pvc, k8s_container, k8s_image, k8s_container_stats, docker_container, docker_event, iptables_rule, audit_event
 - fo_id              Unique event ID
 - ingest_job_id      Job that produced the event
 - ingested_at        When the file was ingested (not the event time)
@@ -807,6 +807,63 @@ _SEARCH_ASSIST_PROMPT = """You are an expert Elasticsearch query builder for For
 - artifact_type:zeek — Zeek network log events (conn.log, dns.log, http.log, ssl.log)
 - artifact_type:plist — macOS preference/property list values
 - artifact_type:browser — Browser history from Chrome, Edge, Firefox, Brave, Opera; also OneDrive/cloud sync SQLite metadata (browser.url, browser.title, browser.visit_count, browser.profile)
+
+### Kubernetes / container artifact types
+- artifact_type:k8s_event — k3s, kubelet, kube-apiserver, etcd, CoreDNS, Traefik and other control-plane logs (klog v1/v2 and logfmt)
+  - kubernetes.level          log severity: info | warning | error | fatal
+  - kubernetes.pod            pod name (without namespace)
+  - kubernetes.namespace      Kubernetes namespace
+  - kubernetes.node           node name
+  - kubernetes.container      container name or ID
+  - kubernetes.image          container image
+  - kubernetes.component      control-plane component (kubelet, kube-proxy, …)
+  - kubernetes.reason         event reason (BackOff, FailedMount, OOMKilled, …)
+  - kubernetes.object_kind    resource kind (Pod, Deployment, Service, …)
+  - kubernetes.object_name    resource name
+  - kubernetes.error          full error string (long; use wildcard e.g. kubernetes.error:*CrashLoopBackOff*)
+  - kubernetes.src_file       source file:line that emitted the log (e.g. pod_workers.go:1324)
+  - process.pid               PID of k3s/kubelet process
+
+- artifact_type:k8s_pod / k8s_node / k8s_service / k8s_deployment / k8s_namespace /
+  k8s_event_resource / k8s_daemonset / k8s_replicaset / k8s_ingress / k8s_configmap /
+  k8s_secret / k8s_job / k8s_cronjob / k8s_pv / k8s_pvc
+  — kubectl tabular/JSON snapshots. Common fields: kubernetes.namespace, kubernetes.name, kubernetes.status, kubernetes.node, kubernetes.age
+
+- artifact_type:docker_container — docker ps snapshot (one event per container)
+  - docker.container_id, docker.container_name, docker.image, docker.status, docker.ports, docker.created
+
+- artifact_type:docker_event — dockerd / containerd daemon log (logfmt)
+  - docker.container_id, docker.container_name, docker.image, docker.level, docker.msg
+
+- artifact_type:k8s_container — crictl ps container listing
+- artifact_type:k8s_image — crictl images listing
+- artifact_type:k8s_container_stats — crictl stats
+
+- artifact_type:iptables_rule — iptables-save / iptables -L -v -n output
+  - iptables.table            filter | nat | mangle | raw
+  - iptables.chain            INPUT | OUTPUT | FORWARD | PREROUTING | POSTROUTING | custom chain
+  - iptables.target           ACCEPT | DROP | REJECT | MASQUERADE | DNAT | SNAT | RETURN | LOG
+  - network.action            allow | deny | nat
+  - network.src_ip, network.dst_ip, network.protocol
+  - network.dst_port, network.src_port
+  - iptables.in_iface, iptables.out_iface
+  - iptables.ctstate          connection tracking state (ESTABLISHED,RELATED, NEW, …)
+  - iptables.comment          rule comment string
+  - iptables.to_destination   DNAT/SNAT translated address
+
+- artifact_type:audit_event — Linux auditd (/var/log/audit/audit.log)
+  - audit.type                SYSCALL | EXECVE | USER_LOGIN | USER_AUTH | AVC | SECCOMP | PATH | PROCTITLE
+  - audit.syscall             syscall name (execve, open, socket, connect, bind, …)
+  - audit.syscall_num         raw syscall number
+  - audit.serial              serial number linking related audit records
+  - audit.auid                audit UID (real user before su/sudo — 4294967295 = unset)
+  - audit.uid, audit.euid, audit.gid, audit.egid
+  - audit.exe                 full path of executing binary
+  - audit.comm                short command name
+  - audit.key                 audit watch key (-k in auditd rules)
+  - audit.result              success | failed
+  - audit.apparmor_op         AppArmor operation (for AVC records)
+  - audit.selinux_scontext, audit.selinux_tcontext  (SELinux AVC source/target context)
 
 ## How queries work
 The search uses **full Lucene query_string syntax** against ALL indexed fields.
@@ -919,6 +976,44 @@ There is NO separate regex mode — use Lucene inline regex syntax: `/pattern/`
 - macOS plists: artifact_type:plist
 - Browser / cloud sync history: artifact_type:browser AND browser.url:*
 - Amcache execution: artifact_type:amcache
+
+### Kubernetes / container investigation patterns
+- All k8s control-plane events: artifact_type:k8s_event
+- Error-level k8s events only: artifact_type:k8s_event AND kubernetes.level:error
+- Fatal k8s events: artifact_type:k8s_event AND kubernetes.level:fatal
+- CrashLoopBackOff pods: artifact_type:k8s_event AND kubernetes.error:*CrashLoopBackOff*
+- Pod events in a namespace: artifact_type:k8s_event AND kubernetes.namespace:forensics-operator-dev
+- Events for a specific pod: artifact_type:k8s_event AND kubernetes.pod:api-*
+- Container exit / restart: artifact_type:k8s_event AND message:*StartContainer*
+- OOMKilled containers: artifact_type:k8s_event AND (kubernetes.reason:OOMKilled OR kubernetes.error:*OOMKilled*)
+- Image pull failures: artifact_type:k8s_event AND (message:*Failed to pull* OR message:*ImagePullBackOff*)
+- Kubelet events: artifact_type:k8s_event AND kubernetes.component:kubelet
+- etcd events: artifact_type:k8s_event AND kubernetes.src_file:etcd*
+- All pod snapshots: artifact_type:k8s_pod
+- Pods not running: artifact_type:k8s_pod AND NOT kubernetes.status:Running
+- Running containers (crictl): artifact_type:k8s_container AND kubernetes.status:Running
+- Docker daemon errors: artifact_type:docker_event AND docker.level:error
+- All containers snapshot: artifact_type:docker_container
+- Specific container: artifact_type:docker_container AND docker.container_name:*api*
+
+### Firewall & network policy
+- All iptables rules: artifact_type:iptables_rule
+- Dropped traffic rules: artifact_type:iptables_rule AND iptables.target:DROP
+- NAT rules: artifact_type:iptables_rule AND iptables.table:nat
+- Rules allowing port 22/443: artifact_type:iptables_rule AND network.dst_port:22
+- FORWARD chain rules: artifact_type:iptables_rule AND iptables.chain:FORWARD
+- DNAT / port-forwarding: artifact_type:iptables_rule AND iptables.target:DNAT
+
+### Linux auditd
+- All audit events: artifact_type:audit_event
+- execve calls (process execution): artifact_type:audit_event AND audit.syscall:execve
+- Failed syscalls: artifact_type:audit_event AND audit.result:failed
+- Login events: artifact_type:audit_event AND audit.type:(USER_LOGIN OR USER_AUTH)
+- SELinux / AppArmor denials: artifact_type:audit_event AND audit.type:AVC
+- Seccomp violations: artifact_type:audit_event AND audit.type:SECCOMP
+- Specific binary execution: artifact_type:audit_event AND audit.exe:*/python3
+- Events by audit key: artifact_type:audit_event AND audit.key:privileged-commands
+- Root escalation (auid≠0 → uid=0): artifact_type:audit_event AND audit.uid:0 AND NOT audit.auid:0
 
 ## UI features the analyst has access to
 - **Search bar**: Full Lucene query_string over ALL indexed fields. Inline /regex/ works natively.

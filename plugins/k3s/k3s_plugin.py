@@ -46,16 +46,22 @@ _SYSLOG_PREFIX_RE = re.compile(
 # k3s/kubelet logfmt marker
 _K3S_LOGFMT_RE = re.compile(r'time\s*=\s*"[^"]+"\s+level\s*=')
 
-# klog v1 text format: I0428 10:57:36.123456   1234 file.go:42] message
+# klog v1/v2 format: E0410 02:56:03.190991  528708 pod_workers.go:1324] body
 _KLOG_RE = re.compile(
-    r'^([IWEF])(\d{4})\s+'         # level + date (MMDD)
-    r'(\d{2}:\d{2}:\d{2}\.\d+)\s+' # time.microseconds
-    r'(\d+)\s+'                      # PID
-    r'([\w./-]+):(\d+)\]\s+'        # file:line
-    r'(.*)'                          # message
+    r'^([IWEF])(\d{4})\s+'          # level char + MMDD date
+    r'(\d{2}:\d{2}:\d{2}\.\d+)\s+'  # HH:MM:SS.microseconds
+    r'(\d+)\s+'                       # PID (may have extra leading spaces)
+    r'([\w./_-]+):(\d+)\]\s*'        # file.go:line]
+    r'(.*)'                           # body (may be empty)
 )
 
 _KLOG_LEVELS = {'I': 'info', 'W': 'warning', 'E': 'error', 'F': 'fatal'}
+
+# klog v2 structured body: "quoted message" key="value" key2="value2"
+# The leading quoted string is the human message; rest are typed key=value pairs.
+_KLOG_MSG_RE = re.compile(r'^"((?:[^"\\]|\\.)*)"')
+# key=value where value may contain escaped quotes
+_KLOG_KV_RE  = re.compile(r'(\w+)="((?:[^"\\]|\\.)*)"')
 
 # ISO timestamp normalisation
 _TS_RE = re.compile(
@@ -143,6 +149,45 @@ def _mtime_or_now(path: Path) -> str:
         ).strftime('%Y-%m-%dT%H:%M:%SZ')
     except OSError:
         return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _parse_klog_body(body: str) -> tuple[str, dict[str, str]]:
+    """
+    Parse a klog v2 message body.
+
+    Two patterns:
+      v2 structured:  "Error syncing pod" err="..." pod="ns/name"
+      v1 plain text:  Error syncing pod, skipping
+
+    Returns (human_message, {raw_key: raw_value}).
+    """
+    body = body.strip()
+    if not body:
+        return '', {}
+
+    m = _KLOG_MSG_RE.match(body)
+    if m:
+        # v2: extract quoted message, then parse remaining key=value pairs
+        msg      = m.group(1).replace('\\"', '"')
+        rest     = body[m.end():]
+        raw_kv   = {k: v.replace('\\"', '"') for k, v in _KLOG_KV_RE.findall(rest)}
+    else:
+        # v1: plain text body — try to parse trailing key=value pairs anyway
+        raw_kv   = {k: v.replace('\\"', '"') for k, v in _KLOG_KV_RE.findall(body)}
+        # Strip extracted kv from message
+        plain_end = body.find(' ' + list(_KLOG_KV_RE.findall(body)[0])[0] + '=') \
+            if raw_kv and _KLOG_KV_RE.search(body) else -1
+        msg = body[:plain_end].strip() if plain_end > 0 else body
+
+    return msg, raw_kv
+
+
+def _split_pod_ref(ref: str) -> tuple[str, str]:
+    """Split 'namespace/podname' → (namespace, pod). Pass-through if no slash."""
+    if '/' in ref:
+        ns, pod = ref.split('/', 1)
+        return ns.strip(), pod.strip()
+    return '', ref.strip()
 
 
 def _extract_k8s_fields(fields: dict[str, str]) -> dict[str, str]:
@@ -328,12 +373,15 @@ class K3sPlugin(BasePlugin):
 
                 yield event
 
-    # ── klog v1 text format ───────────────────────────────────────────────────
+    # ── klog v1/v2 text format ────────────────────────────────────────────────
 
     def _parse_klog(self, path: Path) -> Generator[dict[str, Any], None, None]:
         """
-        klog v1: I0428 10:57:36.123456   1234 reconciler.go:196] message here
+        klog v1/v2:
+          E0410 02:56:03.190991  528708 pod_workers.go:1324] "msg" key="val" …
+
         Date is MMDD without year — infer year from file mtime.
+        Structured body (klog v2) is parsed for pod/namespace/container/err fields.
         """
         try:
             fh = open(path, 'r', errors='replace')
@@ -354,26 +402,77 @@ class K3sPlugin(BasePlugin):
                 if not m:
                     continue
 
-                level_char, mmdd, time_str, pid, src_file, src_line, msg = m.groups()
+                level_char, mmdd, time_str, pid, src_file, src_line, body = m.groups()
                 level = _KLOG_LEVELS.get(level_char, 'info')
 
-                month = mmdd[:2]
-                day   = mmdd[2:]
-                time_part = time_str.split('.')[0]  # drop microseconds
-                ts = f"{mtime_year}-{month}-{day}T{time_part}Z"
+                # Build ISO timestamp (MMDD + mtime year, truncate microseconds)
+                month     = mmdd[:2]
+                day       = mmdd[2:]
+                time_part = time_str.split('.')[0]
+                ts        = f"{mtime_year}-{month}-{day}T{time_part}Z"
+
+                # Parse structured body
+                msg, raw_kv = _parse_klog_body(body)
+
+                # ── Map raw keys → canonical kubernetes fields ────────────────
+                k8s: dict[str, Any] = {'level': level, 'src_file': src_file, 'src_line': src_line}
+                error_val = ''
+
+                for key, val in raw_kv.items():
+                    low = key.lower()
+                    if low in ('pod', 'podname', 'pod_name'):
+                        ns, pod_name = _split_pod_ref(val)
+                        k8s['pod'] = pod_name
+                        if ns:
+                            k8s.setdefault('namespace', ns)
+                    elif low in ('namespace', 'ns'):
+                        k8s['namespace'] = val
+                    elif low in ('node', 'nodename', 'node_name'):
+                        k8s['node'] = val
+                    elif low in ('container', 'containername', 'containerid'):
+                        k8s['container'] = val
+                    elif low in ('image', 'imagename'):
+                        k8s['image'] = val
+                    elif low in ('component', 'comp'):
+                        k8s['component'] = val
+                    elif low in ('reason',):
+                        k8s['reason'] = val
+                    elif low in ('err', 'error'):
+                        error_val = val
+                    elif low in ('name', 'objectname'):
+                        k8s['object_name'] = val
+                    elif low in ('kind',):
+                        k8s['object_kind'] = val
+
+                # ── Build human-readable display ──────────────────────────────
+                level_prefix = {'error': '✖ ', 'warning': '⚠ ', 'fatal': '☠ '}.get(level, '')
+                display = f"{level_prefix}{msg}"
+                if k8s.get('namespace') and k8s.get('pod'):
+                    display = f"{level_prefix}[{k8s['namespace']}/{k8s['pod']}] {msg}"
+                elif k8s.get('pod'):
+                    display = f"{level_prefix}[{k8s['pod']}] {msg}"
+                elif k8s.get('node'):
+                    display = f"{level_prefix}[node:{k8s['node']}] {msg}"
+                elif k8s.get('component'):
+                    display = f"{level_prefix}[{k8s['component']}] {msg}"
+
+                if error_val:
+                    # Truncate long error strings for the display message
+                    short_err = error_val[:120] + ('…' if len(error_val) > 120 else '')
+                    display += f" — {short_err}"
 
                 event: dict[str, Any] = {
                     'timestamp':      ts,
                     'timestamp_desc': 'K8s Log',
-                    'message':        msg.strip(),
+                    'message':        display,
                     'artifact_type':  'k8s_event',
-                    'kubernetes': {
-                        'level':    level,
-                        'src_file': src_file,
-                        'src_line': src_line,
-                    },
-                    'process': {'pid': int(pid)},
+                    'kubernetes':     k8s,
+                    'process':        {'pid': int(pid)},
                 }
+
+                if error_val:
+                    event['error'] = {'message': error_val}
+
                 yield event
 
     def get_stats(self) -> dict[str, Any]:
